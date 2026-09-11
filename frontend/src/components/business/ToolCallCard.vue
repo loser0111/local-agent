@@ -1,0 +1,215 @@
+<script setup>
+import { ref, computed } from 'vue'
+
+const props = defineProps({
+  toolCall: { type: Object, required: true },
+})
+
+const expanded = ref(false)
+
+const statusText = computed(() => {
+  switch (props.toolCall.status) {
+    case 'running':
+      return '运行中'
+    case 'success':
+      return '完成'
+    case 'error':
+      return '失败'
+    default:
+      return ''
+  }
+})
+
+const statusColor = computed(() => {
+  switch (props.toolCall.status) {
+    case 'running':
+      return '#ffb86c'
+    case 'success':
+      return '#50fa7b'
+    case 'error':
+      return '#ff5555'
+    default:
+      return '#6272a4'
+  }
+})
+
+function toggleExpand() {
+  expanded.value = !expanded.value
+}
+
+// 工具名称友好化
+const friendlyName = computed(() => {
+  const map = {
+    exec_shell: '终端命令',
+    tool_router: '工具路由',
+  }
+  return map[props.toolCall.name] || props.toolCall.name
+})
+
+// 标题栏展示的关键参数
+const argSummary = computed(() => {
+  const args = props.toolCall.args || {}
+  if (args.cmd) return args.cmd
+  if (args.path) return args.path
+  if (args.action === 'list') return 'list'
+  if (args.action === 'execute') return args.tool_name || 'execute'
+  return ''
+})
+</script>
+
+<template>
+  <div class="tool-call-card" :class="toolCall.status">
+    <button
+      type="button"
+      class="tool-call-header"
+      :aria-expanded="expanded"
+      @click="toggleExpand"
+    >
+      <span class="tool-icon">🔧</span>
+      <span class="tool-name">{{ friendlyName }}</span>
+      <span class="tool-args" v-if="argSummary" :title="argSummary">· {{ argSummary }}</span>
+      <span class="tool-status" :style="{ color: statusColor }">
+        <span v-if="toolCall.status === 'running'" class="mini-spinner"></span>
+        {{ statusText }}
+        <span v-if="toolCall.duration"> · {{ toolCall.duration >= 1 ? toolCall.duration.toFixed(1) : (toolCall.duration * 1000).toFixed(0) + 'ms' }}</span>
+      </span>
+      <span class="expand-icon">{{ expanded ? '▼' : '▶' }}</span>
+    </button>
+
+    <div v-if="expanded" class="tool-call-detail">
+      <div v-if="toolCall.args && Object.keys(toolCall.args).length" class="detail-section">
+        <div class="detail-label">参数</div>
+        <pre class="detail-content">{{ JSON.stringify(toolCall.args, null, 2) }}</pre>
+      </div>
+      <div v-if="toolCall.result" class="detail-section">
+        <div class="detail-label">结果</div>
+        <pre class="detail-content">{{ toolCall.result }}</pre>
+      </div>
+    </div>
+  </div>
+</template>
+
+<style scoped lang="scss">
+.tool-call-card {
+  background-color: $color-bg-secondary;
+  border: 1px solid $color-border;
+  border-radius: $radius-md;
+  overflow: hidden;
+  transition: border-color $transition-fast;
+
+  &.running {
+    border-color: rgba(245, 158, 11, 0.5);
+  }
+  &.success {
+    border-color: rgba(16, 185, 129, 0.3);
+  }
+  &.error {
+    border-color: rgba(239, 68, 68, 0.5);
+  }
+}
+
+.tool-call-header {
+  // button 样式重置
+  width: 100%;
+  border: none;
+  background: transparent;
+  font: inherit;
+  text-align: left;
+
+  display: flex;
+  align-items: center;
+  gap: $space-sm;
+  padding: $space-sm $space-md;
+  cursor: pointer;
+  font-size: $font-size-sm;
+
+  &:hover {
+    background-color: $color-bg-tertiary;
+  }
+
+  &:focus-visible {
+    outline: 2px solid rgba(189, 147, 249, 0.6);
+    outline-offset: -2px;
+  }
+}
+
+.tool-icon {
+  font-size: $font-size-sm;
+}
+
+.tool-name {
+  font-weight: $font-weight-medium;
+  color: $color-text-primary;
+}
+
+.tool-args {
+  color: $color-text-secondary;
+  font-size: $font-size-xs;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 260px;
+}
+
+.tool-status {
+  margin-left: auto;
+  font-size: $font-size-xs;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.mini-spinner {
+  width: 9px;
+  height: 9px;
+  border: 1.5px solid rgba(255, 184, 108, 0.3);
+  border-top-color: $color-warning;
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+  display: inline-block;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.expand-icon {
+  font-size: 8px;
+  color: $color-text-muted;
+}
+
+.tool-call-detail {
+  padding: $space-sm $space-md;
+  border-top: 1px solid $color-border;
+  background-color: $color-bg-primary;
+}
+
+.detail-section {
+  margin-bottom: $space-sm;
+
+  &:last-child {
+    margin-bottom: 0;
+  }
+}
+
+.detail-label {
+  font-size: $font-size-xs;
+  color: $color-text-secondary;
+  margin-bottom: $space-xs;
+}
+
+.detail-content {
+  font-family: $font-family-mono;
+  font-size: $font-size-xs;
+  color: $color-text-secondary;
+  white-space: pre-wrap;
+  word-break: break-all;
+  margin: 0;
+  max-height: 200px;
+  overflow: auto;
+}
+</style>

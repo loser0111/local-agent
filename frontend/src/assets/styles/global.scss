@@ -1,0 +1,251 @@
+@use './variables.scss' as *;
+
+// ===== Reset =====
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+}
+
+body {
+  font-family: $font-family-base;
+  font-size: $font-size-md;
+  line-height: $line-height-md;
+  color: $color-text-primary;
+  background-color: $color-bg-primary;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+a {
+  color: $color-primary;
+  text-decoration: none;
+  &:hover {
+    color: $color-primary-hover;
+  }
+}
+
+button {
+  font-family: inherit;
+  cursor: pointer;
+  border: none;
+  background: none;
+  color: inherit;
+}
+
+input,
+textarea,
+select {
+  font-family: inherit;
+  font-size: inherit;
+  color: inherit;
+  outline: none;
+}
+
+ul,
+ol {
+  list-style: none;
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: $color-border;
+  border-radius: 4px;
+  &:hover {
+    background: $color-border-light;
+  }
+}
+
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+// ===== 通用工具类 =====
+.flex {
+  display: flex;
+}
+.flex-col {
+  display: flex;
+  flex-direction: column;
+}
+.flex-1 {
+  flex: 1;
+}
+.items-center {
+  align-items: center;
+}
+.justify-center {
+  justify-content: center;
+}
+.justify-between {
+  justify-content: space-between;
+}
+.gap-sm {
+  gap: $space-sm;
+}
+.gap-md {
+  gap: $space-md;
+}
+
+.text-sm {
+  font-size: $font-size-sm;
+}
+.text-xs {
+  font-size: $font-size-xs;
+}
+.text-secondary {
+  color: $color-text-secondary;
+}
+.text-muted {
+  color: $color-text-muted;
+}
+
+// ===== 通用按钮样式 =====
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: $space-xs;
+  padding: $space-xs $space-md;
+  font-size: $font-size-sm;
+  line-height: $line-height-sm;
+  border-radius: $radius-sm;
+  transition: all $transition-fast;
+  white-space: nowrap;
+
+  &.btn-primary {
+    background-color: $color-primary;
+    color: #fff;
+    &:hover {
+      background-color: $color-primary-hover;
+    }
+    &:active {
+      background-color: $color-primary-active;
+    }
+  }
+
+  &.btn-default {
+    background-color: $color-bg-tertiary;
+    color: $color-text-primary;
+    border: 1px solid $color-border;
+    &:hover {
+      background-color: $color-border;
+    }
+  }
+
+  &.btn-ghost {
+    background-color: transparent;
+    color: $color-text-secondary;
+    &:hover {
+      background-color: $color-bg-tertiary;
+      color: $color-text-primary;
+    }
+  }
+
+  &.btn-danger {
+    background-color: $color-error;
+    color: #fff;
+    &:hover {
+      opacity: 0.9;
+    }
+  }
+
+  &:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+}
+
+// ===== 输入框通用样式 =====
+.input,
+.textarea {
+  width: 100%;
+  padding: $space-xs $space-md;
+  font-size: $font-size-sm;
+  background-color: $color-bg-secondary;
+  border: 1px solid $color-border;
+  border-radius: $radius-sm;
+  color: $color-text-primary;
+  transition: border-color $transition-fast;
+
+  &:focus {
+    border-color: $color-primary;
+    box-shadow: 0 0 0 2px rgba(124, 58, 237, 0.2);
+  }
+
+  &::placeholder {
+    color: $color-text-muted;
+  }
+}
+
+.textarea {
+  resize: none;
+  line-height: $line-height-md;
+}
+
+// ===== 状态徽章 =====
+.status-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+
+  &.active {
+    background-color: $color-info;
+    box-shadow: 0 0 6px $color-info;
+  }
+  &.completed {
+    background-color: $color-success;
+  }
+  &.waiting {
+    background-color: $color-warning;
+    animation: pulse 1.5s ease-in-out infinite;
+  }
+  &.error {
+    background-color: $color-error;
+  }
+  &.archived {
+    background-color: $color-text-muted;
+  }
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.4;
+  }
+}
+
+// ===== 拖拽调整宽度时禁用所有 transition，避免滞后感 =====
+body.is-resizing,
+body.is-resizing * {
+  transition: none !important;
+}
+
+// ===== 滚动容器 =====
+.scroll-container {
+  overflow-y: auto;
+  overflow-x: hidden;
+}
