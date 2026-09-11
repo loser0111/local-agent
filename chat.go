@@ -90,6 +90,7 @@ type ChatResult struct {
 	Reply     string     `json:"reply"`               // AI 最终回复内容
 	ToolCalls []ToolCall `json:"toolCalls,omitempty"` // 工具调用记录
 	Messages  []Message  `json:"messages,omitempty"`  // 后端持久化的所有消息（assistant+tool_calls, tool结果, 最终回复）
+	Diff      []DiffFile `json:"diff,omitempty"`      // 本轮对话产生的工作区差异
 	Error     string     `json:"error,omitempty"`     // 错误信息
 }
 
@@ -155,10 +156,12 @@ func callLLM(url, token string, req *LLMReq) (*LLMResp, error) {
 
 // ChatEvent 推送给前端的事件数据
 type ChatEvent struct {
-	Type     string    `json:"type"` // tool_call_start / tool_call_end / done / error
-	ToolCall *ToolCall `json:"toolCall,omitempty"`
-	Reply    string    `json:"reply,omitempty"`
-	Error    string    `json:"error,omitempty"`
+	Type     string     `json:"type"` // tool_call_start / tool_call_end / done / error / diff_update
+	ToolCall *ToolCall  `json:"toolCall,omitempty"`
+	Reply    string     `json:"reply,omitempty"`
+	Error    string     `json:"error,omitempty"`
+	Diff     []DiffFile `json:"diff,omitempty"` // diff_update 事件携带的差异文件
+	Turn     int        `json:"turn,omitempty"` // diff 所属轮次
 }
 
 // buildLLMMessages 从会话历史消息构造 LLM messages 数组
@@ -223,6 +226,15 @@ func (a *App) executeChat(sessionID, query string) *ChatResult {
 	modelID := model.ModelID
 	if modelID == "" {
 		modelID = model.Name
+	}
+
+	// ★ 记录本轮工作区基线（对话开始前的快照，用于轮末计算本轮 diff）
+	dir, _ := a.resolveProjectDir(sessionID)
+	isRepo := dir != "" && a.diffService.IsRepo(dir)
+	turnBase := ""
+	if isRepo {
+		a.diffService.EnsureBaseline(sessionID, dir)
+		turnBase = a.diffService.TurnSnapshot(dir)
 	}
 
 	// 4. 构造 LLM messages
@@ -388,10 +400,32 @@ func (a *App) executeChat(sessionID, query string) *ChatResult {
 		}
 		persistedMsgs = append(persistedMsgs, *savedFinal)
 
+		// ★ 计算本轮工作区 diff：相对轮初快照，有改动则持久化并推送事件
+		var diffFiles []DiffFile
+		if isRepo {
+			if files, err := a.diffService.Diff(dir, turnBase); err == nil && len(files) > 0 {
+				diffFiles = files
+				turnNo, appendErr := a.sessionStore.AppendDiff(sessionID, DiffTurn{
+					Files:     files,
+					Additions: sumAdd(files),
+					Deletions: sumDel(files),
+					CreatedAt: time.Now().UnixMilli(),
+				})
+				if appendErr == nil && a.ctx != nil {
+					wailsRuntime.EventsEmit(a.ctx, "diff:update", ChatEvent{
+						Type: "diff_update",
+						Diff: files,
+						Turn: turnNo,
+					})
+				}
+			}
+		}
+
 		result := &ChatResult{
 			Reply:     choice.Message.Content,
 			ToolCalls: toolCallRecords,
 			Messages:  persistedMsgs,
+			Diff:      diffFiles,
 		}
 
 		// 推送完成事件

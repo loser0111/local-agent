@@ -1,9 +1,10 @@
 <script setup>
-import { ref, computed, nextTick, watch } from 'vue'
+import { ref, computed, nextTick, watch, onMounted, onUnmounted } from 'vue'
 import { useSessionStore } from '@/stores/session'
 import { useChatStore } from '@/stores/chat'
 import { usePaneStore } from '@/stores/pane'
-import { appendMessage, appendConversation, chat } from '@/api/session'
+import { useDiffStore } from '@/stores/diff'
+import { appendMessage, appendConversation, chat, onDiffUpdate } from '@/api/session'
 import PaneHeader from '@/components/layout/PaneHeader.vue'
 import MessageBubble from '@/components/business/MessageBubble.vue'
 import ToolProcess from '@/components/business/ToolProcess.vue'
@@ -11,6 +12,16 @@ import ToolProcess from '@/components/business/ToolProcess.vue'
 const sessionStore = useSessionStore()
 const chatStore = useChatStore()
 const paneStore = usePaneStore()
+const diffStore = useDiffStore()
+
+// 订阅后端 diff 实时推送（有文件改动时刷新差异数据）
+let offDiff = null
+onMounted(() => {
+  offDiff = onDiffUpdate((payload) => diffStore.applyUpdate(payload))
+})
+onUnmounted(() => {
+  if (offDiff) offDiff()
+})
 
 const input = ref('')
 const messagesContainer = ref(null)
@@ -95,6 +106,16 @@ watch(
     if (autoScroll.value) {
       await nextTick()
       scrollToBottom()
+    }
+  }
+)
+
+// 消费外部面板（如 DiffPane Review code）请求填入的提示词
+watch(
+  () => chatStore.pendingPrompt,
+  (t) => {
+    if (t) {
+      input.value = chatStore.consumePrompt()
     }
   }
 )
@@ -197,6 +218,14 @@ async function sendMessage() {
     })
 
     sessionStore.touchSession(sid)
+
+    // 8. 联动 DiffPane：重新加载差异，有改动则自动展开右侧面板
+    try {
+      const changed = await diffStore.load(sid)
+      if (changed > 0) paneStore.openPane(sid, 'diff')
+    } catch (diffErr) {
+      console.warn('加载 diff 失败:', diffErr)
+    }
   } catch (e) {
     console.error('发送消息失败:', e)
     if (streamingMessageId.value) {
@@ -291,6 +320,12 @@ function openDiff() {
             <circle cx="8" cy="8" r="1.2" fill="currentColor" />
             <circle cx="13" cy="8" r="1.2" fill="currentColor" />
           </svg>
+        </button>
+        <button class="tool-btn diff-btn" title="查看文件差异" @click="openDiff">
+          <svg width="15" height="15" viewBox="0 0 16 16" fill="none">
+            <path d="M8 2v12M2 8h12" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
+          </svg>
+          Diff
         </button>
         <button v-if="chatStore.isGenerating" class="tool-btn stop-btn" @click="stopGeneration">
           <svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor">

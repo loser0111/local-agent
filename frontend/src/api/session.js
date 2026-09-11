@@ -7,6 +7,8 @@ import {
   AppendConversation,
   UpdateSession,
   Chat,
+  GetDiff,
+  GetDiffTurns,
 } from '@/../wailsjs/go/main/App'
 import { EventsOn, EventsOff } from '@/../wailsjs/runtime/runtime'
 
@@ -265,4 +267,88 @@ export async function chat(sessionId, query, { onToolCallStart, onToolCallEnd } 
       },
     ],
   }
+}
+
+// ===== Diff 差异视图 =====
+
+// 浏览器开发模式 mock（非 Wails 环境）
+const MOCK_DIFF = [
+  {
+    path: 'app.go',
+    status: 'modified',
+    additions: 2,
+    deletions: 1,
+    hunks: [
+      {
+        header: '@@ -1,4 +1,5 @@',
+        lines: [
+          { type: 'context', oldLineNo: 1, newLineNo: 1, content: 'package main' },
+          { type: 'del', oldLineNo: 2, newLineNo: 0, content: 'import "fmt"' },
+          { type: 'add', oldLineNo: 0, newLineNo: 2, content: 'import (' },
+          { type: 'add', oldLineNo: 0, newLineNo: 3, content: '\t"os"' },
+          { type: 'context', oldLineNo: 3, newLineNo: 4, content: ')' },
+        ],
+      },
+    ],
+  },
+  {
+    path: 'frontend/src/main.js',
+    status: 'added',
+    additions: 3,
+    deletions: 0,
+    hunks: [
+      {
+        header: '@@ -0,0 +1,3 @@',
+        lines: [
+          { type: 'add', oldLineNo: 0, newLineNo: 1, content: "import { createApp } from 'vue'" },
+          { type: 'add', oldLineNo: 0, newLineNo: 2, content: "import App from './App.vue'" },
+          { type: 'add', oldLineNo: 0, newLineNo: 3, content: 'createApp(App).mount("#app")' },
+        ],
+      },
+    ],
+  },
+]
+
+/**
+ * 获取会话工作区相对基线的累计差异
+ * @param {string} sessionId
+ * @returns {Promise<Array>} DiffFile[]
+ */
+export async function getDiff(sessionId) {
+  if (isWails()) {
+    return await GetDiff(sessionId)
+  }
+  return MOCK_DIFF
+}
+
+/**
+ * 获取按轮次分组的差异（索引 0 为“累计”）
+ * @param {string} sessionId
+ * @returns {Promise<Array>} DiffTurn[]
+ */
+export async function getDiffTurns(sessionId) {
+  if (isWails()) {
+    return await GetDiffTurns(sessionId)
+  }
+  return [
+    {
+      turn: 0,
+      label: '累计',
+      files: MOCK_DIFF,
+      additions: 5,
+      deletions: 1,
+      createdAt: Date.now(),
+    },
+  ]
+}
+
+/**
+ * 订阅 diff 实时更新事件
+ * @param {Function} cb 回调，参数为 { diff, turn }
+ * @returns {Function} 取消订阅函数
+ */
+export function onDiffUpdate(cb) {
+  if (!isWails()) return () => {}
+  EventsOn('diff:update', cb)
+  return () => EventsOff('diff:update')
 }

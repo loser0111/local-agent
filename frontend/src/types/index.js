@@ -65,21 +65,41 @@
  */
 
 /**
+ * 差异块
+ * @typedef {Object} DiffHunk
+ * @property {string} header 形如 @@ -12,7 +14,9 @@
+ * @property {DiffLine[]} lines
+ */
+
+/**
  * 差异文件
  * @typedef {Object} DiffFile
- * @property {string} path
+ * @property {string} path 相对项目根目录，正斜杠
+ * @property {string} [oldPath] 重命名时使用
+ * @property {'added'|'modified'|'deleted'|'renamed'} status
  * @property {number} additions
  * @property {number} deletions
- * @property {DiffLine[]} lines
+ * @property {DiffHunk[]} hunks
  */
 
 /**
  * 差异行
  * @typedef {Object} DiffLine
  * @property {'add'|'del'|'context'} type
- * @property {number} oldLineNo
- * @property {number} newLineNo
+ * @property {number} oldLineNo add 行为 0
+ * @property {number} newLineNo del 行为 0
  * @property {string} content
+ */
+
+/**
+ * 轮次差异（turn=0 表示累计）
+ * @typedef {Object} DiffTurn
+ * @property {number} turn
+ * @property {string} label
+ * @property {DiffFile[]} files
+ * @property {number} additions
+ * @property {number} deletions
+ * @property {number} createdAt
  */
 
 export const SESSION_STATUS = {

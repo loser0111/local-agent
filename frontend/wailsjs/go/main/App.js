@@ -30,6 +30,14 @@ export function DeleteSession(arg1) {
   return window['go']['main']['App']['DeleteSession'](arg1);
 }
 
+export function GetDiff(arg1) {
+  return window['go']['main']['App']['GetDiff'](arg1);
+}
+
+export function GetDiffTurns(arg1) {
+  return window['go']['main']['App']['GetDiffTurns'](arg1);
+}
+
 export function GetModel(arg1) {
   return window['go']['main']['App']['GetModel'](arg1);
 }

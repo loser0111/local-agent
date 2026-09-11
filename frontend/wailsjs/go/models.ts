@@ -1,5 +1,95 @@
 export namespace main {
 	
+	export class DiffLine {
+	    type: string;
+	    oldLineNo: number;
+	    newLineNo: number;
+	    content: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new DiffLine(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.type = source["type"];
+	        this.oldLineNo = source["oldLineNo"];
+	        this.newLineNo = source["newLineNo"];
+	        this.content = source["content"];
+	    }
+	}
+	export class DiffHunk {
+	    header: string;
+	    lines: DiffLine[];
+	
+	    static createFrom(source: any = {}) {
+	        return new DiffHunk(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.header = source["header"];
+	        this.lines = this.convertValues(source["lines"], DiffLine);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class DiffFile {
+	    path: string;
+	    oldPath?: string;
+	    status: string;
+	    additions: number;
+	    deletions: number;
+	    hunks: DiffHunk[];
+	
+	    static createFrom(source: any = {}) {
+	        return new DiffFile(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.path = source["path"];
+	        this.oldPath = source["oldPath"];
+	        this.status = source["status"];
+	        this.additions = source["additions"];
+	        this.deletions = source["deletions"];
+	        this.hunks = this.convertValues(source["hunks"], DiffHunk);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
 	export class Message {
 	    id: string;
 	    role: string;
@@ -66,6 +156,7 @@ export namespace main {
 	    reply: string;
 	    toolCalls?: ToolCall[];
 	    messages?: Message[];
+	    diff?: DiffFile[];
 	    error?: string;
 	
 	    static createFrom(source: any = {}) {
@@ -77,6 +168,7 @@ export namespace main {
 	        this.reply = source["reply"];
 	        this.toolCalls = this.convertValues(source["toolCalls"], ToolCall);
 	        this.messages = this.convertValues(source["messages"], Message);
+	        this.diff = this.convertValues(source["diff"], DiffFile);
 	        this.error = source["error"];
 	    }
 	
@@ -121,6 +213,49 @@ export namespace main {
 	    }
 	}
 	
+	
+	
+	export class DiffTurn {
+	    turn: number;
+	    label: string;
+	    files: DiffFile[];
+	    additions: number;
+	    deletions: number;
+	    createdAt: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new DiffTurn(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.turn = source["turn"];
+	        this.label = source["label"];
+	        this.files = this.convertValues(source["files"], DiffFile);
+	        this.additions = source["additions"];
+	        this.deletions = source["deletions"];
+	        this.createdAt = source["createdAt"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	
 	export class Model {
 	    name: string;
 	    alias: string;
@@ -153,6 +288,7 @@ export namespace main {
 	    endAt: number;
 	    messages: Message[];
 	    conversations: Conversation[];
+	    diffs?: DiffTurn[];
 	
 	    static createFrom(source: any = {}) {
 	        return new Session(source);
@@ -171,6 +307,7 @@ export namespace main {
 	        this.endAt = source["endAt"];
 	        this.messages = this.convertValues(source["messages"], Message);
 	        this.conversations = this.convertValues(source["conversations"], Conversation);
+	        this.diffs = this.convertValues(source["diffs"], DiffTurn);
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {

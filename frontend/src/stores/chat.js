@@ -12,6 +12,8 @@ export const useChatStore = defineStore('chat', () => {
   const loadingHistory = ref(false)
   // 当前已加载消息的会话 ID
   const loadedSessionId = ref(null)
+  // 外部（如 DiffPane 的 Review code）请求填入输入框的提示词
+  const pendingPrompt = ref(null)
 
   /**
    * 加载指定会话的历史消息
@@ -78,16 +80,31 @@ export const useChatStore = defineStore('chat', () => {
     }
   }
 
+  /** 请求把一段提示词填入聊天输入框（如 Review code） */
+  function requestPrompt(text) {
+    pendingPrompt.value = text
+  }
+
+  /** 消费并清空待填提示词 */
+  function consumePrompt() {
+    const t = pendingPrompt.value
+    pendingPrompt.value = null
+    return t
+  }
+
   return {
     messages,
     isGenerating,
     loadingHistory,
     loadedSessionId,
+    pendingPrompt,
     loadMessages,
     addLocalMessage,
     updateLocalMessage,
     appendStreamContent,
     addToolCall,
     updateToolCall,
+    requestPrompt,
+    consumePrompt,
   }
 })

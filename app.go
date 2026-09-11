@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 // App struct
@@ -13,6 +14,7 @@ type App struct {
 	modelStore   *ModelStore
 	sessionStore *SessionStore
 	toolManager  *ToolManager
+	diffService  *DiffService
 }
 
 // NewApp creates a new App application struct
@@ -40,6 +42,9 @@ func (a *App) startup(ctx context.Context) {
 
 	// 初始化工具管理器（CLI 工具 + 元工具路由器）
 	a.toolManager = NewToolManager()
+
+	// 初始化差异服务（基于 git 快照计算工作区 diff）
+	a.diffService = NewDiffService()
 }
 
 // dataDir 返回本地数据目录（不存在则创建）
@@ -106,7 +111,63 @@ func (a *App) GetSession(id string) (*Session, error) {
 
 // DeleteSession 删除指定会话
 func (a *App) DeleteSession(id string) error {
+	a.diffService.ForgetBaseline(id)
 	return a.sessionStore.DeleteSession(id)
+}
+
+// ===== 差异视图 =====
+
+// resolveProjectDir 返回会话项目目录；为空时回退到进程工作目录
+func (a *App) resolveProjectDir(sessionID string) (string, error) {
+	s, err := a.sessionStore.GetSession(sessionID)
+	if err != nil {
+		return "", err
+	}
+	if s.Project != "" {
+		return s.Project, nil
+	}
+	return os.Getwd()
+}
+
+// GetDiff 返回会话工作区相对基线的累计差异
+func (a *App) GetDiff(sessionID string) ([]DiffFile, error) {
+	dir, err := a.resolveProjectDir(sessionID)
+	if err != nil {
+		return []DiffFile{}, err
+	}
+	if !a.diffService.IsRepo(dir) {
+		return []DiffFile{}, nil // 非 git 仓库不报错，返回空列表
+	}
+	base := a.diffService.EnsureBaseline(sessionID, dir)
+	files, err := a.diffService.Diff(dir, base)
+	if err != nil {
+		return []DiffFile{}, err
+	}
+	return files, nil
+}
+
+// GetDiffTurns 返回按轮次分组的差异，索引 0 为“累计”
+func (a *App) GetDiffTurns(sessionID string) ([]DiffTurn, error) {
+	s, err := a.sessionStore.GetSession(sessionID)
+	if err != nil {
+		return nil, err
+	}
+	turns := make([]DiffTurn, 0, len(s.Diffs)+1)
+
+	if dir, err := a.resolveProjectDir(sessionID); err == nil && a.diffService.IsRepo(dir) {
+		if files, err := a.GetDiff(sessionID); err == nil {
+			turns = append(turns, DiffTurn{
+				Turn:      0,
+				Label:     "累计",
+				Files:     files,
+				Additions: sumAdd(files),
+				Deletions: sumDel(files),
+				CreatedAt: time.Now().UnixMilli(),
+			})
+		}
+	}
+	turns = append(turns, s.Diffs...)
+	return turns, nil
 }
 
 // AppendMessage 向会话追加一条消息并持久化

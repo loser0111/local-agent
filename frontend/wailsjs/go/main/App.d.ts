@@ -16,6 +16,10 @@ export function DeleteModel(arg1:string):Promise<void>;
 
 export function DeleteSession(arg1:string):Promise<void>;
 
+export function GetDiff(arg1:string):Promise<Array<main.DiffFile>>;
+
+export function GetDiffTurns(arg1:string):Promise<Array<main.DiffTurn>>;
+
 export function GetModel(arg1:string):Promise<main.Model>;
 
 export function GetModelNames():Promise<Array<string>>;

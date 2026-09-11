@@ -58,6 +58,7 @@ type Session struct {
 	EndAt          int64           `json:"endAt"`
 	Messages       []Message       `json:"messages"`
 	Conversations  []*Conversation `json:"conversations"`
+	Diffs          []DiffTurn      `json:"diffs,omitempty"` // 每轮对话产生的文件差异
 }
 
 // SessionConfig 创建会话时的配置
@@ -183,6 +184,7 @@ func (s *SessionStore) ListSessions() ([]*Session, error) {
 		// 列表不携带消息，减小数据量
 		session.Messages = []Message{}
 		session.Conversations = []*Conversation{}
+		session.Diffs = nil
 		sessions = append(sessions, session)
 	}
 
@@ -256,6 +258,26 @@ func (s *SessionStore) AppendConversation(id string, conv *Conversation) error {
 		session.EndAt = conv.EndTime
 	}
 	return s.saveSession(session)
+}
+
+// AppendDiff 追加一轮差异并落盘，轮次号自动递增，返回本轮轮次号
+func (s *SessionStore) AppendDiff(id string, turn DiffTurn) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	session, err := s.loadSession(id)
+	if err != nil {
+		return 0, err
+	}
+	turn.Turn = len(session.Diffs) + 1
+	if turn.Label == "" {
+		turn.Label = fmt.Sprintf("第 %d 轮", turn.Turn)
+	}
+	session.Diffs = append(session.Diffs, turn)
+	if err := s.saveSession(session); err != nil {
+		return 0, err
+	}
+	return turn.Turn, nil
 }
 
 // UpdateSession 更新会话元数据
