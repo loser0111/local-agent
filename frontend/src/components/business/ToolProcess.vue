@@ -98,8 +98,13 @@ const hiddenLabelCount = computed(() => {
 
 <template>
   <div class="tool-process" :class="{ running: isRunning, error: hasError && !isRunning }">
-    <!-- 折叠标题行 -->
-    <div class="process-header" @click="toggle">
+    <!-- 折叠标题行（语义化按钮，支持键盘操作） -->
+    <button
+      type="button"
+      class="process-header"
+      :aria-expanded="expanded"
+      @click="toggle"
+    >
       <span class="process-status-icon">
         <span v-if="isRunning" class="spinner"></span>
         <svg v-else-if="hasError" class="status-icon error-icon" viewBox="0 0 16 16" fill="none">
@@ -136,7 +141,7 @@ const hiddenLabelCount = computed(() => {
       >
         <path d="M3 4.5L6 7.5L9 4.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" />
       </svg>
-    </div>
+    </button>
 
     <!-- 展开内容（grid 高度动画） -->
     <div class="process-body" :class="{ open: expanded }">
@@ -173,6 +178,13 @@ const hiddenLabelCount = computed(() => {
 }
 
 .process-header {
+  // button 样式重置
+  width: 100%;
+  border: none;
+  background: transparent;
+  font: inherit;
+  text-align: left;
+
   display: flex;
   align-items: center;
   gap: $space-sm;
@@ -185,6 +197,11 @@ const hiddenLabelCount = computed(() => {
   &:hover {
     background-color: rgba(255, 255, 255, 0.03);
     color: $color-text-primary;
+  }
+
+  &:focus-visible {
+    outline: 2px solid rgba(189, 147, 249, 0.6);
+    outline-offset: -2px;
   }
 }
 

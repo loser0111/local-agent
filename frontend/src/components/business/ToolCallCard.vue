@@ -59,7 +59,12 @@ const argSummary = computed(() => {
 
 <template>
   <div class="tool-call-card" :class="toolCall.status">
-    <div class="tool-call-header" @click="toggleExpand">
+    <button
+      type="button"
+      class="tool-call-header"
+      :aria-expanded="expanded"
+      @click="toggleExpand"
+    >
       <span class="tool-icon">🔧</span>
       <span class="tool-name">{{ friendlyName }}</span>
       <span class="tool-args" v-if="argSummary" :title="argSummary">· {{ argSummary }}</span>
@@ -69,7 +74,7 @@ const argSummary = computed(() => {
         <span v-if="toolCall.duration"> · {{ toolCall.duration >= 1 ? toolCall.duration.toFixed(1) : (toolCall.duration * 1000).toFixed(0) + 'ms' }}</span>
       </span>
       <span class="expand-icon">{{ expanded ? '▼' : '▶' }}</span>
-    </div>
+    </button>
 
     <div v-if="expanded" class="tool-call-detail">
       <div v-if="toolCall.args && Object.keys(toolCall.args).length" class="detail-section">
@@ -104,6 +109,13 @@ const argSummary = computed(() => {
 }
 
 .tool-call-header {
+  // button 样式重置
+  width: 100%;
+  border: none;
+  background: transparent;
+  font: inherit;
+  text-align: left;
+
   display: flex;
   align-items: center;
   gap: $space-sm;
@@ -113,6 +125,11 @@ const argSummary = computed(() => {
 
   &:hover {
     background-color: $color-bg-tertiary;
+  }
+
+  &:focus-visible {
+    outline: 2px solid rgba(189, 147, 249, 0.6);
+    outline-offset: -2px;
   }
 }
 
