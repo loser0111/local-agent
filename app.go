@@ -138,7 +138,7 @@ func (a *App) GetDiff(sessionID string) ([]DiffFile, error) {
 	if !a.diffService.IsRepo(dir) {
 		return []DiffFile{}, nil // 非 git 仓库不报错，返回空列表
 	}
-	base := a.diffService.EnsureBaseline(sessionID, dir)
+	base := a.diffService.GetBaseline(sessionID) // 只读取，不懒初始化
 	files, err := a.diffService.Diff(dir, base)
 	if err != nil {
 		return []DiffFile{}, err

@@ -1,8 +1,9 @@
 <script setup>
-import { computed } from 'vue'
+import { ref, computed } from 'vue'
 import { useSessionStore } from '@/stores/session'
 import { usePaneStore } from '@/stores/pane'
 import { PANE_TITLES } from '@/types'
+import ResizeDivider from '@/components/layout/ResizeDivider.vue'
 import ChatPane from '@/panes/ChatPane.vue'
 import DiffPane from '@/panes/DiffPane.vue'
 import TerminalPane from '@/panes/TerminalPane.vue'
@@ -37,6 +38,23 @@ function closePane(pane) {
   paneStore.closePane(sessionId.value, pane)
 }
 
+// 中间栏宽度（可拖拽调整）
+const CHAT_DEFAULT = '60%'
+const CHAT_MIN = 200
+const chatWidth = ref(CHAT_DEFAULT)
+
+function onChatDrag(dx) {
+  const container = document.querySelector('.pane-container')
+  if (!container) return
+  const total = container.clientWidth
+  // 当前像素宽度
+  const currentPx = chatWidth.value.endsWith('%')
+    ? (parseFloat(chatWidth.value) / 100) * total
+    : parseFloat(chatWidth.value)
+  const newPx = Math.max(CHAT_MIN, currentPx + dx)
+  chatWidth.value = newPx + 'px'
+}
+
 const paneComponents = {
   chat: ChatPane,
   diff: DiffPane,
@@ -52,9 +70,12 @@ const paneComponents = {
 <template>
   <div class="pane-container">
     <!-- 左侧：对话面板（常驻） -->
-    <div class="pane chat-pane">
+    <div class="pane chat-pane" :style="{ flex: '0 0 ' + chatWidth }">
       <component :is="paneComponents.chat" />
     </div>
+
+    <!-- 拖拽分隔条 -->
+    <ResizeDivider v-if="secondaryPanes.length > 0" @drag="onChatDrag" />
 
     <!-- 右侧：其他面板（Tab 切换） -->
     <div v-if="secondaryPanes.length > 0" class="pane secondary-pane">
@@ -98,12 +119,12 @@ const paneComponents = {
 }
 
 .chat-pane {
-  flex: 2;
   border-right: 1px solid $color-border;
 }
 
 .secondary-pane {
   flex: 1;
+  min-width: 200px;
   background-color: $color-bg-primary;
 }
 

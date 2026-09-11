@@ -10,6 +10,15 @@ const emit = defineEmits(['new-session'])
 const filter = ref('all')
 const collapsed = defineModel('collapsed', { default: false })
 
+// 左侧栏宽度（由父组件控制，可拖拽调整）
+const props = defineProps({
+  width: { type: Number, default: 240 },
+})
+const SIDEBAR_COLLAPSED = 56
+const sidebarStyle = computed(() => ({
+  width: (collapsed.value ? SIDEBAR_COLLAPSED : props.width) + 'px',
+}))
+
 const statusOptions = [
   { value: 'all', label: '全部' },
   { value: 'active', label: '活跃' },
@@ -42,7 +51,7 @@ async function handleDelete(e, id) {
 </script>
 
 <template>
-  <div class="session-sidebar" :class="{ collapsed }">
+  <div class="session-sidebar" :class="{ collapsed }" :style="sidebarStyle">
     <div class="sidebar-header">
       <button v-if="!collapsed" class="btn btn-primary new-session-btn" @click="handleNewSession">
         <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
@@ -103,13 +112,12 @@ async function handleDelete(e, id) {
 
 <style scoped lang="scss">
 .session-sidebar {
-  width: $sidebar-width;
   background-color: $color-bg-secondary;
   border-right: 1px solid $color-border;
   display: flex;
   flex-direction: column;
   flex-shrink: 0;
-  transition: width $transition-normal;
+  overflow: hidden;
 
   &.collapsed {
     width: $sidebar-width-collapsed;

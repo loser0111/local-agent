@@ -238,6 +238,12 @@ ol {
   }
 }
 
+// ===== 拖拽调整宽度时禁用所有 transition，避免滞后感 =====
+body.is-resizing,
+body.is-resizing * {
+  transition: none !important;
+}
+
 // ===== 滚动容器 =====
 .scroll-container {
   overflow-y: auto;

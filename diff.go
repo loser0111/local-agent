@@ -114,7 +114,7 @@ func (s *DiffService) Snapshot(dir string) (string, error) {
 	return strings.TrimSpace(out), nil
 }
 
-// EnsureBaseline 懒初始化会话基线
+// EnsureBaseline 懒初始化会话基线（仅在对话开始时调用）
 func (s *DiffService) EnsureBaseline(sessionID, dir string) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -124,6 +124,13 @@ func (s *DiffService) EnsureBaseline(sessionID, dir string) string {
 	sha, _ := s.Snapshot(dir)
 	s.baseline[sessionID] = sha
 	return sha
+}
+
+// GetBaseline 只读取已有基线，不创建。面板打开时调用，避免把当前工作区快照为基线导致 diff 永远为空
+func (s *DiffService) GetBaseline(sessionID string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.baseline[sessionID] // 不存在返回零值 ""
 }
 
 // TurnSnapshot 每轮开始时取本轮基线
@@ -141,6 +148,9 @@ func (s *DiffService) ForgetBaseline(sessionID string) {
 
 // Diff 计算 dir 相对 baseline 的差异（含未跟踪文件）
 func (s *DiffService) Diff(dir, baseline string) ([]DiffFile, error) {
+	if baseline == "" {
+		return []DiffFile{}, nil // 无基线（未对话过），返回空
+	}
 	args := []string{"diff", "--no-color", "--unified=3", "--no-ext-diff"}
 	if baseline != "" {
 		args = append(args, baseline)

@@ -5,6 +5,7 @@ import { useChatStore } from '@/stores/chat'
 import TopBar from '@/components/layout/TopBar.vue'
 import SessionSidebar from '@/components/layout/SessionSidebar.vue'
 import PaneContainer from '@/components/layout/PaneContainer.vue'
+import ResizeDivider from '@/components/layout/ResizeDivider.vue'
 import NewSessionDialog from '@/components/business/NewSessionDialog.vue'
 
 const sessionStore = useSessionStore()
@@ -12,6 +13,16 @@ const chatStore = useChatStore()
 
 const sidebarCollapsed = ref(false)
 const showNewSession = ref(false)
+
+// 左侧栏宽度（可拖拽调整）
+const SIDEBAR_DEFAULT = 240
+const SIDEBAR_MIN = 160
+const SIDEBAR_MAX = 480
+const sidebarWidth = ref(SIDEBAR_DEFAULT)
+
+function onSidebarDrag(dx) {
+  sidebarWidth.value = Math.max(SIDEBAR_MIN, Math.min(SIDEBAR_MAX, sidebarWidth.value + dx))
+}
 
 onMounted(async () => {
   // 从后端加载历史会话列表
@@ -40,7 +51,8 @@ async function handleNewSession(config) {
   <div class="workspace">
     <TopBar @toggle-sidebar="toggleSidebar" />
     <div class="workspace-body">
-      <SessionSidebar v-model:collapsed="sidebarCollapsed" @new-session="showNewSession = true" />
+      <SessionSidebar v-model:collapsed="sidebarCollapsed" :width="sidebarWidth" @new-session="showNewSession = true" />
+      <ResizeDivider v-if="!sidebarCollapsed" @drag="onSidebarDrag" />
       <PaneContainer />
     </div>
     <NewSessionDialog
