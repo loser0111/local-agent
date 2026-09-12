@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"runtime"
 	"sort"
+	"strings"
 )
 
 // ===== 工具接口定义（借鉴 01agent 的 ToolInterface）=====
@@ -36,7 +37,7 @@ func (t *BaseTool) GetName() string                       { return t.Name }
 func (t *BaseTool) GetDescription() string                { return t.Description }
 func (t *BaseTool) GetParameters() map[string]*ToolArgDef { return t.Parameters }
 
-// ===== CLI 工具（借鉴 01agent 的 CliTool）=====
+// ===== CLI 内置工具 =====
 
 // CLITool 命令行工具：在本机终端执行 shell 命令
 type CLITool struct {
@@ -60,24 +61,30 @@ func (t *CLITool) Execute(ctx context.Context, args map[string]interface{}) (str
 
 // ===== 元工具：工具路由器（借鉴 01agent 的 MetaTool）=====
 
-// MetaTool 元工具：支持 list（发现工具）和 execute（执行工具）
+// MetaTool 元工具：支持 list（发现/搜索工具）、describe（查看参数）和 execute（执行工具）
 type MetaTool struct {
 	*BaseTool
-	registry map[string]ToolInterface // 非元工具注册表
+	registry map[string]ToolInterface // 非元工具注册表（已按会话白名单过滤）
+	typeMap  map[string]string        // 工具名 → 类型标签（builtin/cli/mcp/api）
 }
 
-func NewMetaTool(registry map[string]ToolInterface) *MetaTool {
+func NewMetaTool(registry map[string]ToolInterface, typeMap map[string]string) *MetaTool {
 	return &MetaTool{
 		BaseTool: &BaseTool{
-			Name:        "tool_router",
-			Description: "工具路由器。通过此工具可以发现和执行所有可用工具。先调用 action=\"list\" 查看所有可用工具及其参数定义，然后调用 action=\"execute\" 执行指定工具。",
+			Name: "tool_router",
+			Description: "工具路由器。通过此工具发现和执行所有已启用的工具。" +
+				"工具较多时用 action=\"list\" 配合 query 按关键字搜索；" +
+				"用 action=\"describe\" 查看目标工具的完整参数定义；" +
+				"最后用 action=\"execute\" 执行指定工具。",
 			Parameters: map[string]*ToolArgDef{
-				"action":    {Type: "string", Description: "操作类型：list=列出所有可用工具；execute=执行指定工具"},
-				"tool_name": {Type: "string", Description: "当 action=execute 时必填，要执行的工具名称（从 list 结果中获取）"},
+				"action":    {Type: "string", Description: "操作类型：list=列出/搜索可用工具；describe=查看工具参数定义；execute=执行指定工具"},
+				"query":     {Type: "string", Description: "当 action=list 时可选，按工具名或描述的关键字过滤（如 文件、天气、mcp）"},
+				"tool_name": {Type: "string", Description: "action=describe/execute 时必填，目标工具名称（从 list 结果中获取）"},
 				"arguments": {Type: "object", Description: "当 action=execute 时必填，传递给目标工具的参数对象"},
 			},
 		},
 		registry: registry,
+		typeMap:  typeMap,
 	}
 }
 
@@ -85,50 +92,93 @@ func (t *MetaTool) Execute(ctx context.Context, args map[string]interface{}) (st
 	action, _ := args["action"].(string)
 	switch action {
 	case "list":
-		return t.listTools()
+		query, _ := args["query"].(string)
+		return t.listTools(query)
+	case "describe":
+		return t.describeTool(args)
 	case "execute":
 		return t.executeTool(ctx, args)
 	default:
-		return "", fmt.Errorf("未知的 action: %s，可选值: list, execute", action)
+		return "", fmt.Errorf("未知的 action: %s，可选值: list, describe, execute", action)
 	}
 }
 
-// listTools 返回所有可用工具的名称、描述和参数定义
-func (t *MetaTool) listTools() (string, error) {
-	type toolInfo struct {
-		Name        string                 `json:"name"`
-		Description string                 `json:"description"`
-		Parameters  map[string]interface{} `json:"parameters"`
-	}
+// toolBrief list 返回的精简项（控制 token 消耗）
+type toolBrief struct {
+	Name        string `json:"name"`
+	Type        string `json:"type"`
+	Description string `json:"description"`
+}
 
+// toolDetail describe 返回的完整定义
+type toolDetail struct {
+	Name        string                 `json:"name"`
+	Type        string                 `json:"type"`
+	Description string                 `json:"description"`
+	Parameters  map[string]interface{} `json:"parameters"`
+}
+
+// listTools 返回工具清单；query 非空时按名称/描述模糊匹配
+func (t *MetaTool) listTools(query string) (string, error) {
 	names := make([]string, 0, len(t.registry))
 	for name := range t.registry {
 		names = append(names, name)
 	}
 	sort.Strings(names)
 
-	tools := make([]toolInfo, 0, len(names))
+	q := strings.ToLower(strings.TrimSpace(query))
+	briefs := make([]toolBrief, 0, len(names))
 	for _, name := range names {
 		tt := t.registry[name]
-		params := make(map[string]interface{})
-		for paramName, arg := range tt.GetParameters() {
-			params[paramName] = map[string]string{
-				"type":        arg.Type,
-				"description": arg.Description,
+		desc := tt.GetDescription()
+		if q != "" {
+			hay := strings.ToLower(name + " " + desc)
+			if !strings.Contains(hay, q) {
+				continue
 			}
 		}
-		tools = append(tools, toolInfo{
+		briefs = append(briefs, toolBrief{
 			Name:        name,
-			Description: tt.GetDescription(),
-			Parameters:  params,
+			Type:        t.typeMap[name],
+			Description: desc,
 		})
 	}
 
-	result, err := json.MarshalIndent(tools, "", "  ")
+	result, err := json.MarshalIndent(briefs, "", "  ")
 	if err != nil {
 		return "", fmt.Errorf("序列化工具列表失败: %w", err)
 	}
-	return fmt.Sprintf("可用工具列表（共 %d 个）:\n%s", len(tools), string(result)), nil
+	if q != "" {
+		return fmt.Sprintf("匹配 \"%s\" 的工具（共 %d 个）:\n%s", query, len(briefs), string(result)), nil
+	}
+	return fmt.Sprintf("可用工具列表（共 %d 个）。使用 describe 查看参数，或直接 execute 执行:\n%s", len(briefs), string(result)), nil
+}
+
+// describeTool 返回单个工具的完整参数定义
+func (t *MetaTool) describeTool(args map[string]interface{}) (string, error) {
+	toolName, _ := args["tool_name"].(string)
+	if toolName == "" {
+		return "", fmt.Errorf("tool_name 参数是必需的")
+	}
+	tt, exists := t.registry[toolName]
+	if !exists {
+		return "", fmt.Errorf("未找到工具: %s", toolName)
+	}
+	params := make(map[string]interface{})
+	for paramName, arg := range tt.GetParameters() {
+		params[paramName] = map[string]string{
+			"type":        arg.Type,
+			"description": arg.Description,
+		}
+	}
+	detail := toolDetail{
+		Name:        toolName,
+		Type:        t.typeMap[toolName],
+		Description: tt.GetDescription(),
+		Parameters:  params,
+	}
+	result, _ := json.MarshalIndent(detail, "", "  ")
+	return string(result), nil
 }
 
 // executeTool 根据名称查找并执行目标工具
@@ -160,75 +210,124 @@ func (t *MetaTool) executeTool(ctx context.Context, args map[string]interface{})
 	return result, nil
 }
 
-// ===== 工具管理器（借鉴 01agent 的 ToolManager）=====
+// ===== 工具管理器（配置驱动装配）=====
 
-// ToolManager 工具管理器
+// ToolManager 持有工具配置存储与 MCP 连接池，按会话构建工具视图
 type ToolManager struct {
-	Tools        map[string]ToolInterface // 所有工具（含元工具）
-	NonMetaTools map[string]ToolInterface // 非元工具（供元工具 list/execute 使用）
+	store *ToolStore
+	pool  *MCPPool
 }
 
-// NewToolManager 创建工具管理器并注册内置工具
-func NewToolManager() *ToolManager {
-	tm := &ToolManager{
-		Tools:        make(map[string]ToolInterface),
-		NonMetaTools: make(map[string]ToolInterface),
-	}
-	tm.registerBuiltinTools()
-	return tm
+func NewToolManager(store *ToolStore) *ToolManager {
+	return &ToolManager{store: store, pool: NewMCPPool()}
 }
 
-// registerBuiltinTools 注册内置工具
-func (tm *ToolManager) registerBuiltinTools() {
-	// 注册 CLI 工具：执行终端命令
-	cliTool := &CLITool{
-		BaseTool: &BaseTool{
-			Name:        "exec_shell",
-			Description: "在本机终端执行shell/终端命令，用于查看文件、查询目录、执行系统指令",
-			Parameters: map[string]*ToolArgDef{
-				"cmd": {Type: "string", Description: "要执行的终端命令，linux/mac用bash指令，windows用cmd/powershell指令"},
-			},
-		},
-	}
-	tm.Tools["exec_shell"] = cliTool
-	tm.NonMetaTools["exec_shell"] = cliTool
+// Pool 暴露 MCP 连接池（供连接测试使用）
+func (tm *ToolManager) Pool() *MCPPool { return tm.pool }
 
-	// 注册元工具：工具路由器（注入非元工具注册表）
-	metaTool := NewMetaTool(tm.NonMetaTools)
-	tm.Tools["tool_router"] = metaTool
+// Store 暴露配置存储
+func (tm *ToolManager) Store() *ToolStore { return tm.store }
+
+// SessionView 某次会话的工具视图（已按启用状态和会话白名单过滤）
+type SessionView struct {
+	nonMeta map[string]ToolInterface
+	meta    *MetaTool
 }
 
-// ExecuteTool 根据名称查找并执行工具
-func (tm *ToolManager) ExecuteTool(name string, args map[string]interface{}) (string, error) {
-	tool, ok := tm.Tools[name]
-	if !ok {
-		return "", fmt.Errorf("未找到工具: %s", name)
+// BuildView 依据配置和会话白名单装配工具。
+// enabledWhitelist 为空表示启用全部已开启工具；非空时只装配白名单内的工具 ID。
+// MCP server 连接失败不阻断装配，仅跳过其子工具（错误在设置页状态中展示）。
+func (tm *ToolManager) BuildView(ctx context.Context, enabledWhitelist []string) *SessionView {
+	registry := map[string]ToolInterface{}
+	typeMap := map[string]string{}
+	whitelist := map[string]bool{}
+	for _, id := range enabledWhitelist {
+		whitelist[id] = true
 	}
-	return tool.Execute(context.Background(), args)
+
+	for _, cfg := range tm.store.GetAll() {
+		if !cfg.Enabled {
+			continue
+		}
+		if len(whitelist) > 0 && !whitelist[cfg.ID] {
+			continue
+		}
+		switch cfg.Type {
+		case ToolTypeBuiltin:
+			if cfg.Name == "exec_shell" {
+				t := &CLITool{BaseTool: &BaseTool{
+					Name: cfg.Name, Description: cfg.Description, Parameters: paramsFromConfig(cfg.Parameters),
+				}}
+				registry[cfg.Name] = t
+				typeMap[cfg.Name] = ToolTypeBuiltin
+			}
+		case ToolTypeCLI:
+			t := NewDynamicCLITool(cfg)
+			registry[cfg.Name] = t
+			typeMap[cfg.Name] = ToolTypeCLI
+		case ToolTypeAPI:
+			t := NewDynamicAPITool(cfg)
+			registry[cfg.Name] = t
+			typeMap[cfg.Name] = ToolTypeAPI
+		case ToolTypeMCP:
+			entry, err := tm.pool.Connect(ctx, cfg)
+			if err != nil {
+				fmt.Printf("[ToolManager] MCP 工具 %s 装配失败: %v\n", cfg.Name, err)
+				continue
+			}
+			disabled := map[string]bool{}
+			for _, name := range cfg.DisabledTools {
+				disabled[name] = true
+			}
+			for _, mt := range entry.tools {
+				if disabled[mt.Name] {
+					continue
+				}
+				mt2 := mt
+				wrapped := NewMCPTool(tm.pool, cfg, mt2)
+				registry[wrapped.GetName()] = wrapped
+				typeMap[wrapped.GetName()] = ToolTypeMCP
+			}
+		}
+	}
+
+	return &SessionView{
+		nonMeta: registry,
+		meta:    NewMetaTool(registry, typeMap),
+	}
 }
 
-// GetToolsForLLM 返回给 LLM 的工具定义（只暴露元工具，节省 token）
-func (tm *ToolManager) GetToolsForLLM() []LLMTool {
-	metaTool, ok := tm.Tools["tool_router"].(*MetaTool)
-	if !ok {
-		return nil
-	}
+// LLMToolDef 返回给 LLM 的工具定义（只暴露 tool_router，具体工具经路由器发现，节省 token）
+func (v *SessionView) GetToolsForLLM() []LLMTool {
 	return []LLMTool{
 		{
 			Type: "function",
 			Function: LLMToolDef{
-				Name:        metaTool.GetName(),
-				Description: metaTool.GetDescription(),
+				Name:        v.meta.GetName(),
+				Description: v.meta.GetDescription(),
 				Parameters: &LLMToolParams{
 					Type:     "object",
 					Required: []string{"action"},
 					Properties: map[string]LLMToolProp{
-						"action":    {Type: "string", Description: "操作类型：list=列出所有可用工具；execute=执行指定工具"},
-						"tool_name": {Type: "string", Description: "当 action=execute 时必填，要执行的工具名称（从 list 结果中获取）"},
-						"arguments": {Type: "object", Description: "当 action=execute 时必填，传递给目标工具的参数对象"},
+						"action":    {Type: "string", Description: "操作类型：list=列出/搜索可用工具；describe=查看工具参数定义；execute=执行指定工具"},
+						"query":     {Type: "string", Description: "action=list 时可选，按关键字过滤工具"},
+						"tool_name": {Type: "string", Description: "describe/execute 时的目标工具名"},
+						"arguments": {Type: "object", Description: "execute 时传递给目标工具的参数对象"},
 					},
 				},
 			},
 		},
 	}
+}
+
+// ExecuteTool 在会话视图内执行工具
+func (v *SessionView) ExecuteTool(name string, args map[string]interface{}) (string, error) {
+	if name == "tool_router" {
+		return v.meta.Execute(context.Background(), args)
+	}
+	tool, ok := v.nonMeta[name]
+	if !ok {
+		return "", fmt.Errorf("未找到工具: %s", name)
+	}
+	return tool.Execute(context.Background(), args)
 }

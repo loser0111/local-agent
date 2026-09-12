@@ -16,6 +16,8 @@ export function DeleteModel(arg1:string):Promise<void>;
 
 export function DeleteSession(arg1:string):Promise<void>;
 
+export function DeleteTool(arg1:string):Promise<void>;
+
 export function GetDiff(arg1:string):Promise<Array<main.DiffFile>>;
 
 export function GetDiffTurns(arg1:string):Promise<Array<main.DiffTurn>>;
@@ -31,5 +33,13 @@ export function GetSession(arg1:string):Promise<main.Session>;
 export function Greet(arg1:string):Promise<string>;
 
 export function ListSessions():Promise<Array<main.Session>>;
+
+export function ListTools():Promise<Array<main.ToolInfo>>;
+
+export function SaveTool(arg1:main.ToolConfig):Promise<main.ToolConfig>;
+
+export function TestToolConnection(arg1:main.ToolConfig):Promise<Array<main.MCPToolMeta>>;
+
+export function ToggleTool(arg1:string,arg2:boolean):Promise<void>;
 
 export function UpdateSession(arg1:string,arg2:main.SessionPatch):Promise<main.Session>;

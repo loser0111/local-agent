@@ -4,6 +4,7 @@ import { useRouter } from 'vue-router'
 import { useSettingStore } from '@/stores/setting'
 import { PERMISSION_MODES } from '@/types'
 import { fetchModels, addModel, deleteModel } from '@/api/model'
+import ToolSettings from '@/components/business/ToolSettings.vue'
 
 const router = useRouter()
 const settingStore = useSettingStore()
@@ -13,6 +14,7 @@ const activeTab = ref('general')
 const tabs = [
   { key: 'general', label: '通用设置' },
   { key: 'model', label: '模型配置' },
+  { key: 'tool', label: '工具配置' },
   { key: 'permission', label: '权限配置' },
   { key: 'about', label: '关于' },
 ]
@@ -237,6 +239,9 @@ onMounted(() => {
             </div>
           </div>
         </div>
+
+        <!-- 工具配置 -->
+        <ToolSettings v-if="activeTab === 'tool'" />
 
         <!-- 权限配置 -->
         <div v-if="activeTab === 'permission'" class="settings-panel">

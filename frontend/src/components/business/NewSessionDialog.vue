@@ -1,17 +1,32 @@
 <script setup>
-import { reactive, ref, onMounted } from 'vue'
+import { reactive, ref, computed, onMounted } from 'vue'
 import { PERMISSION_MODES } from '@/types'
 import { fetchModelNames } from '@/api/model'
+import { useToolsStore } from '@/stores/tools'
+import ToolIcon from './ToolIcon.vue'
 
 const emit = defineEmits(['close', 'confirm'])
 
 const modelNames = ref([])
+const toolsStore = useToolsStore()
+// 选中的工具 ID；全部选中时以空数组提交（后端语义：空=全部已启用工具）
+const selectedToolIds = ref([])
+
+const allToolsSelected = computed(
+  () => selectedToolIds.value.length === toolsStore.enabledTools.length
+)
 
 onMounted(async () => {
   try {
     modelNames.value = await fetchModelNames()
   } catch (e) {
     console.error('加载模型列表失败:', e)
+  }
+  try {
+    await toolsStore.load()
+    selectedToolIds.value = toolsStore.enabledTools.map((t) => t.id)
+  } catch (e) {
+    console.error('加载工具列表失败:', e)
   }
 })
 
@@ -22,8 +37,26 @@ const form = reactive({
   permissionMode: 'manual',
 })
 
+function toggleTool(id) {
+  const idx = selectedToolIds.value.indexOf(id)
+  if (idx > -1) selectedToolIds.value.splice(idx, 1)
+  else selectedToolIds.value.push(id)
+}
+
+function toggleAll() {
+  if (allToolsSelected.value) {
+    selectedToolIds.value = []
+  } else {
+    selectedToolIds.value = toolsStore.enabledTools.map((t) => t.id)
+  }
+}
+
+const TYPE_LABEL = { builtin: '内置', cli: 'CLI', mcp: 'MCP', api: 'API' }
+
 function confirm() {
-  emit('confirm', { ...form, title: '新会话' })
+  // 全选 → 空数组（全部启用）；部分选择 → 白名单
+  const enabledTools = allToolsSelected.value ? [] : [...selectedToolIds.value]
+  emit('confirm', { ...form, title: '新会话', enabledTools })
 }
 </script>
 
@@ -73,6 +106,37 @@ function confirm() {
               {{ p.label }} - {{ p.desc }}
             </option>
           </select>
+        </div>
+
+        <!-- 本会话可用工具 -->
+        <div class="form-group">
+          <label>
+            可用工具
+            <span class="tool-count">（{{ selectedToolIds.length }}/{{ toolsStore.enabledTools.length }}）</span>
+          </label>
+          <div v-if="toolsStore.enabledTools.length === 0" class="tool-empty">
+            暂无已启用工具，可在「设置 - 工具配置」中添加
+          </div>
+          <div v-else class="tool-picker">
+            <label class="tool-all">
+              <input type="checkbox" :checked="allToolsSelected" @change="toggleAll" />
+              <span>全选</span>
+            </label>
+            <label
+              v-for="t in toolsStore.enabledTools"
+              :key="t.id"
+              class="tool-option"
+            >
+              <input
+                type="checkbox"
+                :checked="selectedToolIds.includes(t.id)"
+                @change="toggleTool(t.id)"
+              />
+              <ToolIcon :name="t.icon || 'zap'" :size="14" class="opt-icon" />
+              <span class="opt-label">{{ t.label || t.name }}</span>
+              <span class="opt-type">{{ TYPE_LABEL[t.type] }}</span>
+            </label>
+          </div>
         </div>
       </div>
 
@@ -180,6 +244,75 @@ function confirm() {
 .path-input {
   display: flex;
   gap: $space-sm;
+}
+
+.tool-count {
+  font-weight: normal;
+  color: $color-text-muted;
+  font-size: $font-size-xs;
+}
+
+.tool-empty {
+  font-size: $font-size-xs;
+  color: $color-text-muted;
+  padding: $space-sm;
+  border: 1px dashed $color-border;
+  border-radius: $radius-sm;
+}
+
+.tool-picker {
+  border: 1px solid $color-border;
+  border-radius: $radius-sm;
+  padding: $space-sm;
+  max-height: 150px;
+  overflow-y: auto;
+}
+
+.tool-all {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: $font-size-xs;
+  color: $color-text-secondary;
+  cursor: pointer;
+  padding-bottom: 6px;
+  margin-bottom: 6px;
+  border-bottom: 1px solid $color-border;
+
+  input {
+    accent-color: $color-primary;
+  }
+}
+
+.tool-option {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 2px;
+  font-size: $font-size-xs;
+  color: $color-text-primary;
+  cursor: pointer;
+
+  input {
+    accent-color: $color-primary;
+  }
+
+  .opt-icon {
+    color: $color-primary;
+    flex-shrink: 0;
+  }
+
+  .opt-label {
+    flex: 1;
+  }
+
+  .opt-type {
+    font-size: 10px;
+    color: $color-text-muted;
+    border: 1px solid $color-border;
+    border-radius: 6px;
+    padding: 0 5px;
+  }
 }
 
 .dialog-footer {

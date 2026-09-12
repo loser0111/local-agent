@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -13,6 +14,7 @@ type App struct {
 	ctx          context.Context
 	modelStore   *ModelStore
 	sessionStore *SessionStore
+	toolStore    *ToolStore
 	toolManager  *ToolManager
 	diffService  *DiffService
 }
@@ -40,8 +42,9 @@ func (a *App) startup(ctx context.Context) {
 	// 初始化会话存储：~/.local-agent/sessions/*.json
 	a.sessionStore = NewSessionStore(filepath.Join(baseDir, "sessions"))
 
-	// 初始化工具管理器（CLI 工具 + 元工具路由器）
-	a.toolManager = NewToolManager()
+	// 初始化工具配置存储与工具管理器（~/.local-agent/tools.json）
+	a.toolStore = NewToolStore(filepath.Join(baseDir, "tools.json"))
+	a.toolManager = NewToolManager(a.toolStore)
 
 	// 初始化差异服务（基于 git 快照计算工作区 diff）
 	a.diffService = NewDiffService()
@@ -113,6 +116,153 @@ func (a *App) GetSession(id string) (*Session, error) {
 func (a *App) DeleteSession(id string) error {
 	a.diffService.ForgetBaseline(id)
 	return a.sessionStore.DeleteSession(id)
+}
+
+// ===== 工具配置管理 =====
+
+// ListTools 返回全部工具配置及运行时状态（供工具配置界面渲染）
+func (a *App) ListTools() []ToolInfo {
+	configs := a.toolStore.GetAll()
+	list := make([]ToolInfo, 0, len(configs))
+	for _, cfg := range configs {
+		info := ToolInfo{ToolConfig: *cfg, Status: ToolRuntimeStatus{Connected: true}}
+		if cfg.Type == ToolTypeMCP {
+			connected, errMsg := a.toolManager.Pool().Status(cfg.ID)
+			info.Status.Connected = connected
+			info.Status.Error = errMsg
+			// 已连接用实时工具数（剔除禁用项）；未连接展示上次发现缓存
+			if connected {
+				if entry, e := a.toolManager.Pool().Connect(context.Background(), cfg); e == nil {
+					disabled := map[string]bool{}
+					for _, d := range cfg.DisabledTools {
+						disabled[d] = true
+					}
+					count := 0
+					for _, mt := range entry.tools {
+						if !disabled[mt.Name] {
+							count++
+						}
+					}
+					info.Status.ToolCount = count
+				}
+			} else {
+				info.Status.ToolCount = len(cfg.Discovered)
+			}
+		}
+		list = append(list, info)
+	}
+	return list
+}
+
+// SaveTool 新增或更新工具配置；新工具无 ID 时自动生成
+func (a *App) SaveTool(cfg ToolConfig) (*ToolConfig, error) {
+	if strings.TrimSpace(cfg.Name) == "" {
+		return nil, fmt.Errorf("工具名称不能为空")
+	}
+	if !validToolName(cfg.Name) {
+		return nil, fmt.Errorf("工具名称只能包含字母、数字、下划线和连字符")
+	}
+	// 名称唯一性校验（排除自身与 MCP 子工具前缀）
+	for _, t := range a.toolStore.GetAll() {
+		if t.Name == cfg.Name && t.ID != cfg.ID {
+			return nil, fmt.Errorf("工具名称 %q 已存在", cfg.Name)
+		}
+	}
+	if cfg.ID == "" {
+		cfg.ID = fmt.Sprintf("tool_%d", time.Now().UnixMilli())
+	}
+	if cfg.Icon == "" {
+		cfg.Icon = defaultIconForType(cfg.Type)
+	}
+	if cfg.Label == "" {
+		cfg.Label = cfg.Name
+	}
+	if err := a.toolStore.Save(&cfg); err != nil {
+		return nil, err
+	}
+	// 配置变更后关闭旧 MCP 连接，下次对话/测试时按新配置重连
+	if cfg.Type == ToolTypeMCP {
+		a.toolManager.Pool().Close(cfg.ID)
+	}
+	return &cfg, nil
+}
+
+// DeleteTool 删除工具配置（内置工具拒绝）
+func (a *App) DeleteTool(id string) error {
+	a.toolManager.Pool().Close(id)
+	return a.toolStore.Delete(id)
+}
+
+// ToggleTool 启用/停用工具；停用时关闭其 MCP 连接
+func (a *App) ToggleTool(id string, enabled bool) error {
+	if err := a.toolStore.SetEnabled(id, enabled); err != nil {
+		return err
+	}
+	if !enabled {
+		a.toolManager.Pool().Close(id)
+	}
+	return nil
+}
+
+// TestToolConnection 测试 MCP server 连接并发现工具；成功后缓存发现结果。
+// 传入未保存的配置（ID 为空）也可测试，使用临时连接不污染缓存。
+func (a *App) TestToolConnection(cfg ToolConfig) ([]MCPToolMeta, error) {
+	if cfg.Type != ToolTypeMCP {
+		return nil, fmt.Errorf("仅 MCP 类型工具支持连接测试")
+	}
+	temp := cfg.ID == ""
+	if temp {
+		cfg.ID = fmt.Sprintf("__test_%d", time.Now().UnixMilli())
+	} else {
+		// 已保存工具：先断开旧连接，确保按最新配置测试
+		a.toolManager.Pool().Close(cfg.ID)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 35*time.Second)
+	defer cancel()
+	entry, err := a.toolManager.Pool().Connect(ctx, &cfg)
+	if temp {
+		defer a.toolManager.Pool().Close(cfg.ID)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	metas := make([]MCPToolMeta, 0, len(entry.tools))
+	for _, t := range entry.tools {
+		metas = append(metas, MCPToolMeta{Name: t.Name, Description: t.Description})
+	}
+	if !temp {
+		_ = a.toolStore.UpdateDiscovered(cfg.ID, metas)
+	}
+	return metas, nil
+}
+
+// validToolName 校验 LLM 函数名：字母/数字/下划线/连字符
+func validToolName(name string) bool {
+	if name == "" || len(name) > 64 {
+		return false
+	}
+	for _, r := range name {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' || r == '-') {
+			return false
+		}
+	}
+	return true
+}
+
+// defaultIconForType 各工具类型的默认 Lucide 图标名
+func defaultIconForType(t string) string {
+	switch t {
+	case ToolTypeCLI:
+		return "terminal"
+	case ToolTypeMCP:
+		return "blocks"
+	case ToolTypeAPI:
+		return "webhook"
+	default:
+		return "zap"
+	}
 }
 
 // ===== 差异视图 =====

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -240,8 +241,9 @@ func (a *App) executeChat(sessionID, query string) *ChatResult {
 	// 4. 构造 LLM messages
 	messages := buildLLMMessages(session, query)
 
-	// 5. 获取工具定义
-	tools := a.toolManager.GetToolsForLLM()
+	// 5. 按会话白名单装配工具视图，获取暴露给 LLM 的工具定义（仅 tool_router）
+	toolView := a.toolManager.BuildView(context.Background(), session.EnabledTools)
+	tools := toolView.GetToolsForLLM()
 
 	// 6. 工具调用循环
 	var toolCallRecords []ToolCall
@@ -302,7 +304,7 @@ func (a *App) executeChat(sessionID, query string) *ChatResult {
 				}
 
 				// 执行工具
-				result, execErr := a.toolManager.ExecuteTool(tc.Function.Name, args)
+				result, execErr := toolView.ExecuteTool(tc.Function.Name, args)
 				duration := time.Since(startTime).Seconds()
 
 				if execErr != nil {

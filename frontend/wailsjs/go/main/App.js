@@ -30,6 +30,10 @@ export function DeleteSession(arg1) {
   return window['go']['main']['App']['DeleteSession'](arg1);
 }
 
+export function DeleteTool(arg1) {
+  return window['go']['main']['App']['DeleteTool'](arg1);
+}
+
 export function GetDiff(arg1) {
   return window['go']['main']['App']['GetDiff'](arg1);
 }
@@ -60,6 +64,22 @@ export function Greet(arg1) {
 
 export function ListSessions() {
   return window['go']['main']['App']['ListSessions']();
+}
+
+export function ListTools() {
+  return window['go']['main']['App']['ListTools']();
+}
+
+export function SaveTool(arg1) {
+  return window['go']['main']['App']['SaveTool'](arg1);
+}
+
+export function TestToolConnection(arg1) {
+  return window['go']['main']['App']['TestToolConnection'](arg1);
+}
+
+export function ToggleTool(arg1, arg2) {
+  return window['go']['main']['App']['ToggleTool'](arg1, arg2);
 }
 
 export function UpdateSession(arg1, arg2) {

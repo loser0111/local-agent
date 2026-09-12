@@ -68,6 +68,7 @@ export async function createSession(config = {}) {
     endAt: now,
     messages: [],
     conversations: [],
+    enabledTools: config.enabledTools || [],
   }
   map[session.id] = session
   writeMockSessions(map)
