@@ -1,12 +1,14 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	wailsRuntime "github.com/wailsapp/wails/v2/pkg/runtime"
@@ -153,6 +155,229 @@ func callLLM(url, token string, req *LLMReq) (*LLMResp, error) {
 	return &llmResp, nil
 }
 
+// ===== LLM 流式调用（SSE，OpenAI 兼容）=====
+
+// llmStreamChunk SSE 单个 data 帧
+type llmStreamChunk struct {
+	Choices []struct {
+		Index int `json:"index"`
+		Delta struct {
+			Role      string `json:"role"`
+			Content   string `json:"content"`
+			ToolCalls []struct {
+				Index    int    `json:"index"`
+				ID       string `json:"id"`
+				Type     string `json:"type"`
+				Function struct {
+					Name      string `json:"name"`
+					Arguments string `json:"arguments"`
+				} `json:"function"`
+			} `json:"tool_calls"`
+		} `json:"delta"`
+		FinishReason string `json:"finish_reason"`
+	} `json:"choices"`
+}
+
+// callLLMStream 以 SSE 方式调用 LLM。
+// 文本分片实时回调 onContent（由调用方节流后推送前端）；
+// 工具调用的 arguments 分片在流内按 index 聚合，流结束后一次性返回完整 LLMResp，
+// 使 executeChat 主循环无需感知流式/非流式差异。
+func callLLMStream(ctx context.Context, url, token string, req *LLMReq, onContent func(string)) (*LLMResp, error) {
+	req.Stream = true
+	data, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("序列化 LLM 请求失败: %w", err)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewBuffer(data))
+	if err != nil {
+		return nil, fmt.Errorf("创建 HTTP 请求失败: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json; charset=utf-8")
+	httpReq.Header.Set("Authorization", "Bearer "+token)
+	httpReq.Header.Set("Accept", "text/event-stream")
+	httpReq.Header.Set("Cache-Control", "no-cache")
+
+	// 流式响应不能设置整体超时（长回复会被砍断），只约束建连与响应头
+	client := &http.Client{
+		Transport: &http.Transport{
+			ResponseHeaderTimeout: 30 * time.Second,
+			Proxy:                 http.ProxyFromEnvironment,
+		},
+	}
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("调用 LLM 失败: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		return nil, fmt.Errorf("LLM 返回错误 (status=%d): %s", resp.StatusCode, string(body))
+	}
+
+	var (
+		content     strings.Builder
+		finish      string
+		tcOrder     []int
+		tcCalls     = map[int]*LLMToolCall{}
+		tcArgs      = map[int]*strings.Builder{}
+		sawDataLine = false
+		badPayload  strings.Builder
+	)
+
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024) // 单行上限 4MB
+
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, ":") || strings.HasPrefix(line, "event:") {
+			continue
+		}
+		if !strings.HasPrefix(line, "data:") {
+			// 200 但非 SSE 帧：收集起来作为格式错误上报
+			badPayload.WriteString(line)
+			continue
+		}
+		sawDataLine = true
+		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if payload == "[DONE]" {
+			break
+		}
+
+		var chunk llmStreamChunk
+		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
+			// 单个坏帧跳过，不中断整个流
+			fmt.Printf("[chat] 跳过无法解析的 SSE 帧: %v\n", err)
+			continue
+		}
+		for _, choice := range chunk.Choices {
+			if choice.Delta.Content != "" {
+				content.WriteString(choice.Delta.Content)
+				if onContent != nil {
+					onContent(choice.Delta.Content)
+				}
+			}
+			for _, dtc := range choice.Delta.ToolCalls {
+				acc, ok := tcCalls[dtc.Index]
+				if !ok {
+					acc = &LLMToolCall{}
+					tcCalls[dtc.Index] = acc
+					args := &strings.Builder{}
+					tcArgs[dtc.Index] = args
+					tcOrder = append(tcOrder, dtc.Index)
+				}
+				if dtc.ID != "" {
+					acc.ID = dtc.ID
+					acc.Type = dtc.Type
+					if acc.Type == "" {
+						acc.Type = ToolTypeFunction
+					}
+					acc.Function.Name = dtc.Function.Name
+				}
+				if dtc.Function.Arguments != "" {
+					tcArgs[dtc.Index].WriteString(dtc.Function.Arguments)
+				}
+			}
+			if choice.FinishReason != "" {
+				finish = choice.FinishReason
+			}
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("读取流式响应失败: %w", err)
+	}
+	if !sawDataLine {
+		if badPayload.Len() > 0 {
+			snippet := badPayload.String()
+			if len(snippet) > 500 {
+				snippet = snippet[:500] + "..."
+			}
+			return nil, fmt.Errorf("流式响应格式错误（服务端可能未开启 SSE）: %s", snippet)
+		}
+		return nil, fmt.Errorf("流式响应为空")
+	}
+
+	msg := LLMMessage{Role: RoleAssistant, Content: content.String()}
+	if len(tcOrder) > 0 {
+		calls := make([]LLMToolCall, 0, len(tcOrder))
+		for _, idx := range tcOrder {
+			acc := tcCalls[idx]
+			if acc.Type == "" {
+				acc.Type = ToolTypeFunction
+			}
+			acc.Function.Arguments = tcArgs[idx].String()
+			calls = append(calls, *acc)
+		}
+		msg.ToolCalls = calls
+		if finish == "" {
+			finish = FinishReasonToolCalls
+		}
+	}
+
+	return &LLMResp{Choices: []LLMChoice{{FinishReason: finish, Message: msg}}}, nil
+}
+
+// startDeltaFlusher 启动文本分片节流推送器：
+// 首个分片立即推送，之后 50ms 或累计 ≥20 字符合并推送一次，避免高频 IPC。
+// 返回的 enqueue 非阻塞入队；调用方在流结束后调 shutdown 等待残余分片发完。
+func (a *App) startDeltaFlusher() (enqueue func(string), shutdown func()) {
+	ch := make(chan string, 256)
+	done := make(chan struct{})
+
+	go func() {
+		var sb strings.Builder
+		ticker := time.NewTicker(50 * time.Millisecond)
+		defer ticker.Stop()
+
+		flush := func() {
+			if sb.Len() == 0 || a.ctx == nil {
+				sb.Reset()
+				return
+			}
+			wailsRuntime.EventsEmit(a.ctx, "chat:event", ChatEvent{
+				Type:  "reply_delta",
+				Reply: sb.String(),
+			})
+			sb.Reset()
+		}
+
+		for {
+			select {
+			case c, ok := <-ch:
+				if !ok {
+					flush()
+					close(done)
+					return
+				}
+				if sb.Len() == 0 {
+					sb.WriteString(c)
+					flush() // 首分片立即推送
+				} else {
+					sb.WriteString(c)
+					if sb.Len() >= 20 {
+						flush()
+					}
+				}
+			case <-ticker.C:
+				flush()
+			}
+		}
+	}()
+
+	enqueue = func(c string) {
+		select {
+		case ch <- c:
+		default: // 背压极端情况下丢弃单分片也不阻塞 LLM 读取（文本已在后端聚合）
+		}
+	}
+	shutdown = func() {
+		close(ch)
+		<-done
+	}
+	return enqueue, shutdown
+}
+
 // ===== 对话流程（借鉴 01agent 的状态机，简化为循环）=====
 
 // ChatEvent 推送给前端的事件数据
@@ -167,9 +392,10 @@ type ChatEvent struct {
 
 // buildLLMMessages 从会话历史消息构造 LLM messages 数组
 // 正确重建消息序列：assistant(tool_calls) → tool(tool_call_id) → assistant(最终回复)
-func buildLLMMessages(session *Session, query string) []LLMMessage {
+// systemPrompt 由调用方拼接（基础人设 + L1 技能清单 + 强制注入正文）
+func buildLLMMessages(session *Session, query, systemPrompt string) []LLMMessage {
 	messages := []LLMMessage{
-		{Role: RoleSystem, Content: SystemPrompt},
+		{Role: RoleSystem, Content: systemPrompt},
 	}
 
 	// 添加历史消息
@@ -210,7 +436,7 @@ func buildLLMMessages(session *Session, query string) []LLMMessage {
 // executeChat 执行完整的多轮对话流程
 // 借鉴 01agent 的状态机设计：Preprocessing → LLM Call → Judge → Tool Execute → Rebuild → 循环
 // 持久化所有中间消息（assistant+tool_calls, tool结果, 最终回复），确保下次对话时消息序列完整
-func (a *App) executeChat(sessionID, query string) *ChatResult {
+func (a *App) executeChat(sessionID, query string, useStream bool) *ChatResult {
 	// 1. 加载会话
 	session, err := a.sessionStore.GetSession(sessionID)
 	if err != nil {
@@ -238,11 +464,22 @@ func (a *App) executeChat(sessionID, query string) *ChatResult {
 		turnBase = a.diffService.TurnSnapshot(dir)
 	}
 
-	// 4. 构造 LLM messages
-	messages := buildLLMMessages(session, query)
+	// 4. 组装技能上下文（L1 清单 + 强制注入正文）并构造 LLM messages
+	skillPrompt := SystemPrompt
+	if a.skillStore != nil {
+		enabled := a.enabledSkillsForSession(session)
+		if idx := BuildSkillIndex(enabled); idx != "" {
+			skillPrompt += "\n\n## 可用技能（Skills）\n" +
+				"需要时先调用 read_skill 工具获取技能完整说明，再按说明执行：\n" + idx
+		}
+		if block := BuildAlwaysInjectBlock(enabled); block != "" {
+			skillPrompt += "\n\n## 已直接加载的技能正文" + block
+		}
+	}
+	messages := buildLLMMessages(session, query, skillPrompt)
 
 	// 5. 按会话白名单装配工具视图，获取暴露给 LLM 的工具定义（仅 tool_router）
-	toolView := a.toolManager.BuildView(context.Background(), session.EnabledTools)
+	toolView := a.toolManager.BuildView(context.Background(), session.EnabledTools, session.EnabledSkills)
 	tools := toolView.GetToolsForLLM()
 
 	// 6. 工具调用循环
@@ -254,11 +491,23 @@ func (a *App) executeChat(sessionID, query string) *ChatResult {
 			Model:       modelID,
 			Messages:    messages,
 			Temperature: 1.0,
-			Stream:      false,
+			Stream:      useStream,
 			Tools:       tools,
 		}
 
-		resp, err := callLLM(model.URL, model.APIKey, req)
+		// 流式与非流式在聚合后返回结构相同，主循环无需分叉
+		var (
+			resp          *LLMResp
+			flusher       func(string)
+			flushShutdown func()
+		)
+		if useStream {
+			flusher, flushShutdown = a.startDeltaFlusher()
+			resp, err = callLLMStream(context.Background(), model.URL, model.APIKey, req, flusher)
+			flushShutdown() // 确保残余分片在进入工具执行/done 前全部发出
+		} else {
+			resp, err = callLLM(model.URL, model.APIKey, req)
+		}
 		if err != nil {
 			return &ChatResult{
 				Error:     err.Error(),

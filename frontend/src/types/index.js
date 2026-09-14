@@ -102,6 +102,25 @@
  * @property {number} createdAt
  */
 
+/**
+ * 技能元数据（L1，常驻 system prompt 的部分）
+ * @typedef {Object} SkillMeta
+ * @property {string} id 技能目录名，唯一主键
+ * @property {string} name frontmatter.name
+ * @property {string} description frontmatter.description
+ * @property {string} dir 技能目录绝对路径
+ * @property {boolean} enabled 全局启用开关
+ * @property {boolean} alwaysInject true=正文直接注入 system prompt
+ * @property {boolean} builtin 内置不可删
+ * @property {boolean} hasScripts 是否存在 scripts/ 目录
+ * @property {string} error 解析/校验错误
+ */
+
+/**
+ * 技能详情（含 SKILL.md 正文，L2 按需加载）
+ * @typedef {SkillMeta & {body: string}} SkillDetail
+ */
+
 export const SESSION_STATUS = {
   ACTIVE: 'active',
   COMPLETED: 'completed',

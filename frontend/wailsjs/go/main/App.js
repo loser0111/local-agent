@@ -14,8 +14,8 @@ export function AppendMessage(arg1, arg2) {
   return window['go']['main']['App']['AppendMessage'](arg1, arg2);
 }
 
-export function Chat(arg1, arg2) {
-  return window['go']['main']['App']['Chat'](arg1, arg2);
+export function Chat(arg1, arg2, arg3) {
+  return window['go']['main']['App']['Chat'](arg1, arg2, arg3);
 }
 
 export function CreateSession(arg1) {
@@ -28,6 +28,10 @@ export function DeleteModel(arg1) {
 
 export function DeleteSession(arg1) {
   return window['go']['main']['App']['DeleteSession'](arg1);
+}
+
+export function DeleteSkill(arg1) {
+  return window['go']['main']['App']['DeleteSkill'](arg1);
 }
 
 export function DeleteTool(arg1) {
@@ -58,6 +62,10 @@ export function GetSession(arg1) {
   return window['go']['main']['App']['GetSession'](arg1);
 }
 
+export function GetSkill(arg1) {
+  return window['go']['main']['App']['GetSkill'](arg1);
+}
+
 export function Greet(arg1) {
   return window['go']['main']['App']['Greet'](arg1);
 }
@@ -66,16 +74,40 @@ export function ListSessions() {
   return window['go']['main']['App']['ListSessions']();
 }
 
+export function ListSkills() {
+  return window['go']['main']['App']['ListSkills']();
+}
+
 export function ListTools() {
   return window['go']['main']['App']['ListTools']();
+}
+
+export function RefreshSkills() {
+  return window['go']['main']['App']['RefreshSkills']();
+}
+
+export function SaveSkill(arg1, arg2, arg3, arg4) {
+  return window['go']['main']['App']['SaveSkill'](arg1, arg2, arg3, arg4);
 }
 
 export function SaveTool(arg1) {
   return window['go']['main']['App']['SaveTool'](arg1);
 }
 
+export function SetSkillAlwaysInject(arg1, arg2) {
+  return window['go']['main']['App']['SetSkillAlwaysInject'](arg1, arg2);
+}
+
+export function SkillsDir() {
+  return window['go']['main']['App']['SkillsDir']();
+}
+
 export function TestToolConnection(arg1) {
   return window['go']['main']['App']['TestToolConnection'](arg1);
+}
+
+export function ToggleSkill(arg1, arg2) {
+  return window['go']['main']['App']['ToggleSkill'](arg1, arg2);
 }
 
 export function ToggleTool(arg1, arg2) {

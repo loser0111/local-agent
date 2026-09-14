@@ -16,6 +16,7 @@ type App struct {
 	sessionStore *SessionStore
 	toolStore    *ToolStore
 	toolManager  *ToolManager
+	skillStore   *SkillStore
 	diffService  *DiffService
 }
 
@@ -42,9 +43,13 @@ func (a *App) startup(ctx context.Context) {
 	// 初始化会话存储：~/.local-agent/sessions/*.json
 	a.sessionStore = NewSessionStore(filepath.Join(baseDir, "sessions"))
 
+	// 初始化技能存储：~/.local-agent/skills/（文件夹 + SKILL.md）
+	a.skillStore = NewSkillStore(filepath.Join(baseDir, "skills"))
+	a.skillStore.EnsureDefaultSkill() // 首次运行写入示例技能
+
 	// 初始化工具配置存储与工具管理器（~/.local-agent/tools.json）
 	a.toolStore = NewToolStore(filepath.Join(baseDir, "tools.json"))
-	a.toolManager = NewToolManager(a.toolStore)
+	a.toolManager = NewToolManager(a.toolStore, a.skillStore)
 
 	// 初始化差异服务（基于 git 快照计算工作区 diff）
 	a.diffService = NewDiffService()
@@ -265,6 +270,76 @@ func defaultIconForType(t string) string {
 	}
 }
 
+// ===== 技能管理（Skills）=====
+
+// ListSkills 返回全部技能元数据（不含正文）
+func (a *App) ListSkills() []*SkillMeta {
+	list := a.skillStore.GetAll()
+	if list == nil {
+		return []*SkillMeta{}
+	}
+	return list
+}
+
+// GetSkill 返回含正文的技能详情
+func (a *App) GetSkill(id string) (*SkillDetail, error) {
+	d, ok := a.skillStore.GetDetail(id)
+	if !ok {
+		return nil, fmt.Errorf("技能不存在: %s", id)
+	}
+	return d, nil
+}
+
+// SaveSkill 新建或更新技能（写入 <id>/SKILL.md）
+func (a *App) SaveSkill(id, name, description, body string) error {
+	return a.skillStore.SaveSkill(id, name, description, body)
+}
+
+// DeleteSkill 删除技能目录（内置拒绝）
+func (a *App) DeleteSkill(id string) error {
+	return a.skillStore.DeleteSkill(id)
+}
+
+// ToggleSkill 启用/停用技能
+func (a *App) ToggleSkill(id string, enabled bool) error {
+	return a.skillStore.SetEnabled(id, enabled)
+}
+
+// SetSkillAlwaysInject 设置「强制注入正文」
+func (a *App) SetSkillAlwaysInject(id string, v bool) error {
+	return a.skillStore.SetAlwaysInject(id, v)
+}
+
+// RefreshSkills 重新扫描技能目录并返回最新元数据
+func (a *App) RefreshSkills() []*SkillMeta {
+	a.skillStore.Refresh()
+	return a.ListSkills()
+}
+
+// SkillsDir 返回技能目录绝对路径（供界面「打开目录」）
+func (a *App) SkillsDir() string {
+	return a.skillStore.Dir()
+}
+
+// enabledSkillsForSession 按会话白名单过滤技能；白名单为空=全部技能
+func (a *App) enabledSkillsForSession(session *Session) []*SkillMeta {
+	all := a.skillStore.GetAll()
+	if len(session.EnabledSkills) == 0 {
+		return all
+	}
+	wl := make(map[string]bool, len(session.EnabledSkills))
+	for _, id := range session.EnabledSkills {
+		wl[id] = true
+	}
+	out := make([]*SkillMeta, 0, len(all))
+	for _, m := range all {
+		if wl[m.ID] {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
 // ===== 差异视图 =====
 
 // resolveProjectDir 返回会话项目目录；为空时回退到进程工作目录
@@ -339,8 +414,9 @@ func (a *App) UpdateSession(id string, patch SessionPatch) (*Session, error) {
 
 // Chat 发送消息并获取 AI 回复（真正的 LLM 调用，支持多轮工具调用）
 // 前端调用此方法前应先监听 "chat:event" 事件以接收工具调用中间状态
-func (a *App) Chat(sessionID string, query string) (*ChatResult, error) {
-	result := a.executeChat(sessionID, query)
+// useStream=true 时以 SSE 流式请求模型，文本分片通过 chat:event 的 reply_delta 事件推送
+func (a *App) Chat(sessionID string, query string, useStream bool) (*ChatResult, error) {
+	result := a.executeChat(sessionID, query, useStream)
 	if result.Error != "" && result.Reply == "" {
 		return result, fmt.Errorf("%s", result.Error)
 	}

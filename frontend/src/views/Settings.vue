@@ -5,6 +5,7 @@ import { useSettingStore } from '@/stores/setting'
 import { PERMISSION_MODES } from '@/types'
 import { fetchModels, addModel, deleteModel } from '@/api/model'
 import ToolSettings from '@/components/business/ToolSettings.vue'
+import SkillSettings from '@/components/business/SkillSettings.vue'
 
 const router = useRouter()
 const settingStore = useSettingStore()
@@ -15,6 +16,7 @@ const tabs = [
   { key: 'general', label: '通用设置' },
   { key: 'model', label: '模型配置' },
   { key: 'tool', label: '工具配置' },
+  { key: 'skill', label: '技能配置' },
   { key: 'permission', label: '权限配置' },
   { key: 'about', label: '关于' },
 ]
@@ -156,6 +158,13 @@ onMounted(() => {
               PR 合并后自动归档会话
             </label>
           </div>
+          <div class="form-group checkbox-group">
+            <label>
+              <input type="checkbox" v-model="settingStore.settings.streamResponse" />
+              流式输出
+              <span class="checkbox-hint">（逐字显示 AI 回复，需要模型服务支持 SSE；不支持时关闭此项）</span>
+            </label>
+          </div>
         </div>
 
         <!-- 模型配置 -->
@@ -242,6 +251,9 @@ onMounted(() => {
 
         <!-- 工具配置 -->
         <ToolSettings v-if="activeTab === 'tool'" />
+
+        <!-- 技能配置 -->
+        <SkillSettings v-if="activeTab === 'skill'" />
 
         <!-- 权限配置 -->
         <div v-if="activeTab === 'permission'" class="settings-panel">
@@ -377,6 +389,12 @@ onMounted(() => {
     accent-color: $color-primary;
     width: 16px;
     height: 16px;
+  }
+
+  .checkbox-hint {
+    font-size: $font-size-xs;
+    color: $color-text-muted;
+    font-weight: $font-weight-normal;
   }
 }
 

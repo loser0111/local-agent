@@ -14,7 +14,7 @@ func newTestToolManager(t *testing.T) (*ToolManager, string) {
 	t.Helper()
 	dir := t.TempDir()
 	store := NewToolStore(filepath.Join(dir, "tools.json"))
-	return NewToolManager(store), dir
+	return NewToolManager(store, nil), dir
 }
 
 // 模板渲染
@@ -48,7 +48,7 @@ func TestDynamicCLIToolEndToEnd(t *testing.T) {
 		t.Fatalf("保存工具失败: %v", err)
 	}
 
-	view := tm.BuildView(context.Background(), nil)
+	view := tm.BuildView(context.Background(), nil, nil)
 
 	// list 应包含 exec_shell 和 say_hello
 	out, err := view.ExecuteTool("tool_router", map[string]interface{}{
@@ -109,7 +109,7 @@ func TestDisabledToolExcluded(t *testing.T) {
 	if err := tm.Store().Save(cfg); err != nil {
 		t.Fatal(err)
 	}
-	view := tm.BuildView(context.Background(), nil)
+	view := tm.BuildView(context.Background(), nil, nil)
 	out, _ := view.ExecuteTool("tool_router", map[string]interface{}{"action": "list"})
 	if strings.Contains(out, "off_tool") {
 		t.Fatalf("停用工具不应出现在列表中: %s", out)
@@ -127,7 +127,7 @@ func TestSessionWhitelist(t *testing.T) {
 		t.Fatal(err)
 	}
 	// 白名单只含 exec_shell，picked 不出现
-	view := tm.BuildView(context.Background(), []string{"exec_shell"})
+	view := tm.BuildView(context.Background(), []string{"exec_shell"}, nil)
 	out, _ := view.ExecuteTool("tool_router", map[string]interface{}{"action": "list"})
 	if strings.Contains(out, "picked") || !strings.Contains(out, "exec_shell") {
 		t.Fatalf("白名单过滤错误: %s", out)
@@ -174,7 +174,7 @@ func TestAPIToolConfigRoundTrip(t *testing.T) {
 	}
 
 	// 装配成功且 URL 模板渲染正确（不实际发请求，只验证字段）
-	view := tm.BuildView(context.Background(), nil)
+	view := tm.BuildView(context.Background(), nil, nil)
 	tool := view.nonMeta["weather"]
 	if tool == nil {
 		t.Fatal("API 工具未装配")

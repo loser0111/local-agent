@@ -4,6 +4,7 @@ import { useSessionStore } from '@/stores/session'
 import { useChatStore } from '@/stores/chat'
 import { usePaneStore } from '@/stores/pane'
 import { useDiffStore } from '@/stores/diff'
+import { useSettingStore } from '@/stores/setting'
 import { appendMessage, appendConversation, chat, onDiffUpdate } from '@/api/session'
 import PaneHeader from '@/components/layout/PaneHeader.vue'
 import MessageBubble from '@/components/business/MessageBubble.vue'
@@ -13,6 +14,7 @@ const sessionStore = useSessionStore()
 const chatStore = useChatStore()
 const paneStore = usePaneStore()
 const diffStore = useDiffStore()
+const settingStore = useSettingStore()
 
 // 订阅后端 diff 实时推送（有文件改动时刷新差异数据）
 let offDiff = null
@@ -171,6 +173,10 @@ async function sendMessage() {
     // 3. 调用后端 Chat 方法（真实 LLM 调用 + 工具执行）
     // 后端会持久化所有中间消息（assistant+tool_calls, tool结果, 最终回复）
     const result = await chat(sid, text, {
+      stream: settingStore.settings.streamResponse,
+      onReplyDelta: (chunk) => {
+        chatStore.appendStreamContent(localMsg.id, chunk)
+      },
       onToolCallStart: (tc) => {
         chatStore.addToolCall(localMsg.id, tc)
       },
@@ -326,6 +332,17 @@ function openDiff() {
             <path d="M8 2v12M2 8h12" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
           </svg>
           Diff
+        </button>
+        <button
+          class="tool-btn stream-btn"
+          :class="{ active: settingStore.settings.streamResponse }"
+          :title="settingStore.settings.streamResponse ? '流式输出已开启（点击关闭）' : '流式输出已关闭（点击开启）'"
+          @click="settingStore.setStreamResponse(!settingStore.settings.streamResponse)"
+        >
+          <svg width="15" height="15" viewBox="0 0 16 16" fill="none">
+            <path d="M2 4h12M2 8h8M2 12h10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
+          </svg>
+          流式
         </button>
         <button v-if="chatStore.isGenerating" class="tool-btn stop-btn" @click="stopGeneration">
           <svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor">
@@ -493,6 +510,11 @@ function openDiff() {
     &:hover {
       background-color: rgba(255, 85, 85, 0.1);
     }
+  }
+
+  &.stream-btn.active {
+    color: $color-primary;
+    background-color: rgba(124, 58, 237, 0.12);
   }
 }
 

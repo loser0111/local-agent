@@ -1,19 +1,27 @@
 <script setup>
 import { reactive, ref, computed, onMounted } from 'vue'
+import { BookOpen } from 'lucide-vue-next'
 import { PERMISSION_MODES } from '@/types'
 import { fetchModelNames } from '@/api/model'
 import { useToolsStore } from '@/stores/tools'
+import { useSkillsStore } from '@/stores/skills'
 import ToolIcon from './ToolIcon.vue'
 
 const emit = defineEmits(['close', 'confirm'])
 
 const modelNames = ref([])
 const toolsStore = useToolsStore()
+const skillsStore = useSkillsStore()
 // 选中的工具 ID；全部选中时以空数组提交（后端语义：空=全部已启用工具）
 const selectedToolIds = ref([])
+// 选中的技能 ID；语义同上（空=全部已启用技能）
+const selectedSkillIds = ref([])
 
 const allToolsSelected = computed(
   () => selectedToolIds.value.length === toolsStore.enabledTools.length
+)
+const allSkillsSelected = computed(
+  () => selectedSkillIds.value.length === skillsStore.enabledSkills.length
 )
 
 onMounted(async () => {
@@ -27,6 +35,12 @@ onMounted(async () => {
     selectedToolIds.value = toolsStore.enabledTools.map((t) => t.id)
   } catch (e) {
     console.error('加载工具列表失败:', e)
+  }
+  try {
+    await skillsStore.load()
+    selectedSkillIds.value = skillsStore.enabledSkills.map((s) => s.id)
+  } catch (e) {
+    console.error('加载技能列表失败:', e)
   }
 })
 
@@ -51,12 +65,27 @@ function toggleAll() {
   }
 }
 
+function toggleSkill(id) {
+  const idx = selectedSkillIds.value.indexOf(id)
+  if (idx > -1) selectedSkillIds.value.splice(idx, 1)
+  else selectedSkillIds.value.push(id)
+}
+
+function toggleAllSkills() {
+  if (allSkillsSelected.value) {
+    selectedSkillIds.value = []
+  } else {
+    selectedSkillIds.value = skillsStore.enabledSkills.map((s) => s.id)
+  }
+}
+
 const TYPE_LABEL = { builtin: '内置', cli: 'CLI', mcp: 'MCP', api: 'API' }
 
 function confirm() {
   // 全选 → 空数组（全部启用）；部分选择 → 白名单
   const enabledTools = allToolsSelected.value ? [] : [...selectedToolIds.value]
-  emit('confirm', { ...form, title: '新会话', enabledTools })
+  const enabledSkills = allSkillsSelected.value ? [] : [...selectedSkillIds.value]
+  emit('confirm', { ...form, title: '新会话', enabledTools, enabledSkills })
 }
 </script>
 
@@ -135,6 +164,37 @@ function confirm() {
               <ToolIcon :name="t.icon || 'zap'" :size="14" class="opt-icon" />
               <span class="opt-label">{{ t.label || t.name }}</span>
               <span class="opt-type">{{ TYPE_LABEL[t.type] }}</span>
+            </label>
+          </div>
+        </div>
+
+        <!-- 本会话可用技能 -->
+        <div class="form-group">
+          <label>
+            可用技能
+            <span class="tool-count">（{{ selectedSkillIds.length }}/{{ skillsStore.enabledSkills.length }}）</span>
+          </label>
+          <div v-if="skillsStore.enabledSkills.length === 0" class="tool-empty">
+            暂无已启用技能，可在「设置 - 技能配置」中添加
+          </div>
+          <div v-else class="tool-picker">
+            <label class="tool-all">
+              <input type="checkbox" :checked="allSkillsSelected" @change="toggleAllSkills" />
+              <span>全选</span>
+            </label>
+            <label
+              v-for="s in skillsStore.enabledSkills"
+              :key="s.id"
+              class="tool-option"
+            >
+              <input
+                type="checkbox"
+                :checked="selectedSkillIds.includes(s.id)"
+                @change="toggleSkill(s.id)"
+              />
+              <BookOpen :size="14" class="opt-icon" />
+              <span class="opt-label">{{ s.name }}</span>
+              <span v-if="s.alwaysInject" class="opt-type opt-inject">注入</span>
             </label>
           </div>
         </div>
@@ -312,6 +372,11 @@ function confirm() {
     border: 1px solid $color-border;
     border-radius: 6px;
     padding: 0 5px;
+  }
+
+  .opt-inject {
+    color: #c084fc;
+    border-color: rgba(124, 58, 237, 0.5);
   }
 }
 

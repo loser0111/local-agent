@@ -47,7 +47,7 @@ function genSessionId() {
 
 /**
  * 创建会话
- * @param {{title?:string, project?:string, model?:string, permissionMode?:string, environment?:string}} config
+ * @param {{title?:string, project?:string, model?:string, permissionMode?:string, environment?:string, enabledTools?:string[], enabledSkills?:string[]}} config
  * @returns {Promise<object>} 创建的完整会话
  */
 export async function createSession(config = {}) {
@@ -69,6 +69,7 @@ export async function createSession(config = {}) {
     messages: [],
     conversations: [],
     enabledTools: config.enabledTools || [],
+    enabledSkills: config.enabledSkills || [],
   }
   map[session.id] = session
   writeMockSessions(map)
@@ -185,19 +186,26 @@ export async function updateSession(id, patch) {
 
 /**
  * 发送消息给 AI 并获取回复（真正的 LLM 调用）
- * 在 Wails 环境下，通过事件接收工具调用中间状态，最终返回完整回复
+ * 在 Wails 环境下，通过事件接收工具调用中间状态与流式文本分片，最终返回完整回复
  * 后端会持久化所有中间消息（assistant+tool_calls, tool结果, 最终回复）
  * @param {string} sessionId
  * @param {string} query
- * @param {{onToolCallStart?:Function, onToolCallEnd?:Function}} callbacks
+ * @param {{stream?:boolean, onReplyDelta?:Function, onToolCallStart?:Function, onToolCallEnd?:Function}} callbacks
  * @returns {Promise<{reply:string, toolCalls?:array, messages?:array, error?:string}>}
  */
-export async function chat(sessionId, query, { onToolCallStart, onToolCallEnd } = {}) {
+export async function chat(
+  sessionId,
+  query,
+  { stream = true, onReplyDelta, onToolCallStart, onToolCallEnd } = {}
+) {
   if (isWails()) {
-    // 监听工具调用中间状态事件
+    // 监听工具调用中间状态与流式分片事件
     const eventHandler = (eventData) => {
       if (!eventData) return
       switch (eventData.type) {
+        case 'reply_delta':
+          onReplyDelta?.(eventData.reply)
+          break
         case 'tool_call_start':
           onToolCallStart?.(eventData.toolCall)
           break
@@ -209,7 +217,7 @@ export async function chat(sessionId, query, { onToolCallStart, onToolCallEnd } 
     EventsOn('chat:event', eventHandler)
 
     try {
-      const result = await Chat(sessionId, query)
+      const result = await Chat(sessionId, query, !!stream)
       return result
     } finally {
       EventsOff('chat:event')
@@ -237,6 +245,16 @@ export async function chat(sessionId, query, { onToolCallStart, onToolCallEnd } 
   }
 
   const reply = `这是浏览器开发模式的模拟回复。\n\n你说的是："${query}"\n\n在 Wails 桌面环境中，这里会返回真正的 LLM 回复。`
+
+  // 模拟 SSE：把回复切成小分片逐段回调
+  if (stream && onReplyDelta) {
+    const chunks = reply.match(/[\s\S]{1,6}/g) || [reply]
+    for (const c of chunks) {
+      onReplyDelta(c)
+      await new Promise((r) => setTimeout(r, 30))
+    }
+  }
+
   const now = Date.now()
 
   return {

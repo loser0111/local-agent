@@ -58,8 +58,9 @@ type Session struct {
 	EndAt          int64           `json:"endAt"`
 	Messages       []Message       `json:"messages"`
 	Conversations  []*Conversation `json:"conversations"`
-	Diffs          []DiffTurn      `json:"diffs,omitempty"`        // 每轮对话产生的文件差异
-	EnabledTools   []string        `json:"enabledTools,omitempty"` // 本会话可用的工具 ID 白名单（空=全部已启用工具）
+	Diffs          []DiffTurn      `json:"diffs,omitempty"`         // 每轮对话产生的文件差异
+	EnabledTools   []string        `json:"enabledTools,omitempty"`  // 本会话可用的工具 ID 白名单（空=全部已启用工具）
+	EnabledSkills  []string        `json:"enabledSkills,omitempty"` // 本会话可用的技能 ID 白名单（空=全部已启用技能）
 }
 
 // SessionConfig 创建会话时的配置
@@ -69,7 +70,8 @@ type SessionConfig struct {
 	Model          string   `json:"model"`
 	PermissionMode string   `json:"permissionMode"`
 	Environment    string   `json:"environment"`
-	EnabledTools   []string `json:"enabledTools"` // 本会话可用的工具 ID 白名单（空=全部已启用工具）
+	EnabledTools   []string `json:"enabledTools"`  // 本会话可用的工具 ID 白名单（空=全部已启用工具）
+	EnabledSkills  []string `json:"enabledSkills"` // 本会话可用的技能 ID 白名单（空=全部已启用技能）
 }
 
 // SessionPatch 会话部分字段更新（指针为 nil 表示不更新）
@@ -116,6 +118,7 @@ func (s *SessionStore) CreateSession(config SessionConfig) (*Session, error) {
 		Messages:       []Message{},
 		Conversations:  []*Conversation{},
 		EnabledTools:   config.EnabledTools,
+		EnabledSkills:  config.EnabledSkills,
 	}
 	if session.Title == "" {
 		session.Title = "新会话"

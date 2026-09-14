@@ -212,15 +212,19 @@ func (t *MetaTool) executeTool(ctx context.Context, args map[string]interface{})
 
 // ===== 工具管理器（配置驱动装配）=====
 
-// ToolManager 持有工具配置存储与 MCP 连接池，按会话构建工具视图
+// ToolManager 持有工具配置存储、技能存储与 MCP 连接池，按会话构建工具视图
 type ToolManager struct {
-	store *ToolStore
-	pool  *MCPPool
+	store  *ToolStore
+	skills *SkillStore
+	pool   *MCPPool
 }
 
-func NewToolManager(store *ToolStore) *ToolManager {
-	return &ToolManager{store: store, pool: NewMCPPool()}
+func NewToolManager(store *ToolStore, skills *SkillStore) *ToolManager {
+	return &ToolManager{store: store, skills: skills, pool: NewMCPPool()}
 }
+
+// Skills 暴露技能存储
+func (tm *ToolManager) Skills() *SkillStore { return tm.skills }
 
 // Pool 暴露 MCP 连接池（供连接测试使用）
 func (tm *ToolManager) Pool() *MCPPool { return tm.pool }
@@ -236,8 +240,9 @@ type SessionView struct {
 
 // BuildView 依据配置和会话白名单装配工具。
 // enabledWhitelist 为空表示启用全部已开启工具；非空时只装配白名单内的工具 ID。
+// skillWhitelist 同理作用于技能（决定 read_skill 可读范围）；为空=全部已启用技能。
 // MCP server 连接失败不阻断装配，仅跳过其子工具（错误在设置页状态中展示）。
-func (tm *ToolManager) BuildView(ctx context.Context, enabledWhitelist []string) *SessionView {
+func (tm *ToolManager) BuildView(ctx context.Context, enabledWhitelist, skillWhitelist []string) *SessionView {
 	registry := map[string]ToolInterface{}
 	typeMap := map[string]string{}
 	whitelist := map[string]bool{}
@@ -288,6 +293,14 @@ func (tm *ToolManager) BuildView(ctx context.Context, enabledWhitelist []string)
 				registry[wrapped.GetName()] = wrapped
 				typeMap[wrapped.GetName()] = ToolTypeMCP
 			}
+		}
+	}
+
+	// 内置：技能加载工具（存在本会话可用技能时注册，经 tool_router 被发现）
+	if tm.skills != nil {
+		if rst := NewReadSkillTool(tm.skills, skillWhitelist); rst.HasAvailable() {
+			registry[rst.GetName()] = rst
+			typeMap[rst.GetName()] = ToolTypeBuiltin
 		}
 	}
 

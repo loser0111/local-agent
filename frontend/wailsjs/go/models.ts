@@ -304,6 +304,7 @@ export namespace main {
 	    conversations: Conversation[];
 	    diffs?: DiffTurn[];
 	    enabledTools?: string[];
+	    enabledSkills?: string[];
 	
 	    static createFrom(source: any = {}) {
 	        return new Session(source);
@@ -324,6 +325,7 @@ export namespace main {
 	        this.conversations = this.convertValues(source["conversations"], Conversation);
 	        this.diffs = this.convertValues(source["diffs"], DiffTurn);
 	        this.enabledTools = source["enabledTools"];
+	        this.enabledSkills = source["enabledSkills"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -351,6 +353,7 @@ export namespace main {
 	    permissionMode: string;
 	    environment: string;
 	    enabledTools: string[];
+	    enabledSkills: string[];
 	
 	    static createFrom(source: any = {}) {
 	        return new SessionConfig(source);
@@ -364,6 +367,7 @@ export namespace main {
 	        this.permissionMode = source["permissionMode"];
 	        this.environment = source["environment"];
 	        this.enabledTools = source["enabledTools"];
+	        this.enabledSkills = source["enabledSkills"];
 	    }
 	}
 	export class SessionPatch {
@@ -384,6 +388,64 @@ export namespace main {
 	        this.permissionMode = source["permissionMode"];
 	        this.status = source["status"];
 	        this.project = source["project"];
+	    }
+	}
+	export class SkillDetail {
+	    id: string;
+	    name: string;
+	    description: string;
+	    dir: string;
+	    enabled: boolean;
+	    alwaysInject: boolean;
+	    builtin: boolean;
+	    hasScripts: boolean;
+	    error: string;
+	    body: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new SkillDetail(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.name = source["name"];
+	        this.description = source["description"];
+	        this.dir = source["dir"];
+	        this.enabled = source["enabled"];
+	        this.alwaysInject = source["alwaysInject"];
+	        this.builtin = source["builtin"];
+	        this.hasScripts = source["hasScripts"];
+	        this.error = source["error"];
+	        this.body = source["body"];
+	    }
+	}
+	export class SkillMeta {
+	    id: string;
+	    name: string;
+	    description: string;
+	    dir: string;
+	    enabled: boolean;
+	    alwaysInject: boolean;
+	    builtin: boolean;
+	    hasScripts: boolean;
+	    error: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new SkillMeta(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.name = source["name"];
+	        this.description = source["description"];
+	        this.dir = source["dir"];
+	        this.enabled = source["enabled"];
+	        this.alwaysInject = source["alwaysInject"];
+	        this.builtin = source["builtin"];
+	        this.hasScripts = source["hasScripts"];
+	        this.error = source["error"];
 	    }
 	}
 	

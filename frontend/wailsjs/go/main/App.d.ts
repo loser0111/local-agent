@@ -8,13 +8,15 @@ export function AppendConversation(arg1:string,arg2:main.Conversation):Promise<v
 
 export function AppendMessage(arg1:string,arg2:main.Message):Promise<main.Message>;
 
-export function Chat(arg1:string,arg2:string):Promise<main.ChatResult>;
+export function Chat(arg1:string,arg2:string,arg3:boolean):Promise<main.ChatResult>;
 
 export function CreateSession(arg1:main.SessionConfig):Promise<main.Session>;
 
 export function DeleteModel(arg1:string):Promise<void>;
 
 export function DeleteSession(arg1:string):Promise<void>;
+
+export function DeleteSkill(arg1:string):Promise<void>;
 
 export function DeleteTool(arg1:string):Promise<void>;
 
@@ -30,15 +32,29 @@ export function GetModels():Promise<Array<main.Model>>;
 
 export function GetSession(arg1:string):Promise<main.Session>;
 
+export function GetSkill(arg1:string):Promise<main.SkillDetail>;
+
 export function Greet(arg1:string):Promise<string>;
 
 export function ListSessions():Promise<Array<main.Session>>;
 
+export function ListSkills():Promise<Array<main.SkillMeta>>;
+
 export function ListTools():Promise<Array<main.ToolInfo>>;
+
+export function RefreshSkills():Promise<Array<main.SkillMeta>>;
+
+export function SaveSkill(arg1:string,arg2:string,arg3:string,arg4:string):Promise<void>;
 
 export function SaveTool(arg1:main.ToolConfig):Promise<main.ToolConfig>;
 
+export function SetSkillAlwaysInject(arg1:string,arg2:boolean):Promise<void>;
+
+export function SkillsDir():Promise<string>;
+
 export function TestToolConnection(arg1:main.ToolConfig):Promise<Array<main.MCPToolMeta>>;
+
+export function ToggleSkill(arg1:string,arg2:boolean):Promise<void>;
 
 export function ToggleTool(arg1:string,arg2:boolean):Promise<void>;
 
