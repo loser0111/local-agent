@@ -234,31 +234,83 @@ func (s *SettingsStore) AddRule(projectDir, bucket, raw, source string) error {
 	return writeSettings(path, st)
 }
 
-// RemoveRule 从指定层的指定桶里删除一条规则
+// RemoveRule 从指定层的指定桶里删除一条规则。
+//
+// 规则不在该层时返回**明确错误**，而不是静默成功。静默成功会让界面显示
+// 「已删除」而规则仍在文件里 —— 用户看到的就是「点了删除没用」，且毫无线索。
 func (s *SettingsStore) RemoveRule(projectDir, bucket, raw, source string) error {
+	removed, err := s.RemoveRuleIfPresent(projectDir, bucket, raw, source)
+	if err != nil {
+		return err
+	}
+	if !removed {
+		return fmt.Errorf("该规则不在目标文件中，未做改动（已查找 %s）", s.pathForSource(projectDir, source))
+	}
+	return nil
+}
+
+// RemoveRuleIfPresent 删除规则并返回是否真的删掉了
+func (s *SettingsStore) RemoveRuleIfPresent(projectDir, bucket, raw, source string) (bool, error) {
 	if source == SourceBuiltin {
-		return fmt.Errorf("内置规则不可删除")
+		return false, fmt.Errorf("内置规则不可删除")
 	}
 	path := s.pathForSource(projectDir, source)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.removeFromFile(path, bucket, raw)
+}
 
+// RemoveRuleAnyLayer 依次在项目本地 / 项目级 / 用户全局三层里查找并删除该规则，
+// 返回实际删除的层标识。用于「不确定规则当初落在哪一层」的场景 ——
+// 例如撤销一条「永久允许」授权时，写入时可能因没有项目目录而回退到了全局层。
+func (s *SettingsStore) RemoveRuleAnyLayer(projectDir, bucket, raw string) (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, source := range []string{SourceLocal, SourceProject, SourceUser} {
+		path := s.pathForSource(projectDir, source)
+		if removed, err := s.removeFromFile(path, bucket, raw); err != nil {
+			continue // 某一层读不出来不影响继续找下一层
+		} else if removed {
+			return source, true
+		}
+	}
+	return "", false
+}
+
+// removeFromFile 在单个文件里执行删除（调用方需持有锁）
+func (s *SettingsStore) removeFromFile(path, bucket, raw string) (bool, error) {
 	st, _, err := readSettings(path)
 	if err != nil {
-		return err
+		return false, err
 	}
+	var list []string
 	switch bucket {
 	case BucketAllow:
-		st.Permissions.Allow = removeString(st.Permissions.Allow, raw)
+		list = st.Permissions.Allow
 	case BucketAsk:
-		st.Permissions.Ask = removeString(st.Permissions.Ask, raw)
+		list = st.Permissions.Ask
 	case BucketDeny:
-		st.Permissions.Deny = removeString(st.Permissions.Deny, raw)
+		list = st.Permissions.Deny
 	default:
-		return fmt.Errorf("未知的规则桶: %s", bucket)
+		return false, fmt.Errorf("未知的规则桶: %s", bucket)
 	}
-	return writeSettings(path, st)
+	if !containsString(list, raw) {
+		return false, nil
+	}
+	out := removeString(list, raw)
+	switch bucket {
+	case BucketAllow:
+		st.Permissions.Allow = out
+	case BucketAsk:
+		st.Permissions.Ask = out
+	case BucketDeny:
+		st.Permissions.Deny = out
+	}
+	if err := writeSettings(path, st); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // SetDefaultMode 设置默认权限模式

@@ -268,13 +268,62 @@ func (a *App) AddPermissionRule(sessionID string, bucket string, rule string, so
 	return a.settingsStore.AddRule(projectDir, bucket, rule, source)
 }
 
-// RemovePermissionRule 删除指定层的一条规则
+// RemovePermissionRule 删除指定层的一条规则。
+//
+// 除了改文件，还会**同步撤销内存里等价的会话授权** —— 否则会出现
+// 「规则删掉了、本会话却仍然放行」的错觉（「永久允许」会同时写入规则与授权）。
 func (a *App) RemovePermissionRule(sessionID string, bucket string, rule string, source string) error {
 	projectDir := ""
 	if sessionID != "" {
 		projectDir = a.permissionProjectDir(sessionID)
 	}
-	return a.settingsStore.RemoveRule(projectDir, bucket, rule, source)
+	if err := a.settingsStore.RemoveRule(projectDir, bucket, rule, source); err != nil {
+		return err
+	}
+	// 只有 allow 桶的规则与「放行」相关，其余桶没有对应授权
+	if bucket == BucketAllow {
+		if parsed, err := ParseRule(rule, source); err == nil {
+			a.revokeMatchingGrants(sessionID, parsed)
+		}
+	}
+	return nil
+}
+
+// revokeMatchingGrants 撤销与规则等价的会话授权，返回撤销条数
+func (a *App) revokeMatchingGrants(sessionID string, r Rule) int {
+	a.permMu.Lock()
+	st, ok := a.permStates[sessionID]
+	a.permMu.Unlock()
+	if !ok {
+		return 0
+	}
+	return st.grants.RemoveMatching(r)
+}
+
+// RevokePermissionGrant 逐条撤销会话授权。
+//
+// 若该授权是「永久」级别，它当初同时被写入了配置文件的 allow 规则，
+// 这里会一并删掉那条规则 —— 否则下次加载时规则会把它重新带回来。
+func (a *App) RevokePermissionGrant(sessionID string, toolName string, spec string, isPrefix bool, kind string) error {
+	a.permMu.Lock()
+	st, ok := a.permStates[sessionID]
+	a.permMu.Unlock()
+	if !ok {
+		return fmt.Errorf("该会话还没有权限状态")
+	}
+	gr, found, wasAlways := st.grants.RemoveOne(toolName, spec, isPrefix, SpecKind(kind))
+	if !found {
+		return fmt.Errorf("未找到该授权（可能已被撤销）")
+	}
+	if wasAlways {
+		// 规则当初可能落在任一层：写入时若没有项目目录会回退到用户全局层
+		ruleText := gr.Rule().String()
+		projectDir := a.permissionProjectDir(sessionID)
+		if _, removed := a.settingsStore.RemoveRuleAnyLayer(projectDir, BucketAllow, ruleText); !removed {
+			return fmt.Errorf("已撤销会话授权，但未在配置文件中找到对应规则 %q，请到规则列表里手动确认", ruleText)
+		}
+	}
+	return nil
 }
 
 // GetPermissionAudit 返回某会话的权限决策审计

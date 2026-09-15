@@ -60,6 +60,10 @@ export function RemovePermissionRule(arg1:string,arg2:string,arg3:string,arg4:st
 
 export function ResolvePermission(arg1:string,arg2:string,arg3:string,arg4:string):Promise<void>;
 
+export function RevokePermissionGrant(arg1:string,arg2:string,arg3:string,arg4:boolean,arg5:string):Promise<void>;
+
+export function RevokePermissionGrant(arg1:string,arg2:string,arg3:string,arg4:boolean,arg5:string):Promise<void>;
+
 export function SaveSkill(arg1:string,arg2:string,arg3:string,arg4:string):Promise<void>;
 
 export function SaveTool(arg1:main.ToolConfig):Promise<main.ToolConfig>;

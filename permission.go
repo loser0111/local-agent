@@ -951,6 +951,51 @@ func (g *GrantStore) coversExactCmd(toolName, cmd string) (Grant, bool) {
 	return Grant{}, false
 }
 
+// RemoveMatching 撤销与给定规则等价的会话授权，返回撤销条数。
+//
+// 用于「删掉持久化规则之后同步清掉内存授权」：否则规则从文件里删了，
+// 但 GrantStore 里的授权还在，本会话内该操作**依旧被放行** ——
+// 用户看到的就是「点了删除，权限还在」。
+func (g *GrantStore) RemoveMatching(r Rule) int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if len(g.grants) == 0 {
+		return 0
+	}
+	old := g.grants
+	kept := old[:0]
+	removed := 0
+	for _, gr := range old {
+		if gr.ToolName == r.Tool && gr.Kind == r.Kind && gr.IsPrefix == r.IsPrefix &&
+			normalizeCommand(gr.Spec) == normalizeCommand(r.Spec) {
+			removed++
+			continue
+		}
+		kept = append(kept, gr)
+	}
+	// 清掉尾部残留引用，避免已撤销的授权占着内存
+	for i := len(kept); i < len(old); i++ {
+		old[i] = Grant{}
+	}
+	g.grants = kept
+	return removed
+}
+
+// RemoveOne 逐条撤销一条授权，返回被撤销的授权、是否找到、以及它是否为「永久」级别。
+// 「永久」级别同时被写进了配置文件，调用方需要一并清理，否则规则会把它带回来。
+func (g *GrantStore) RemoveOne(toolName, spec string, isPrefix bool, kind SpecKind) (Grant, bool, bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	for i, gr := range g.grants {
+		if gr.ToolName == toolName && gr.Kind == kind && gr.IsPrefix == isPrefix &&
+			normalizeCommand(gr.Spec) == normalizeCommand(spec) {
+			g.grants = append(g.grants[:i], g.grants[i+1:]...)
+			return gr, true, gr.Scope == ScopeAlways
+		}
+	}
+	return Grant{}, false, false
+}
+
 // List 返回全部授权（供界面展示）
 func (g *GrantStore) List() []Grant {
 	g.mu.RLock()

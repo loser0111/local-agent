@@ -5,6 +5,7 @@ import {
   SetDefaultPermissionMode,
   AddPermissionRule,
   RemovePermissionRule,
+  RevokePermissionGrant,
   GetPermissionAudit,
   GetPermissionGrants,
   ClearPermissionGrants,
@@ -179,6 +180,24 @@ export async function respondPermission(requestId, decision, scope, rule = '') {
     return await ResolvePermission(requestId, decision, scope, rule)
   }
   // mock 模式没有后端在等待，直接返回；弹窗行为由 store 驱动
+  return null
+}
+
+/**
+ * 逐条撤销会话授权。
+ * 「永久」级别的授权会连带删除配置文件中对应的允许规则，否则规则会把它带回来。
+ */
+export async function revokeGrant(sessionId, grant) {
+  if (isWails()) {
+    return await RevokePermissionGrant(
+      sessionId,
+      grant.toolName || '',
+      grant.spec || '',
+      !!grant.isPrefix,
+      grant.kind || ''
+    )
+  }
+  // mock 模式没有后端授权存储，直接返回
   return null
 }
 

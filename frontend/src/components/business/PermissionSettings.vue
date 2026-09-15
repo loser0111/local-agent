@@ -9,6 +9,7 @@ import {
   changePermissionMode,
   addRule,
   removeRule,
+  revokeGrant,
   fetchAudit,
   fetchGrants,
   clearGrants,
@@ -132,6 +133,21 @@ async function handleClearGrants() {
     await load()
   } catch (e) {
     errorMsg.value = `清空授权失败：${e.message || e}`
+  }
+}
+
+/** 逐条撤销会话授权。「永久」级别的会连带删除配置文件里的对应允许规则。 */
+async function handleRevokeGrant(g) {
+  const label = `${g.toolName}${g.spec ? '(' + g.spec + ')' : ''}`
+  const extra = g.scope === 'always' ? '\n（该授权是「永久」级别，会同时删除配置文件中对应的允许规则）' : ''
+  if (!confirm(`撤销授权「${label}」吗？${extra}`)) return
+  try {
+    await revokeGrant(sessionId.value, g)
+    flash('授权已撤销')
+    // 「永久」级别会改配置文件，需要连同规则列表一起刷新
+    await load()
+  } catch (e) {
+    errorMsg.value = `撤销授权失败：${e.message || e}`
   }
 }
 
@@ -262,12 +278,16 @@ onMounted(load)
         <div class="rule-list">
           <div v-for="(r, i) in config.builtinDeny || []" :key="'d' + i" class="rule-item">
             <code class="rule-text">{{ ruleText(r) }}</code>
-            <span class="src-tag src-builtin">内置拒绝</span>
+            <span class="src-tag src-builtin">内置拒绝 · 不可删除</span>
           </div>
           <div v-for="(r, i) in config.builtinAsk || []" :key="'a' + i" class="rule-item">
             <code class="rule-text">{{ ruleText(r) }}</code>
-            <span class="src-tag src-builtin">内置询问</span>
+            <span class="src-tag src-builtin">内置询问 · 不可删除</span>
           </div>
+        </div>
+        <div class="hint">
+          这些条目没有删除按钮，也不出现在上面的可编辑列表里 —— 它们由代码内置，无法移除。
+          如需放行某个被内置询问拦住的操作（例如读取 .env），请在授权弹窗里当场批准。
         </div>
       </div>
 
@@ -283,8 +303,15 @@ onMounted(load)
         <div v-else class="rule-list">
           <div v-for="(g, i) in grants" :key="i" class="rule-item">
             <code class="rule-text">{{ g.toolName }}{{ g.spec ? '(' + g.spec + ')' : '' }}</code>
-            <span class="src-tag">{{ g.scope === 'always' ? '永久' : '本会话' }}</span>
+            <span class="src-tag" :class="g.scope === 'always' ? 'src-local' : 'src-project'">
+              {{ g.scope === 'always' ? '永久' : '本会话' }}
+            </span>
+            <button class="btn btn-danger btn-sm" @click="handleRevokeGrant(g)">撤销</button>
           </div>
+        </div>
+        <div class="hint">
+          「本会话允许」记下的授权只存在于内存、不写入配置文件，会话结束即失效；
+          「永久」级别则同时写成了允许规则，撤销时会一并删除那条规则。
         </div>
       </div>
 
@@ -525,6 +552,12 @@ onMounted(load)
   border-radius: $radius-sm;
   color: $color-error;
   font-size: $font-size-xs;
+  // 这个面板很长，提示如果只在顶部、用户滚到规则列表就看不到，
+  // 会出现「点了删除毫无反应」的错觉，所以做成吸附
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  backdrop-filter: blur(2px);
 }
 
 .notice-banner {
@@ -535,6 +568,10 @@ onMounted(load)
   border-radius: $radius-sm;
   color: $color-success;
   font-size: $font-size-xs;
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  backdrop-filter: blur(2px);
 }
 
 .btn {
