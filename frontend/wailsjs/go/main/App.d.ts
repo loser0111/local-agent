@@ -38,7 +38,7 @@ export function GetModels():Promise<Array<main.Model>>;
 
 export function GetPermissionAudit(arg1:string):Promise<Array<main.AuditEntry>>;
 
-export function GetPermissionConfig(arg1:string):Promise<Record<string,any>>;
+export function GetPermissionConfig(arg1:string):Promise<Record<string, any>>;
 
 export function GetPermissionGrants(arg1:string):Promise<Array<main.Grant>>;
 

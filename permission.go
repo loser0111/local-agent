@@ -557,13 +557,18 @@ var builtinSensitivePaths = []dangerousPattern{
 	{".ssh/", "可能读取 SSH 私钥目录"},
 	{"id_rsa", "可能读取 SSH 私钥"},
 	{"id_ed25519", "可能读取 SSH 私钥"},
+	{"id_ecdsa", "可能读取 SSH 私钥"},
+	{".gnupg", "可能读取 GPG 密钥环"},
 	{".aws/credentials", "可能读取 AWS 凭据"},
 	{".kube/config", "可能读取 Kubernetes 凭据"},
 	{".git/config", "可能读取 Git 配置"},
+	{".git-credentials", "可能读取 Git 明文凭据"},
+	{".docker/config.json", "可能读取容器仓库凭据"},
 	{".npmrc", "可能读取 npm 凭据"},
 	{".pypirc", "可能读取 PyPI 凭据"},
 	{"credentials.json", "可能读取服务账号凭据"},
 	{".netrc", "可能读取网络凭据"},
+	{"/etc/shadow", "可能读取口令散列"},
 }
 
 // matchDangerousDeny 检查内置硬拒绝名单，返回命中的原因
@@ -606,6 +611,159 @@ func matchSensitivePath(candidates []string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// ===== 命令级只读识别 =====
+//
+// 对齐 Claude Code 的「只读命令不询问」。若不做这一层，exec_shell 底下每条命令
+// 都要过闸门，用 ls / grep / cat 会被反复打断 —— 这才是「同一类命令换参数就重问」
+// 体感最差的地方。
+//
+// 判定**刻意保守**：只要能产生写副作用、能拉起解释器、或识别不出来，
+// 就回落为询问而不是放行。宁可多问，不可误放。
+
+// readOnlyCommands 可视为只读的裸命令名。
+//
+// 刻意**不含**下列各类（它们都进不了白名单，因此必然回落为询问）：
+//   - 解释器/外壳：sh bash zsh python node perl ruby awk sed eval source
+//   - 包装器（会把后面的命令跑起来）：xargs env nice nohup timeout time watch
+//     sudo su command builtin
+//   - 写命令：tee cp mv rm mkdir touch chmod ln dd truncate patch rsync scp
+//   - 出网：curl wget nc ssh socat
+//   - 包管理/构建：npm yarn pip go cargo make
+var readOnlyCommands = map[string]bool{
+	// 目录与元信息
+	"cd": true, "pwd": true, "ls": true, "tree": true, "stat": true, "file": true,
+	"du": true, "df": true, "basename": true, "dirname": true, "realpath": true,
+	"readlink": true,
+	// 内容查看与文本处理
+	"cat": true, "head": true, "tail": true, "less": true, "more": true,
+	"wc": true, "grep": true, "rg": true, "fgrep": true, "egrep": true,
+	"sort": true, "uniq": true, "cut": true, "tr": true, "nl": true,
+	"diff": true, "comm": true, "cmp": true, "column": true,
+	"md5sum": true, "sha1sum": true, "sha256sum": true, "cksum": true,
+	// 环境与查询
+	"which": true, "whereis": true, "whoami": true, "id": true, "hostname": true,
+	"uname": true, "date": true, "uptime": true, "printenv": true,
+	"echo": true, "printf": true, "man": true, "type": true, "test": true,
+	// 需要额外按子命令/参数判定的
+	"find": true, "git": true,
+}
+
+// readOnlyForbiddenFlags 会让「本来只读」的命令产生写副作用的选项
+var readOnlyForbiddenFlags = map[string][]string{
+	"sort": {"-o", "--output"}, // -o 输出到文件
+	"date": {"-s", "--set"},    // -s 设置系统时间
+}
+
+// findReadOnlyForbidden find 的写副作用动作
+var findReadOnlyForbidden = []string{
+	"-exec", "-execdir", "-ok", "-okdir", "-delete",
+	"-fprint", "-fprint0", "-fprintf", "-fls",
+}
+
+// gitReadOnlySubcommands 明确只读的 git 子命令。
+//
+// 刻意不含 branch / tag / remote / config / stash —— 它们都带写模式
+//（branch -d、tag -d、config key value、stash pop），判定成本高于收益。
+var gitReadOnlySubcommands = map[string]bool{
+	"status": true, "log": true, "diff": true, "show": true,
+	"rev-parse": true, "describe": true, "shortlog": true, "blame": true,
+	"ls-files": true, "ls-tree": true, "cat-file": true, "grep": true,
+	"reflog": true, "name-rev": true, "merge-base": true, "cherry": true,
+	"count-objects": true, "whatchanged": true, "annotate": true,
+	"symbolic-ref": true, "show-ref": true, "for-each-ref": true,
+	"verify-commit": true, "verify-tag": true, "version": true,
+}
+
+func findIsReadOnly(args []string) bool {
+	for _, a := range args {
+		for _, w := range findReadOnlyForbidden {
+			if a == w {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func gitIsReadOnly(args []string) bool {
+	sub := ""
+	for _, a := range args {
+		if !strings.HasPrefix(a, "-") {
+			sub = a
+			break
+		}
+	}
+	return gitReadOnlySubcommands[sub]
+}
+
+// isReadOnlySegment 判断单个命令段是否只读
+func isReadOnlySegment(seg string) bool {
+	fields := strings.Fields(seg)
+	if len(fields) == 0 {
+		return false
+	}
+	name := fields[0]
+	args := fields[1:]
+
+	// 命令名必须是裸名：带路径的（/bin/ls、./x.sh）与含 shell 元字符的一律不放行，
+	// 避免 /tmp/evil/ls 这类同名伪装
+	if strings.ContainsAny(name, "/\\$`'\"|&;<>(){}*?[]~") {
+		return false
+	}
+	if !readOnlyCommands[name] {
+		return false
+	}
+
+	// 写副作用选项
+	for _, bad := range readOnlyForbiddenFlags[name] {
+		for _, a := range args {
+			if a == bad || strings.HasPrefix(a, bad+"=") {
+				return false
+			}
+		}
+	}
+	// 通用写选项（git diff --output=file 等）
+	for _, a := range args {
+		if a == "--output" || strings.HasPrefix(a, "--output=") {
+			return false
+		}
+	}
+
+	switch name {
+	case "hostname":
+		return len(args) == 0 // 带参数会改主机名
+	case "uniq":
+		return len(args) <= 1 // 第二个位置参数是输出文件
+	case "find":
+		return findIsReadOnly(args)
+	case "git":
+		return gitIsReadOnly(args)
+	}
+	return true
+}
+
+// isReadOnlyCommand 判断整条命令是否只读。
+//
+// 仅对内置工具（exec_shell）生效 —— 用户自定义的 CLI / API / MCP 工具副作用未知，
+// 不替它们猜。要求：无重定向、每一段都是只读命令；任一段识别不出来即回落为询问。
+func isReadOnlyCommand(sub PermissionSubject, a CommandAnalysis) bool {
+	if sub.ToolType != ToolTypeBuiltin {
+		return false
+	}
+	if sub.Command == "" || a.HasRedirection {
+		return false // 重定向会写文件或改变输入来源
+	}
+	if len(a.Segments) == 0 {
+		return false
+	}
+	for _, seg := range a.Segments {
+		if !isReadOnlySegment(seg) {
+			return false
+		}
+	}
+	return true
 }
 
 // ===== 授权（Grant）=====
@@ -717,6 +875,77 @@ func (g *GrantStore) Match(sub PermissionSubject, a CommandAnalysis) (Grant, boo
 			} else if cand == normalizeCommand(gr.Spec) {
 				return gr, true
 			}
+		}
+	}
+	return Grant{}, false
+}
+
+// coversCmd 判断单条命令是否被某条授权覆盖
+func (g *GrantStore) coversCmd(toolName, cmd string) (Grant, bool) {
+	norm := normalizeCommand(cmd)
+	if norm == "" {
+		return Grant{}, false
+	}
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	for _, gr := range g.grants {
+		if gr.ToolName != toolName {
+			continue
+		}
+		if gr.Kind == SpecKindAny || gr.Spec == "" {
+			return gr, true
+		}
+		if gr.Kind != SpecKindCommand {
+			continue
+		}
+		if gr.IsPrefix {
+			if matchCommandPrefix(norm, gr.Spec) {
+				return gr, true
+			}
+		} else if norm == normalizeCommand(gr.Spec) {
+			return gr, true
+		}
+	}
+	return Grant{}, false
+}
+
+// coversAll 判断是否**每一个**命令单元都被授权覆盖（复合命令放行的前提）
+func (g *GrantStore) coversAll(toolName string, units []string) (Grant, bool) {
+	if len(units) == 0 {
+		return Grant{}, false
+	}
+	var last Grant
+	for _, u := range units {
+		gr, ok := g.coversCmd(toolName, u)
+		if !ok {
+			return Grant{}, false
+		}
+		last = gr
+	}
+	return last, true
+}
+
+// coversExactCmd 判断单条命令是否被某条**精确**授权覆盖。
+// 与 matchExact 同理：整行判定不接受前缀授权，否则前缀会把整条复合命令放行。
+func (g *GrantStore) coversExactCmd(toolName, cmd string) (Grant, bool) {
+	norm := normalizeCommand(cmd)
+	if norm == "" {
+		return Grant{}, false
+	}
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	for _, gr := range g.grants {
+		if gr.ToolName != toolName {
+			continue
+		}
+		if gr.Kind == SpecKindAny || gr.Spec == "" {
+			return gr, true
+		}
+		if gr.Kind != SpecKindCommand || gr.IsPrefix {
+			continue
+		}
+		if norm == normalizeCommand(gr.Spec) {
+			return gr, true
 		}
 	}
 	return Grant{}, false
@@ -929,9 +1158,9 @@ func (e *PermissionEngine) Authorize(ctx context.Context, sub PermissionSubject)
 		return e.askOrDeny(ctx, sub, candidates, "ask 规则命中: "+r.Raw, r.Raw, r.Source)
 	}
 
-	// 5. 会话内 / 永久授权
-	if g, ok := e.grants.Match(sub, analysis); ok {
-		return e.finish(DecisionAllow, "已授权（"+g.Scope+"）："+g.Describe(), sub)
+	// 5. 会话内 / 永久授权（复合命令需逐段全覆盖）
+	if reason, ok := e.grantsCover(sub, analysis); ok {
+		return e.finish(DecisionAllow, reason, sub)
 	}
 
 	// 6. bypassPermissions
@@ -944,18 +1173,134 @@ func (e *PermissionEngine) Authorize(ctx context.Context, sub PermissionSubject)
 		return e.finish(DecisionAllow, "acceptEdits 模式自动批准文件编辑", sub)
 	}
 
-	// 8. allow 规则
-	if r, ok := matchAny(e.rules.Allow, sub, candidates); ok {
-		return e.finish(DecisionAllow, "allow 规则命中: "+r.Raw, sub)
+	// 8. allow 规则（复合命令需逐段全覆盖）
+	if reason, ok := e.allowRulesCover(sub, analysis); ok {
+		return e.finish(DecisionAllow, reason, sub)
 	}
 
-	// 9. 只读工具默认放行
+	// 9. 只读放行：工具级（read_skill）与命令级（ls / grep / git status 等）
 	if sub.Risk == RiskRead {
 		return e.finish(DecisionAllow, "只读工具默认放行", sub)
+	}
+	if isReadOnlyCommand(sub, analysis) {
+		return e.finish(DecisionAllow, "只读命令默认放行", sub)
 	}
 
 	// 10. 兜底：fail closed
 	return e.askOrDeny(ctx, sub, candidates, "未匹配任何规则，默认询问", "", "")
+}
+
+// ===== 放行方向的全覆盖判定 =====
+//
+// 这里必须与 deny / ask 方向**方向相反**，否则会形成绕过：
+//
+//	deny / ask：任一命令段命中 => 整条拒绝/询问   （偏保守，安全）
+//	allow / 授权：**每一段**都被覆盖 => 才放行整条   （必须全覆盖）
+//
+// 早前的实现让 allow 也走「任一段命中即放行整条」，后果是：授权
+// exec_shell(grep:*) 之后，「rm -rf /tmp/x && grep y z」会因为 grep 段命中
+// 而把整条命令（包括从未被授权的 rm 段）一起放行。
+
+// authorizationUnits 返回需要**逐一**获得授权的命令单元。
+// 单命令 => 整条；复合命令 => 各分解段。
+func authorizationUnits(sub PermissionSubject, a CommandAnalysis) []string {
+	if sub.Command == "" {
+		return nil
+	}
+	if len(a.Segments) == 0 {
+		if n := normalizeCommand(sub.Command); n != "" {
+			return []string{n}
+		}
+		return nil
+	}
+	units := make([]string, 0, len(a.Segments))
+	for _, s := range a.Segments {
+		if n := normalizeCommand(s); n != "" {
+			units = append(units, n)
+		}
+	}
+	return units
+}
+
+// matchAllUnits 要求每一个命令单元都被规则命中
+func matchAllUnits(rules []Rule, sub PermissionSubject, units []string) (Rule, bool) {
+	var last Rule
+	if len(units) == 0 {
+		return Rule{}, false
+	}
+	for _, u := range units {
+		r, ok := matchAny(rules, sub, []string{u})
+		if !ok {
+			return Rule{}, false
+		}
+		last = r
+	}
+	return last, true
+}
+
+// matchExact 只做**精确**匹配（工具级规则也算命中），用于「整行被显式批准」的判定。
+//
+// 刻意不接受前缀规则：前缀里的「任意内容」可以塞进任意命令。若接受，
+// exec_shell(git:*) 会因为复合命令行以 "git" 开头，而把
+// 「git status && rm -rf /tmp/x」整条放行 —— 又是一个绕过闸门的口子。
+// 前缀规则一律只在**逐段**判定里生效。
+func matchExact(rules []Rule, sub PermissionSubject, cmd string) (Rule, bool) {
+	norm := normalizeCommand(cmd)
+	if norm == "" {
+		return Rule{}, false
+	}
+	for _, r := range rules {
+		if r.Tool != sub.ToolName {
+			continue
+		}
+		if r.Kind == SpecKindAny {
+			return r, true
+		}
+		if r.Kind == SpecKindCommand && !r.IsPrefix && norm == normalizeCommand(r.Spec) {
+			return r, true
+		}
+	}
+	return Rule{}, false
+}
+
+// grantsCover 判断该操作是否被会话内 / 永久授权覆盖。
+//
+// 两条路径任一成立即可：
+//   - 整行被显式授权：用户点「本会话允许 / 永久允许」时记下的就是整条命令字符串，
+//     若不认这条路，复合命令的授权会全部失效
+//   - 每一段都被授权：真正的逐段全覆盖
+func (e *PermissionEngine) grantsCover(sub PermissionSubject, a CommandAnalysis) (string, bool) {
+	if sub.Command == "" {
+		// 非命令类（域名 / 通用取值）没有分段概念，沿用整体匹配
+		if g, ok := e.grants.Match(sub, a); ok {
+			return "已授权（" + g.Scope + "）：" + g.Describe(), true
+		}
+		return "", false
+	}
+	if g, ok := e.grants.coversExactCmd(sub.ToolName, normalizeCommand(sub.Command)); ok {
+		return "已授权整行（" + g.Scope + "）：" + g.Describe(), true
+	}
+	if g, ok := e.grants.coversAll(sub.ToolName, authorizationUnits(sub, a)); ok {
+		return "已授权全部命令段（" + g.Scope + "）：" + g.Describe(), true
+	}
+	return "", false
+}
+
+// allowRulesCover 判断该操作是否被 allow 规则覆盖（同样要求复合命令逐段全覆盖）
+func (e *PermissionEngine) allowRulesCover(sub PermissionSubject, a CommandAnalysis) (string, bool) {
+	if sub.Command == "" {
+		if r, ok := matchAny(e.rules.Allow, sub, nil); ok {
+			return "allow 规则命中: " + r.Raw, true
+		}
+		return "", false
+	}
+	if r, ok := matchExact(e.rules.Allow, sub, normalizeCommand(sub.Command)); ok {
+		return "allow 规则命中整行: " + r.Raw, true
+	}
+	if r, ok := matchAllUnits(e.rules.Allow, sub, authorizationUnits(sub, a)); ok {
+		return "allow 规则命中全部命令段: " + r.Raw, true
+	}
+	return "", false
 }
 
 // askOrDeny 发起询问；无人可问或用户拒绝则拒绝

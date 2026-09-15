@@ -1,5 +1,29 @@
 export namespace main {
 	
+	export class AuditEntry {
+	    sessionId: string;
+	    toolName: string;
+	    command?: string;
+	    domain?: string;
+	    decision: string;
+	    reason: string;
+	    at: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new AuditEntry(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.sessionId = source["sessionId"];
+	        this.toolName = source["toolName"];
+	        this.command = source["command"];
+	        this.domain = source["domain"];
+	        this.decision = source["decision"];
+	        this.reason = source["reason"];
+	        this.at = source["at"];
+	    }
+	}
 	export class DiffLine {
 	    type: string;
 	    oldLineNo: number;
@@ -255,6 +279,28 @@ export namespace main {
 		    return a;
 		}
 	}
+	export class Grant {
+	    toolName: string;
+	    spec: string;
+	    isPrefix: boolean;
+	    kind: string;
+	    scope: string;
+	    createdAt: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new Grant(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.toolName = source["toolName"];
+	        this.spec = source["spec"];
+	        this.isPrefix = source["isPrefix"];
+	        this.kind = source["kind"];
+	        this.scope = source["scope"];
+	        this.createdAt = source["createdAt"];
+	    }
+	}
 	export class MCPToolMeta {
 	    name: string;
 	    description: string;
@@ -473,7 +519,7 @@ export namespace main {
 	    config: number[];
 	    disabledTools: string[];
 	    discovered: MCPToolMeta[];
-
+	
 	    static createFrom(source: any = {}) {
 	        return new ToolConfig(source);
 	    }
@@ -544,7 +590,7 @@ export namespace main {
 	    disabledTools: string[];
 	    discovered: MCPToolMeta[];
 	    status: ToolRuntimeStatus;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new ToolInfo(source);
 	    }
@@ -587,51 +633,5 @@ export namespace main {
 	}
 	
 
-	export class AuditEntry {
-	    sessionId: string;
-	    toolName: string;
-	    command?: string;
-	    domain?: string;
-	    decision: string;
-	    reason: string;
-	    at: number;
-	
-	    static createFrom(source: any = {}) {
-	        return new AuditEntry(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.sessionId = source["sessionId"];
-	        this.toolName = source["toolName"];
-	        this.command = source["command"];
-	        this.domain = source["domain"];
-	        this.decision = source["decision"];
-	        this.reason = source["reason"];
-	        this.at = source["at"];
-	    }
-	}
-	export class Grant {
-	    toolName: string;
-	    spec: string;
-	    isPrefix: boolean;
-	    kind: string;
-	    scope: string;
-	    createdAt: number;
-	
-	    static createFrom(source: any = {}) {
-	        return new Grant(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.toolName = source["toolName"];
-	        this.spec = source["spec"];
-	        this.isPrefix = source["isPrefix"];
-	        this.kind = source["kind"];
-	        this.scope = source["scope"];
-	        this.createdAt = source["createdAt"];
-	    }
-	}
 }
 

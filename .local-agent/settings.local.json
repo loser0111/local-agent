@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "exec_shell(cd ~/external/local-agent \u0026\u0026 sed -n '470,500p' skills.go \u0026\u0026 echo '=== tools.go builtin ===' \u0026\u0026 sed -n '300,360p' tools.go \u0026\u0026 echo '=== exec shell tool def ===' \u0026\u0026 grep -rn 'exec-shell\\|ExecShell\\|ShellTool\\|cmd := \\|bash -c' *.go | head -20)",
+      "exec_shell(cd ~/external/local-agent \u0026\u0026 sed -n '270,305p' tools.go \u0026\u0026 echo '=== builtin registry ===' \u0026\u0026 grep -rn 'builtinTools\\|newBuiltin\\|case \"exec_shell\"\\|exec_shell\":' *.go | head)"
+    ]
+  }
+}

