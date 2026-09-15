@@ -11,8 +11,12 @@ const statusText = computed(() => {
   switch (props.toolCall.status) {
     case 'running':
       return '运行中'
+    case 'pending':
+      return '等待授权'
     case 'success':
       return '完成'
+    case 'denied':
+      return '已拒绝'
     case 'error':
       return '失败'
     default:
@@ -24,8 +28,12 @@ const statusColor = computed(() => {
   switch (props.toolCall.status) {
     case 'running':
       return '#ffb86c'
+    case 'pending':
+      return '#f1fa8c'
     case 'success':
       return '#50fa7b'
+    case 'denied':
+      return '#ff79c6'
     case 'error':
       return '#ff5555'
     default:

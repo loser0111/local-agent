@@ -3,11 +3,28 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
 	"time"
 )
+
+// ErrPermissionDenied 权限拒绝的哨兵错误。
+// 上层（chat.go）据此把工具卡片标成「已拒绝」而不是笼统的「失败」——
+// 被权限拒绝和命令执行报错对用户是完全不同的两件事。
+var ErrPermissionDenied = errors.New("权限策略拒绝")
+
+// PermissionDeniedError 携带具体拒绝原因
+type PermissionDeniedError struct {
+	Reason string
+}
+
+func (e *PermissionDeniedError) Error() string {
+	return "操作被权限策略拒绝：" + e.Reason
+}
+
+func (e *PermissionDeniedError) Unwrap() error { return ErrPermissionDenied }
 
 // ===== 权限管理核心（对标 Claude Code 的 allow/ask/deny 三层规则）=====
 //

@@ -59,6 +59,46 @@
  */
 
 /**
+ * 权限模式
+ * @typedef {'default'|'acceptEdits'|'plan'|'bypassPermissions'} PermissionMode
+ */
+
+/**
+ * 权限规则
+ * @typedef {Object} PermissionRule
+ * @property {string} raw 规则原文，如 exec_shell(git:*)
+ * @property {string} tool 工具名部分
+ * @property {''|'command'|'domain'} kind 限定符类型，空串表示工具级
+ * @property {string} spec 限定符值
+ * @property {boolean} isPrefix 命令类是否前缀匹配
+ * @property {'builtin'|'user'|'project'|'local'} source 规则来源层
+ */
+
+/**
+ * 授权询问（后端 permission_request 事件载荷）
+ * @typedef {Object} PermissionRequest
+ * @property {string} requestId 作答时回传的关联 ID
+ * @property {string} [sessionId]
+ * @property {string} [toolCallId] 用于把工具卡片标为「等待授权」
+ * @property {string} toolName 真实工具名（非 tool_router）
+ * @property {string} [toolLabel] 界面显示名
+ * @property {'read'|'write'|'network'|'process'} risk 风险级别
+ * @property {string} [command] 命令类工具最终要执行的命令行
+ * @property {string[]} [argv] 命令分解后的各段
+ * @property {string} summary 一句话描述
+ * @property {string} reason 为什么需要询问
+ * @property {string} [matchedRule] 触发的 ask 规则（避免被误认为 bug）
+ * @property {string} [ruleSource] 该规则的来源层
+ * @property {string} [suggestRule] 建议写入的规则文本
+ * @property {object} [raw] 工具原始参数
+ */
+
+/**
+ * 工具调用状态
+ * @typedef {'running'|'pending'|'success'|'denied'|'error'} ToolCallStatus
+ */
+
+/**
  * 差异块
  * @typedef {Object} DiffHunk
  * @property {string} header 形如 @@ -12,7 +14,9 @@

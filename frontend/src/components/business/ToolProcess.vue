@@ -54,17 +54,23 @@ function toolLabel(tc) {
 
 // ===== 状态统计 =====
 const runningCount = computed(() => props.toolCalls.filter((t) => t.status === 'running').length)
+const pendingCount = computed(() => props.toolCalls.filter((t) => t.status === 'pending').length)
+const deniedCount = computed(() => props.toolCalls.filter((t) => t.status === 'denied').length)
 const errorCount = computed(() => props.toolCalls.filter((t) => t.status === 'error').length)
 const successCount = computed(() => props.toolCalls.filter((t) => t.status === 'success').length)
 const totalDuration = computed(() =>
   props.toolCalls.reduce((sum, t) => sum + (t.duration || 0), 0)
 )
 
-const isRunning = computed(() => props.streaming || runningCount.value > 0)
+// 等待授权也算「进行中」，否则会显示成「已完成 0 个操作」而让人以为卡死了
+const isRunning = computed(() => props.streaming || runningCount.value > 0 || pendingCount.value > 0)
 const hasError = computed(() => errorCount.value > 0)
 
 // 折叠态摘要
 const summary = computed(() => {
+  if (pendingCount.value > 0) {
+    return `${pendingCount.value} 个工具等待授权…`
+  }
   if (isRunning.value) {
     return runningCount.value > 0
       ? `正在执行 ${runningCount.value} 个工具…`
@@ -72,6 +78,9 @@ const summary = computed(() => {
   }
   if (hasError.value) {
     return `${errorCount.value} 个工具执行失败`
+  }
+  if (deniedCount.value > 0) {
+    return `已完成 ${successCount.value} 个操作，${deniedCount.value} 个被权限拒绝`
   }
   return `已完成 ${successCount.value} 个操作`
 })

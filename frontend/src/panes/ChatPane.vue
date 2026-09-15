@@ -5,16 +5,19 @@ import { useChatStore } from '@/stores/chat'
 import { usePaneStore } from '@/stores/pane'
 import { useDiffStore } from '@/stores/diff'
 import { useSettingStore } from '@/stores/setting'
-import { appendMessage, appendConversation, chat, onDiffUpdate } from '@/api/session'
+import { usePermissionsStore } from '@/stores/permissions'
+import { appendMessage, appendConversation, chat, cancelChat, onDiffUpdate } from '@/api/session'
 import PaneHeader from '@/components/layout/PaneHeader.vue'
 import MessageBubble from '@/components/business/MessageBubble.vue'
 import ToolProcess from '@/components/business/ToolProcess.vue'
+import PermissionDialog from '@/components/business/PermissionDialog.vue'
 
 const sessionStore = useSessionStore()
 const chatStore = useChatStore()
 const paneStore = usePaneStore()
 const diffStore = useDiffStore()
 const settingStore = useSettingStore()
+const permStore = usePermissionsStore()
 
 // 订阅后端 diff 实时推送（有文件改动时刷新差异数据）
 let offDiff = null
@@ -187,6 +190,15 @@ async function sendMessage() {
           result: tc.result,
         })
       },
+      // 后端会阻塞等待用户作答，这里把请求转交授权弹窗
+      onPermissionRequest: (req) => {
+        if (!req) return
+        // 工具卡片先标记为「等待授权」，让用户知道卡在哪一步
+        if (req.toolCallId) {
+          chatStore.updateToolCall(localMsg.id, req.toolCallId, { status: 'pending' })
+        }
+        permStore.enqueue(req)
+      },
     })
 
     // 4. 移除流式占位消息，用后端持久化的消息替换
@@ -248,8 +260,16 @@ async function sendMessage() {
   }
 }
 
-function stopGeneration() {
+async function stopGeneration() {
   chatStore.isGenerating = false
+  // 清掉待答授权，否则弹窗会一直挂在界面上
+  permStore.clear()
+  try {
+    // 真正中断后端：LLM 调用、工具执行与授权等待都会随 ctx 取消
+    await cancelChat(sessionId.value)
+  } catch (e) {
+    console.warn('取消后端对话失败:', e)
+  }
 }
 
 function handleKeydown(e) {
@@ -271,6 +291,9 @@ function openDiff() {
 <template>
   <div class="chat-pane">
     <PaneHeader type="chat" :closable="false" />
+
+    <!-- 授权询问弹窗（后端阻塞等待作答） -->
+    <PermissionDialog />
 
     <div class="messages scroll-container" ref="messagesContainer" @scroll="handleScroll">
       <div v-if="chatStore.loadingHistory" class="loading-history">历史消息加载中...</div>

@@ -7,6 +7,7 @@ import {
   AppendConversation,
   UpdateSession,
   Chat,
+  CancelChat,
   GetDiff,
   GetDiffTurns,
 } from '@/../wailsjs/go/main/App'
@@ -189,13 +190,13 @@ export async function updateSession(id, patch) {
  * 后端会持久化所有中间消息（assistant+tool_calls, tool结果, 最终回复）
  * @param {string} sessionId
  * @param {string} query
- * @param {{stream?:boolean, onReplyDelta?:Function, onToolCallStart?:Function, onToolCallEnd?:Function}} callbacks
+ * @param {{stream?:boolean, onReplyDelta?:Function, onToolCallStart?:Function, onToolCallEnd?:Function, onPermissionRequest?:Function}} callbacks
  * @returns {Promise<{reply:string, toolCalls?:array, messages?:array, error?:string}>}
  */
 export async function chat(
   sessionId,
   query,
-  { stream = true, onReplyDelta, onToolCallStart, onToolCallEnd } = {}
+  { stream = true, onReplyDelta, onToolCallStart, onToolCallEnd, onPermissionRequest } = {}
 ) {
   if (isWails()) {
     // 监听工具调用中间状态与流式分片事件
@@ -210,6 +211,10 @@ export async function chat(
           break
         case 'tool_call_end':
           onToolCallEnd?.(eventData.toolCall)
+          break
+        case 'permission_request':
+          // 后端会阻塞等待作答，必须转交给 UI 弹窗
+          onPermissionRequest?.(eventData.permission)
           break
       }
     }
@@ -285,6 +290,18 @@ export async function chat(
       },
     ],
   }
+}
+
+/**
+ * 取消某会话正在进行的对话。
+ * 后端会随 context 取消中断 LLM 调用、工具执行与授权等待 ——
+ * 修复前「停止生成」只改了前端标志位，后端仍在跑。
+ */
+export async function cancelChat(sessionId) {
+  if (isWails()) {
+    return await CancelChat(sessionId)
+  }
+  return null
 }
 
 // ===== Diff 差异视图 =====

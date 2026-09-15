@@ -376,10 +376,11 @@ func (g *guardedTool) Execute(ctx context.Context, args map[string]interface{}) 
 	case DecisionDeny:
 		// 以 error 返回：chat.go 会写成「执行失败: ...」并作为 role=tool 消息回填，
 		// 模型因此能看到拒绝原因并调整策略（复用既有回填路径，无需改动）。
-		return "", fmt.Errorf("操作被权限策略拒绝：%s", reason)
+		// 用哨兵错误包裹，让上层能把「被拒绝」与「执行报错」区分开。
+		return "", &PermissionDeniedError{Reason: reason}
 	default:
 		// DecisionAsk 未被 Asker 消化（无人可问）—— 视为拒绝
-		return "", fmt.Errorf("需要用户授权但未获得应答，已拒绝")
+		return "", &PermissionDeniedError{Reason: "需要用户授权但未获得应答"}
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -581,9 +582,15 @@ func (a *App) executeChat(sessionID, query string, useStream bool) *ChatResult {
 				duration := time.Since(startTime).Seconds()
 
 				if execErr != nil {
-					toolCallRecord.Status = "error"
+					// 「被权限拒绝」与「执行报错」必须区分：前者是策略决定，不是故障
+					if errors.Is(execErr, ErrPermissionDenied) {
+						toolCallRecord.Status = "denied"
+						toolCallRecord.Result = execErr.Error()
+					} else {
+						toolCallRecord.Status = "error"
+						toolCallRecord.Result = fmt.Sprintf("执行失败: %v", execErr)
+					}
 					toolCallRecord.Duration = duration
-					toolCallRecord.Result = fmt.Sprintf("执行失败: %v", execErr)
 				} else {
 					toolCallRecord.Status = "success"
 					toolCallRecord.Duration = duration

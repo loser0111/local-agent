@@ -5,6 +5,7 @@ import { useSettingStore } from '@/stores/setting'
 import { fetchModels, addModel, deleteModel } from '@/api/model'
 import ToolSettings from '@/components/business/ToolSettings.vue'
 import SkillSettings from '@/components/business/SkillSettings.vue'
+import PermissionSettings from '@/components/business/PermissionSettings.vue'
 
 const router = useRouter()
 const settingStore = useSettingStore()
@@ -16,6 +17,7 @@ const tabs = [
   { key: 'model', label: '模型配置' },
   { key: 'tool', label: '工具配置' },
   { key: 'skill', label: '技能配置' },
+  { key: 'permission', label: '权限配置' },
   { key: 'about', label: '关于' },
 ]
 
@@ -252,6 +254,9 @@ onMounted(() => {
 
         <!-- 技能配置 -->
         <SkillSettings v-if="activeTab === 'skill'" />
+
+        <!-- 权限配置 -->
+        <PermissionSettings v-if="activeTab === 'permission'" />
 
         <!-- 关于 -->
         <div v-if="activeTab === 'about'" class="settings-panel">

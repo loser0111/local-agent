@@ -468,11 +468,12 @@ export namespace main {
 	    icon: string;
 	    enabled: boolean;
 	    builtin: boolean;
+	    risk: string;
 	    parameters: ToolParamConfig[];
 	    config: number[];
 	    disabledTools: string[];
 	    discovered: MCPToolMeta[];
-	
+
 	    static createFrom(source: any = {}) {
 	        return new ToolConfig(source);
 	    }
@@ -487,6 +488,7 @@ export namespace main {
 	        this.icon = source["icon"];
 	        this.enabled = source["enabled"];
 	        this.builtin = source["builtin"];
+	        this.risk = source["risk"];
 	        this.parameters = this.convertValues(source["parameters"], ToolParamConfig);
 	        this.config = source["config"];
 	        this.disabledTools = source["disabledTools"];
@@ -536,12 +538,13 @@ export namespace main {
 	    icon: string;
 	    enabled: boolean;
 	    builtin: boolean;
+	    risk: string;
 	    parameters: ToolParamConfig[];
 	    config: number[];
 	    disabledTools: string[];
 	    discovered: MCPToolMeta[];
 	    status: ToolRuntimeStatus;
-	
+
 	    static createFrom(source: any = {}) {
 	        return new ToolInfo(source);
 	    }
@@ -556,6 +559,7 @@ export namespace main {
 	        this.icon = source["icon"];
 	        this.enabled = source["enabled"];
 	        this.builtin = source["builtin"];
+	        this.risk = source["risk"];
 	        this.parameters = this.convertValues(source["parameters"], ToolParamConfig);
 	        this.config = source["config"];
 	        this.disabledTools = source["disabledTools"];
@@ -583,5 +587,51 @@ export namespace main {
 	}
 	
 
+	export class AuditEntry {
+	    sessionId: string;
+	    toolName: string;
+	    command?: string;
+	    domain?: string;
+	    decision: string;
+	    reason: string;
+	    at: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new AuditEntry(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.sessionId = source["sessionId"];
+	        this.toolName = source["toolName"];
+	        this.command = source["command"];
+	        this.domain = source["domain"];
+	        this.decision = source["decision"];
+	        this.reason = source["reason"];
+	        this.at = source["at"];
+	    }
+	}
+	export class Grant {
+	    toolName: string;
+	    spec: string;
+	    isPrefix: boolean;
+	    kind: string;
+	    scope: string;
+	    createdAt: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new Grant(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.toolName = source["toolName"];
+	        this.spec = source["spec"];
+	        this.isPrefix = source["isPrefix"];
+	        this.kind = source["kind"];
+	        this.scope = source["scope"];
+	        this.createdAt = source["createdAt"];
+	    }
+	}
 }
 
