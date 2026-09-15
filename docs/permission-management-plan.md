@@ -7,6 +7,27 @@
 
 ---
 
+## 实施状态（2026-09-15 更新）
+
+P0–P3 已实现完毕，见分支 `feature/permission-management`。落地时对本文档有**五处有意偏离**，以此处为准：
+
+| # | 文档原方案 | 实际实现 | 原因 |
+| --- | --- | --- | --- |
+| 1 | 前缀匹配「边界只认空白」（5.2） | 边界改为「后续字符是否为命令名继续字符」（字母/数字/`_`/`-`/`.` 视为继续，其余视为分隔符） | 只认空白会让路径前缀失效：`rm -rf /tmp/keep:*` 无法命中 `rm -rf /tmp/keep/x`。改后仍能挡住 `git:*` 误配 `github-cli`，同时支持路径前缀 |
+| 2 | 内置 deny 含 `dd if=:*`（5.6） | 去掉裸 `dd if=` 前缀，改用 `of=/dev/` 包含匹配 | `dd if=input.img of=output.img`（合法磁盘镜像）会被前缀误杀，而这份名单**不可撤销**，精度优先 |
+| 3 | 内置名单全部归入 deny（5.6） | 拆成两层：**灾难性且不可逆**的进 deny（`rm -rf /`、`mkfs`、`of=/dev/` 等）；**敏感路径**（`.env`、`id_rsa`、`.aws/credentials` 等）归入 **ask** | 「防误读」与「防破坏」不是一回事。读取 `.env` 常常是正常排障，硬拒会阻断工作；归入 ask 后仍强制人工确认，且可在弹窗当场批准 |
+| 4 | 未指定拒绝如何传到前端 UI | 新增哨兵错误 `ErrPermissionDenied` + `PermissionDeniedError`，`chat.go` 据此把工具卡片状态标为 `denied` | 文档只在 5.8 提到 `denied` 状态，但没说后端怎么区分。被权限拒绝与命令执行报错对用户是两件事，不能都显示成「失败」 |
+| 5 | `acceptEdits` 延后到 P2（5.5） | 已实现 | 既然 P3 一并做，顺手实现；语义仍按 5.5 的说明（仅放行 `mkdir`/`touch`/`mv`/`cp`/`ln`/`install`/`truncate` 这类文件系统命令） |
+
+其他实现细节：
+
+- **「匹配串 == 执行串」的同源性**：`DescribeOperation` 与 `Execute` 共用 `renderTemplate(cliCfg.Command, args)`，由 `permission_test.go` 的 T15 守住。
+- **审计与授权挂在 App 而非引擎**（文档未指定）：设置页改规则会重建引擎，而「本会话授权」与审计必须跨重建保留。故 `GrantStore` / `AuditLog` 由 App 按 sessionID 持有，引擎只持引用。
+- **未能验证的部分**：本机无 Go 工具链（`apt` 无 root，且 `go.mod` 要求 1.25），`go build` / `go test` / `gofmt` 均未运行；`vite build` 因缺 Linux 版 rollup 原生模块也无法运行。前端改用 `@vue/compiler-sfc` 编译校验 + `node --check` 语法校验，Go 侧用词法级括号平衡脚本与人工复核。**合并前请务必本地跑一次 `go build ./... && go test ./...` 与 `gofmt -l .`** —— 仓库现有 Go 代码本身并非严格 gofmt 格式，新代码采用的是「名字/类型列对齐、标签与注释前留一个空格」的风格。
+
+---
+
+
 ## 一、背景与目标
 
 ### 1.1 为什么现在要做
