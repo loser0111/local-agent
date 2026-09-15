@@ -122,10 +122,6 @@ export function RevokePermissionGrant(arg1, arg2, arg3, arg4, arg5) {
   return window['go']['main']['App']['RevokePermissionGrant'](arg1, arg2, arg3, arg4, arg5);
 }
 
-export function RevokePermissionGrant(arg1, arg2, arg3, arg4, arg5) {
-  return window['go']['main']['App']['RevokePermissionGrant'](arg1, arg2, arg3, arg4, arg5);
-}
-
 export function SaveSkill(arg1, arg2, arg3, arg4) {
   return window['go']['main']['App']['SaveSkill'](arg1, arg2, arg3, arg4);
 }
