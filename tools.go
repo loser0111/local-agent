@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"time"
 )
 
 // ===== 工具接口定义（借鉴 01agent 的 ToolInterface）=====
@@ -44,19 +45,47 @@ type CLITool struct {
 	*BaseTool
 }
 
+// cliDefaultTimeout 内置终端命令的默认超时（秒）。
+// 修复前 CLITool 忽略传入的 ctx 且无超时：授权通过后命令仍可能永久挂住，
+// 用户的「停止生成」也中断不了它。
+const cliDefaultTimeout = 60
+
 func (t *CLITool) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
 	cmdStr, ok := args["cmd"].(string)
 	if !ok {
 		return "", fmt.Errorf("cmd 参数是必需的")
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	cctx, cancel := context.WithTimeout(ctx, cliDefaultTimeout*time.Second)
+	defer cancel()
+
 	var cmd *exec.Cmd
 	if runtime.GOOS == "windows" {
-		cmd = exec.Command("powershell", "-Command", cmdStr)
+		cmd = exec.CommandContext(cctx, "powershell", "-Command", cmdStr)
 	} else {
-		cmd = exec.Command("bash", "-c", cmdStr)
+		cmd = exec.CommandContext(cctx, "bash", "-c", cmdStr)
 	}
 	out, err := cmd.CombinedOutput()
+	if cctx.Err() == context.DeadlineExceeded {
+		return string(out), fmt.Errorf("命令执行超时（%ds）", cliDefaultTimeout)
+	}
+	if cctx.Err() == context.Canceled {
+		return string(out), fmt.Errorf("命令已取消")
+	}
 	return string(out), err
+}
+
+// DescribeOperation 工具自述要执行什么，供权限规则匹配。
+// Risk 留空由 riskOf(cfg) 推导（尊重 ToolConfig.Risk 覆盖）。
+func (t *CLITool) DescribeOperation(args map[string]interface{}) PermissionSubject {
+	cmdStr, _ := args["cmd"].(string)
+	return PermissionSubject{
+		ToolName: t.GetName(),
+		Command:  cmdStr,
+		Raw:      args,
+	}
 }
 
 // ===== 元工具：工具路由器（借鉴 01agent 的 MetaTool）=====
@@ -242,7 +271,11 @@ type SessionView struct {
 // enabledWhitelist 为空表示启用全部已开启工具；非空时只装配白名单内的工具 ID。
 // skillWhitelist 同理作用于技能（决定 read_skill 可读范围）；为空=全部已启用技能。
 // MCP server 连接失败不阻断装配，仅跳过其子工具（错误在设置页状态中展示）。
-func (tm *ToolManager) BuildView(ctx context.Context, enabledWhitelist, skillWhitelist []string) *SessionView {
+//
+// eng 为权限引擎；传 nil 表示不启用权限管控（既有单测与不需要管控的场景直通）。
+// 每个工具都会被 wrapTool 包一层装饰器 —— registry 同时喂给 nonMeta 与 MetaTool，
+// 因此包一次即可覆盖「直调」与「经 tool_router 路由」两条执行路径。
+func (tm *ToolManager) BuildView(ctx context.Context, eng *PermissionEngine, enabledWhitelist, skillWhitelist []string) *SessionView {
 	registry := map[string]ToolInterface{}
 	typeMap := map[string]string{}
 	whitelist := map[string]bool{}
@@ -263,16 +296,14 @@ func (tm *ToolManager) BuildView(ctx context.Context, enabledWhitelist, skillWhi
 				t := &CLITool{BaseTool: &BaseTool{
 					Name: cfg.Name, Description: cfg.Description, Parameters: paramsFromConfig(cfg.Parameters),
 				}}
-				registry[cfg.Name] = t
+				registry[cfg.Name] = wrapTool(t, cfg, ToolTypeBuiltin, eng)
 				typeMap[cfg.Name] = ToolTypeBuiltin
 			}
 		case ToolTypeCLI:
-			t := NewDynamicCLITool(cfg)
-			registry[cfg.Name] = t
+			registry[cfg.Name] = wrapTool(NewDynamicCLITool(cfg), cfg, ToolTypeCLI, eng)
 			typeMap[cfg.Name] = ToolTypeCLI
 		case ToolTypeAPI:
-			t := NewDynamicAPITool(cfg)
-			registry[cfg.Name] = t
+			registry[cfg.Name] = wrapTool(NewDynamicAPITool(cfg), cfg, ToolTypeAPI, eng)
 			typeMap[cfg.Name] = ToolTypeAPI
 		case ToolTypeMCP:
 			entry, err := tm.pool.Connect(ctx, cfg)
@@ -290,7 +321,7 @@ func (tm *ToolManager) BuildView(ctx context.Context, enabledWhitelist, skillWhi
 				}
 				mt2 := mt
 				wrapped := NewMCPTool(tm.pool, cfg, mt2)
-				registry[wrapped.GetName()] = wrapped
+				registry[wrapped.GetName()] = wrapTool(wrapped, cfg, ToolTypeMCP, eng)
 				typeMap[wrapped.GetName()] = ToolTypeMCP
 			}
 		}
@@ -299,7 +330,14 @@ func (tm *ToolManager) BuildView(ctx context.Context, enabledWhitelist, skillWhi
 	// 内置：技能加载工具（存在本会话可用技能时注册，经 tool_router 被发现）
 	if tm.skills != nil {
 		if rst := NewReadSkillTool(tm.skills, skillWhitelist); rst.HasAvailable() {
-			registry[rst.GetName()] = rst
+			// read_skill 没有对应的工具配置，构造一份最小配置供权限层推导风险级别
+			cfg := &ToolConfig{
+				ID:    "read_skill",
+				Name:  rst.GetName(),
+				Label: "读取技能正文",
+				Type:  ToolTypeBuiltin,
+			}
+			registry[rst.GetName()] = wrapTool(rst, cfg, ToolTypeBuiltin, eng)
 			typeMap[rst.GetName()] = ToolTypeBuiltin
 		}
 	}
@@ -309,6 +347,47 @@ func (tm *ToolManager) BuildView(ctx context.Context, enabledWhitelist, skillWhi
 		meta:    NewMetaTool(registry, typeMap),
 	}
 }
+
+// ===== 权限装饰器 =====
+
+// guardedTool 在真实工具执行前插入权限决策。
+type guardedTool struct {
+	inner    ToolInterface
+	cfg      *ToolConfig
+	toolType string
+	eng      *PermissionEngine
+}
+
+// wrapTool 按需包装：eng 为 nil 时返回原工具，不引入任何额外开销
+func wrapTool(t ToolInterface, cfg *ToolConfig, toolType string, eng *PermissionEngine) ToolInterface {
+	if eng == nil {
+		return t
+	}
+	return &guardedTool{inner: t, cfg: cfg, toolType: toolType, eng: eng}
+}
+
+func (g *guardedTool) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
+	sub := buildSubject(g.inner, g.cfg, g.toolType, args)
+	action, reason := g.eng.Authorize(ctx, sub)
+
+	switch action {
+	case DecisionAllow:
+		return g.inner.Execute(ctx, args)
+	case DecisionDeny:
+		// 以 error 返回：chat.go 会写成「执行失败: ...」并作为 role=tool 消息回填，
+		// 模型因此能看到拒绝原因并调整策略（复用既有回填路径，无需改动）。
+		return "", fmt.Errorf("操作被权限策略拒绝：%s", reason)
+	default:
+		// DecisionAsk 未被 Asker 消化（无人可问）—— 视为拒绝
+		return "", fmt.Errorf("需要用户授权但未获得应答，已拒绝")
+	}
+}
+
+func (g *guardedTool) GetName() string { return g.inner.GetName() }
+
+func (g *guardedTool) GetDescription() string { return g.inner.GetDescription() }
+
+func (g *guardedTool) GetParameters() map[string]*ToolArgDef { return g.inner.GetParameters() }
 
 // LLMToolDef 返回给 LLM 的工具定义（只暴露 tool_router，具体工具经路由器发现，节省 token）
 func (v *SessionView) GetToolsForLLM() []LLMTool {
@@ -333,14 +412,18 @@ func (v *SessionView) GetToolsForLLM() []LLMTool {
 	}
 }
 
-// ExecuteTool 在会话视图内执行工具
-func (v *SessionView) ExecuteTool(name string, args map[string]interface{}) (string, error) {
+// ExecuteTool 在会话视图内执行工具。
+// ctx 会被透传到权限引擎（用于授权等待的超时与取消）与工具实现（用于中断）。
+func (v *SessionView) ExecuteTool(ctx context.Context, name string, args map[string]interface{}) (string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if name == "tool_router" {
-		return v.meta.Execute(context.Background(), args)
+		return v.meta.Execute(ctx, args)
 	}
 	tool, ok := v.nonMeta[name]
 	if !ok {
 		return "", fmt.Errorf("未找到工具: %s", name)
 	}
-	return tool.Execute(context.Background(), args)
+	return tool.Execute(ctx, args)
 }

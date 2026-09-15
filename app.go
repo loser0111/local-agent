@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -18,6 +19,17 @@ type App struct {
 	toolManager  *ToolManager
 	skillStore   *SkillStore
 	diffService  *DiffService
+
+	// ===== 权限管理 =====
+	settingsStore *SettingsStore    // 三层权限配置
+	permBroker    *permissionBroker // 询问-应答回路
+	permMu        sync.Mutex
+	permStates    map[string]*permissionState  // sessionID -> 授权 + 审计
+	engines       map[string]*PermissionEngine // sessionID -> 引擎缓存
+
+	// 会话级可取消上下文（「停止生成」与「拒绝并中断」用）
+	chatMu      sync.Mutex
+	chatCancels map[string]context.CancelFunc
 }
 
 // NewApp creates a new App application struct
@@ -53,6 +65,14 @@ func (a *App) startup(ctx context.Context) {
 
 	// 初始化差异服务（基于 git 快照计算工作区 diff）
 	a.diffService = NewDiffService()
+
+	// 初始化权限配置存储（~/.local-agent/settings.json + 项目级 settings.local.json）
+	a.settingsStore = NewSettingsStore(baseDir)
+
+	// 初始化权限询问中转与会话状态
+	a.permBroker = newPermissionBroker()
+	a.chatCancels = make(map[string]context.CancelFunc)
+	a.initPermission()
 }
 
 // dataDir 返回本地数据目录（不存在则创建）

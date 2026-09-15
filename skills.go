@@ -474,3 +474,14 @@ func (t *ReadSkillTool) Execute(ctx context.Context, args map[string]interface{}
 	}
 	return "", fmt.Errorf("技能不存在: %s", id)
 }
+
+// DescribeOperation read_skill 是只读工具，限定符作用于技能 id
+// （例如 read_skill(pdf-report)）
+func (t *ReadSkillTool) DescribeOperation(args map[string]interface{}) PermissionSubject {
+	id, _ := args["id"].(string)
+	return PermissionSubject{
+		ToolName:  t.GetName(),
+		SpecValue: id,
+		Raw:       args,
+	}
+}

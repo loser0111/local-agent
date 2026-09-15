@@ -40,6 +40,7 @@ type ToolConfig struct {
 	Icon          string            `json:"icon"`          // Lucide 图标名
 	Enabled       bool              `json:"enabled"`       // 是否全局启用
 	Builtin       bool              `json:"builtin"`       // 内置工具不可删除
+	Risk          string            `json:"risk"`           // 风险级别覆盖：read/write/network/process（留空按类型推导）
 	Parameters    []ToolParamConfig `json:"parameters"`    // CLI/API 工具的自定义参数
 	Config        json.RawMessage   `json:"config"`        // 各类型特有配置（CLIConfig/APIConfig/MCPConfig）
 	DisabledTools []string          `json:"disabledTools"` // MCP 子工具禁用名单

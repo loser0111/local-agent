@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"runtime"
@@ -75,7 +76,25 @@ func (t *DynamicCLITool) Execute(ctx context.Context, args map[string]interface{
 	if cctx.Err() == context.DeadlineExceeded {
 		return string(out), fmt.Errorf("命令执行超时（%ds）", timeout)
 	}
+	if cctx.Err() == context.Canceled {
+		return string(out), fmt.Errorf("命令已取消")
+	}
 	return string(out), err
+}
+
+// DescribeOperation 用与 Execute **完全相同**的渲染路径产出命令行。
+//
+// 同源是硬要求：若这里渲染出的字符串与 Execute 实际执行的字符串不一致，
+// 就会出现「规则放行了 A、实际执行的是 B」的绕过。两处都调用
+// renderTemplate(cliCfg.Command, args)，保证匹配串 == 执行串。
+func (t *DynamicCLITool) DescribeOperation(args map[string]interface{}) PermissionSubject {
+	var cliCfg CLIToolConfig
+	_ = json.Unmarshal(t.cfg.Config, &cliCfg)
+	return PermissionSubject{
+		ToolName: t.GetName(),
+		Command:  renderTemplate(cliCfg.Command, args),
+		Raw:      args,
+	}
 }
 
 // ===== 动态 HTTP API 工具 =====
@@ -159,6 +178,28 @@ func (t *DynamicAPITool) Execute(ctx context.Context, args map[string]interface{
 		return result, fmt.Errorf("HTTP %d: %s", resp.StatusCode, resp.Status)
 	}
 	return result, nil
+}
+
+// DescribeOperation API 工具按「目标域名」匹配规则（对齐 Claude Code 的
+// WebFetch(domain:...) 语义）。域名同样取自与 Execute 相同的渲染路径。
+func (t *DynamicAPITool) DescribeOperation(args map[string]interface{}) PermissionSubject {
+	var apiCfg APIToolConfig
+	_ = json.Unmarshal(t.cfg.Config, &apiCfg)
+	return PermissionSubject{
+		ToolName: t.GetName(),
+		Domain:   hostOfURL(renderTemplate(apiCfg.URL, args)),
+		Raw:      args,
+	}
+}
+
+// hostOfURL 取 URL 的主机名；解析失败返回空串（空串不会命中任何域名规则，
+// 于是落到兜底询问 —— fail closed 方向）
+func hostOfURL(raw string) string {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return ""
+	}
+	return u.Hostname()
 }
 
 // ===== MCP Server 连接池 =====
@@ -348,6 +389,16 @@ func (t *MCPTool) Execute(ctx context.Context, args map[string]interface{}) (str
 		return "", fmt.Errorf("MCP 工具调用失败: %w", err)
 	}
 	return mcpContentToString(result.Content), nil
+}
+
+// DescribeOperation MCP 子工具按 server 上的原始工具名匹配规则
+// （注册名已含 mcp__<server>__ 前缀，工具名本身即规则中的标识）
+func (t *MCPTool) DescribeOperation(args map[string]interface{}) PermissionSubject {
+	return PermissionSubject{
+		ToolName:  t.GetName(),
+		SpecValue: t.toolName,
+		Raw:       args,
+	}
 }
 
 // mcpContentToString 将 MCP 返回的 Content 数组拍平为文本

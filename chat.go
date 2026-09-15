@@ -382,12 +382,13 @@ func (a *App) startDeltaFlusher() (enqueue func(string), shutdown func()) {
 
 // ChatEvent 推送给前端的事件数据
 type ChatEvent struct {
-	Type     string     `json:"type"` // tool_call_start / tool_call_end / done / error / diff_update
-	ToolCall *ToolCall  `json:"toolCall,omitempty"`
-	Reply    string     `json:"reply,omitempty"`
-	Error    string     `json:"error,omitempty"`
-	Diff     []DiffFile `json:"diff,omitempty"` // diff_update 事件携带的差异文件
-	Turn     int        `json:"turn,omitempty"` // diff 所属轮次
+	Type       string             `json:"type"` // tool_call_start / tool_call_end / permission_request / done / error / diff_update
+	ToolCall   *ToolCall          `json:"toolCall,omitempty"`
+	Reply      string             `json:"reply,omitempty"`
+	Error      string             `json:"error,omitempty"`
+	Diff       []DiffFile         `json:"diff,omitempty"` // diff_update 事件携带的差异文件
+	Turn       int                `json:"turn,omitempty"` // diff 所属轮次
+	Permission *PermissionRequest `json:"permission,omitempty"` // permission_request 事件携带的授权询问
 }
 
 // buildLLMMessages 从会话历史消息构造 LLM messages 数组
@@ -437,6 +438,20 @@ func buildLLMMessages(session *Session, query, systemPrompt string) []LLMMessage
 // 借鉴 01agent 的状态机设计：Preprocessing → LLM Call → Judge → Tool Execute → Rebuild → 循环
 // 持久化所有中间消息（assistant+tool_calls, tool结果, 最终回复），确保下次对话时消息序列完整
 func (a *App) executeChat(sessionID, query string, useStream bool) *ChatResult {
+	// 0. 建立会话级可取消上下文。
+	// 修复前全程使用 context.Background()，前端的「停止生成」只改了本地标志位，
+	// 后端仍在跑；现在取消可以真正中断 LLM 调用、工具执行与授权等待。
+	ctx, cancel := context.WithCancel(context.Background())
+	a.chatMu.Lock()
+	a.chatCancels[sessionID] = cancel
+	a.chatMu.Unlock()
+	defer func() {
+		cancel()
+		a.chatMu.Lock()
+		delete(a.chatCancels, sessionID)
+		a.chatMu.Unlock()
+	}()
+
 	// 1. 加载会话
 	session, err := a.sessionStore.GetSession(sessionID)
 	if err != nil {
@@ -479,7 +494,8 @@ func (a *App) executeChat(sessionID, query string, useStream bool) *ChatResult {
 	messages := buildLLMMessages(session, query, skillPrompt)
 
 	// 5. 按会话白名单装配工具视图，获取暴露给 LLM 的工具定义（仅 tool_router）
-	toolView := a.toolManager.BuildView(context.Background(), session.EnabledTools, session.EnabledSkills)
+	// 传入权限引擎：每个工具会被 guard 装饰器包一层，执行前经决策管线
+	toolView := a.toolManager.BuildView(ctx, a.permissionEngineFor(session), session.EnabledTools, session.EnabledSkills)
 	tools := toolView.GetToolsForLLM()
 
 	// 6. 工具调用循环
@@ -503,12 +519,19 @@ func (a *App) executeChat(sessionID, query string, useStream bool) *ChatResult {
 		)
 		if useStream {
 			flusher, flushShutdown = a.startDeltaFlusher()
-			resp, err = callLLMStream(context.Background(), model.URL, model.APIKey, req, flusher)
+			resp, err = callLLMStream(ctx, model.URL, model.APIKey, req, flusher)
 			flushShutdown() // 确保残余分片在进入工具执行/done 前全部发出
 		} else {
 			resp, err = callLLM(model.URL, model.APIKey, req)
 		}
 		if err != nil {
+			if ctx.Err() != nil {
+				return &ChatResult{
+					Error:     "对话已取消",
+					ToolCalls: toolCallRecords,
+					Messages:  persistedMsgs,
+				}
+			}
 			return &ChatResult{
 				Error:     err.Error(),
 				ToolCalls: toolCallRecords,
@@ -552,8 +575,9 @@ func (a *App) executeChat(sessionID, query string, useStream bool) *ChatResult {
 					})
 				}
 
-				// 执行工具
-				result, execErr := toolView.ExecuteTool(tc.Function.Name, args)
+				// 执行工具（附带工具调用 ID，供授权事件与 UI 卡片关联）
+				// ctx 一路透传到权限引擎：授权等待的超时与取消都依赖它
+				result, execErr := toolView.ExecuteTool(WithToolCallID(ctx, tc.ID), tc.Function.Name, args)
 				duration := time.Since(startTime).Seconds()
 
 				if execErr != nil {

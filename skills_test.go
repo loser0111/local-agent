@@ -215,15 +215,15 @@ func TestReadSkillEndToEnd(t *testing.T) {
 	tm := NewToolManager(store, ss)
 
 	// 全部技能可用：read_skill 已注册，list 可见，execute 取到正文
-	view := tm.BuildView(context.Background(), nil, nil)
-	list, err := view.ExecuteTool("tool_router", map[string]interface{}{"action": "list"})
+	view := tm.BuildView(context.Background(), nil, nil, nil)
+	list, err := view.ExecuteTool(context.Background(), "tool_router", map[string]interface{}{"action": "list"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(list, "read_skill") {
 		t.Fatalf("工具清单缺少 read_skill: %s", list)
 	}
-	out, err := view.ExecuteTool("read_skill", map[string]interface{}{"id": "alpha"})
+	out, err := view.ExecuteTool(context.Background(), "read_skill", map[string]interface{}{"id": "alpha"})
 	if err != nil {
 		t.Fatalf("读取技能失败: %v", err)
 	}
@@ -232,11 +232,11 @@ func TestReadSkillEndToEnd(t *testing.T) {
 	}
 
 	// 会话白名单只含 beta：alpha 不可读，beta 可读
-	view2 := tm.BuildView(context.Background(), nil, []string{"beta"})
-	if _, err := view2.ExecuteTool("read_skill", map[string]interface{}{"id": "alpha"}); err == nil {
+	view2 := tm.BuildView(context.Background(), nil, nil, []string{"beta"})
+	if _, err := view2.ExecuteTool(context.Background(), "read_skill", map[string]interface{}{"id": "alpha"}); err == nil {
 		t.Fatal("白名单外技能不应可读")
 	}
-	if _, err := view2.ExecuteTool("read_skill", map[string]interface{}{"id": "beta"}); err != nil {
+	if _, err := view2.ExecuteTool(context.Background(), "read_skill", map[string]interface{}{"id": "beta"}); err != nil {
 		t.Fatalf("白名单内技能应可读: %v", err)
 	}
 
@@ -247,8 +247,8 @@ func TestReadSkillEndToEnd(t *testing.T) {
 	if err := ss.SetEnabled("beta", false); err != nil {
 		t.Fatal(err)
 	}
-	view3 := tm.BuildView(context.Background(), nil, nil)
-	list3, _ := view3.ExecuteTool("tool_router", map[string]interface{}{"action": "list"})
+	view3 := tm.BuildView(context.Background(), nil, nil, nil)
+	list3, _ := view3.ExecuteTool(context.Background(), "tool_router", map[string]interface{}{"action": "list"})
 	if strings.Contains(list3, "read_skill") {
 		t.Fatalf("无可用技能时不应注册 read_skill: %s", list3)
 	}

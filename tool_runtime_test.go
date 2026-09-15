@@ -48,10 +48,10 @@ func TestDynamicCLIToolEndToEnd(t *testing.T) {
 		t.Fatalf("保存工具失败: %v", err)
 	}
 
-	view := tm.BuildView(context.Background(), nil, nil)
+	view := tm.BuildView(context.Background(), nil, nil, nil)
 
 	// list 应包含 exec_shell 和 say_hello
-	out, err := view.ExecuteTool("tool_router", map[string]interface{}{
+	out, err := view.ExecuteTool(context.Background(), "tool_router", map[string]interface{}{
 		"action": "list",
 	})
 	if err != nil {
@@ -62,7 +62,7 @@ func TestDynamicCLIToolEndToEnd(t *testing.T) {
 	}
 
 	// query 搜索只返回匹配项
-	searched, err := view.ExecuteTool("tool_router", map[string]interface{}{
+	searched, err := view.ExecuteTool(context.Background(), "tool_router", map[string]interface{}{
 		"action": "list",
 		"query":  "打招呼",
 	})
@@ -74,7 +74,7 @@ func TestDynamicCLIToolEndToEnd(t *testing.T) {
 	}
 
 	// describe 返回参数定义
-	desc, err := view.ExecuteTool("tool_router", map[string]interface{}{
+	desc, err := view.ExecuteTool(context.Background(), "tool_router", map[string]interface{}{
 		"action":    "describe",
 		"tool_name": "say_hello",
 	})
@@ -86,7 +86,7 @@ func TestDynamicCLIToolEndToEnd(t *testing.T) {
 	}
 
 	// execute 经路由器执行 CLI 工具
-	res, err := view.ExecuteTool("tool_router", map[string]interface{}{
+	res, err := view.ExecuteTool(context.Background(), "tool_router", map[string]interface{}{
 		"action":    "execute",
 		"tool_name": "say_hello",
 		"arguments": map[string]interface{}{"input": "hello-world-xyz"},
@@ -109,8 +109,8 @@ func TestDisabledToolExcluded(t *testing.T) {
 	if err := tm.Store().Save(cfg); err != nil {
 		t.Fatal(err)
 	}
-	view := tm.BuildView(context.Background(), nil, nil)
-	out, _ := view.ExecuteTool("tool_router", map[string]interface{}{"action": "list"})
+	view := tm.BuildView(context.Background(), nil, nil, nil)
+	out, _ := view.ExecuteTool(context.Background(), "tool_router", map[string]interface{}{"action": "list"})
 	if strings.Contains(out, "off_tool") {
 		t.Fatalf("停用工具不应出现在列表中: %s", out)
 	}
@@ -127,13 +127,13 @@ func TestSessionWhitelist(t *testing.T) {
 		t.Fatal(err)
 	}
 	// 白名单只含 exec_shell，picked 不出现
-	view := tm.BuildView(context.Background(), []string{"exec_shell"}, nil)
-	out, _ := view.ExecuteTool("tool_router", map[string]interface{}{"action": "list"})
+	view := tm.BuildView(context.Background(), nil, []string{"exec_shell"}, nil)
+	out, _ := view.ExecuteTool(context.Background(), "tool_router", map[string]interface{}{"action": "list"})
 	if strings.Contains(out, "picked") || !strings.Contains(out, "exec_shell") {
 		t.Fatalf("白名单过滤错误: %s", out)
 	}
 	// 执行白名单外工具应报未找到
-	if _, err := view.ExecuteTool("picked", map[string]interface{}{}); err == nil {
+	if _, err := view.ExecuteTool(context.Background(), "picked", map[string]interface{}{}); err == nil {
 		t.Fatal("白名单外工具不应可执行")
 	}
 }
@@ -174,7 +174,7 @@ func TestAPIToolConfigRoundTrip(t *testing.T) {
 	}
 
 	// 装配成功且 URL 模板渲染正确（不实际发请求，只验证字段）
-	view := tm.BuildView(context.Background(), nil, nil)
+	view := tm.BuildView(context.Background(), nil, nil, nil)
 	tool := view.nonMeta["weather"]
 	if tool == nil {
 		t.Fatal("API 工具未装配")
