@@ -47,7 +47,7 @@ function genSessionId() {
 
 /**
  * 创建会话
- * @param {{title?:string, project?:string, model?:string, permissionMode?:string, environment?:string, enabledTools?:string[], enabledSkills?:string[]}} config
+ * @param {{title?:string, project?:string, model?:string, environment?:string, enabledTools?:string[], enabledSkills?:string[]}} config
  * @returns {Promise<object>} 创建的完整会话
  */
 export async function createSession(config = {}) {
@@ -61,7 +61,6 @@ export async function createSession(config = {}) {
     title: config.title || '新会话',
     project: config.project || '',
     model: config.model || '',
-    permissionMode: config.permissionMode || 'manual',
     environment: config.environment || 'local',
     status: 'active',
     startAt: now,
@@ -167,7 +166,7 @@ export async function appendConversation(sessionId, conversation) {
 /**
  * 更新会话元数据
  * @param {string} id
- * @param {{title?:string, model?:string, permissionMode?:string, status?:string, project?:string}} patch
+ * @param {{title?:string, model?:string, status?:string, project?:string}} patch
  */
 export async function updateSession(id, patch) {
   if (isWails()) {

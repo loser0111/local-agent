@@ -19,9 +19,8 @@ func TestSessionStore_FullFlow(t *testing.T) {
 
 	// 创建会话
 	session, err := store.CreateSession(SessionConfig{
-		Project:        "e:/test",
-		Model:          "test-model",
-		PermissionMode: "manual",
+		Project: "e:/test",
+		Model:   "test-model",
 	})
 	if err != nil {
 		t.Fatalf("CreateSession 失败: %v", err)

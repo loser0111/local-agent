@@ -13,7 +13,6 @@
  * @property {number} lastActiveAt
  * @property {number} createdAt
  * @property {string} model
- * @property {string} permissionMode
  * @property {string[]} openPanes
  */
 
@@ -52,11 +51,6 @@
 /**
  * 面板类型
  * @typedef {'chat'|'diff'|'terminal'|'file-editor'|'plan'|'tasks'|'subagent'|'preview'} PaneType
- */
-
-/**
- * 权限模式
- * @typedef {'manual'|'acceptEdits'|'plan'|'auto'|'bypassPermissions'} PermissionMode
  */
 
 /**
@@ -128,13 +122,6 @@ export const SESSION_STATUS = {
   ERROR: 'error',
   ARCHIVED: 'archived',
 }
-
-export const PERMISSION_MODES = [
-  { value: 'manual', label: 'Manual', desc: '编辑文件或运行命令前均需确认' },
-  { value: 'acceptEdits', label: 'Accept edits', desc: '自动接受文件编辑，命令仍需确认' },
-  { value: 'plan', label: 'Plan', desc: '只读探索并提出计划，不修改代码' },
-  { value: 'auto', label: 'Auto', desc: '后台安全检查，减少权限提示' },
-]
 
 export const VIEW_MODES = [
   { value: 'verbose', label: 'Verbose' },

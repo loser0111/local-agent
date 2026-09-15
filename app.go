@@ -405,7 +405,7 @@ func (a *App) AppendConversation(sessionID string, conversation *Conversation) e
 	return a.sessionStore.AppendConversation(sessionID, conversation)
 }
 
-// UpdateSession 更新会话元数据（模型、权限模式、标题、状态等）
+// UpdateSession 更新会话元数据（模型、标题、状态、项目等）
 func (a *App) UpdateSession(id string, patch SessionPatch) (*Session, error) {
 	return a.sessionStore.UpdateSession(id, patch)
 }

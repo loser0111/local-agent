@@ -2,7 +2,6 @@
 import { ref, reactive, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useSettingStore } from '@/stores/setting'
-import { PERMISSION_MODES } from '@/types'
 import { fetchModels, addModel, deleteModel } from '@/api/model'
 import ToolSettings from '@/components/business/ToolSettings.vue'
 import SkillSettings from '@/components/business/SkillSettings.vue'
@@ -17,7 +16,6 @@ const tabs = [
   { key: 'model', label: '模型配置' },
   { key: 'tool', label: '工具配置' },
   { key: 'skill', label: '技能配置' },
-  { key: 'permission', label: '权限配置' },
   { key: 'about', label: '关于' },
 ]
 
@@ -255,23 +253,6 @@ onMounted(() => {
         <!-- 技能配置 -->
         <SkillSettings v-if="activeTab === 'skill'" />
 
-        <!-- 权限配置 -->
-        <div v-if="activeTab === 'permission'" class="settings-panel">
-          <div class="form-group">
-            <label>默认权限模式</label>
-            <select
-              v-model="settingStore.settings.defaultPermissionMode"
-              class="input"
-              style="max-width: 360px"
-            >
-              <option v-for="p in PERMISSION_MODES" :key="p.value" :value="p.value">
-                {{ p.label }} - {{ p.desc }}
-              </option>
-            </select>
-          </div>
-          <div class="hint">权限模式控制 AI 在会话中的自主程度，可在会话中随时切换。</div>
-        </div>
-
         <!-- 关于 -->
         <div v-if="activeTab === 'about'" class="settings-panel">
           <div class="about-info">
@@ -401,12 +382,6 @@ onMounted(() => {
 input[type='range'] {
   width: 240px;
   accent-color: $color-primary;
-}
-
-.hint {
-  font-size: $font-size-xs;
-  color: $color-text-muted;
-  margin-top: $space-sm;
 }
 
 .about-info {

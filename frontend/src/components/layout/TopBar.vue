@@ -3,7 +3,7 @@ import { ref, computed, onMounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useSessionStore } from '@/stores/session'
 import { useSettingStore } from '@/stores/setting'
-import { PERMISSION_MODES, VIEW_MODES } from '@/types'
+import { VIEW_MODES } from '@/types'
 import { fetchModelNames } from '@/api/model'
 
 const sessionStore = useSessionStore()
@@ -41,14 +41,6 @@ async function changeModel(e) {
   }
 }
 
-async function changePermissionMode(e) {
-  if (currentSession.value) {
-    await sessionStore.patchSession(currentSession.value.id, {
-      permissionMode: e.target.value,
-    })
-  }
-}
-
 function changeViewMode(mode) {
   settingStore.updateSetting('viewMode', mode)
 }
@@ -73,15 +65,6 @@ function goSettings() {
         <select class="select-sm" :value="currentSession.model" @change="changeModel">
           <option v-if="modelNames.length === 0" value="">暂无模型</option>
           <option v-for="m in modelNames" :key="m" :value="m">{{ m }}</option>
-        </select>
-        <select
-          class="select-sm"
-          :value="currentSession.permissionMode"
-          @change="changePermissionMode"
-        >
-          <option v-for="p in PERMISSION_MODES" :key="p.value" :value="p.value">
-            {{ p.label }}
-          </option>
         </select>
       </div>
     </div>

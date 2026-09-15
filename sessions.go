@@ -51,7 +51,6 @@ type Session struct {
 	Title          string          `json:"title"`
 	Project        string          `json:"project"`
 	Model          string          `json:"model"`
-	PermissionMode string          `json:"permissionMode"`
 	Environment    string          `json:"environment"`
 	Status         string          `json:"status"` // active / completed / archived
 	StartAt        int64           `json:"startAt"`
@@ -65,22 +64,20 @@ type Session struct {
 
 // SessionConfig 创建会话时的配置
 type SessionConfig struct {
-	Title          string   `json:"title"`
-	Project        string   `json:"project"`
-	Model          string   `json:"model"`
-	PermissionMode string   `json:"permissionMode"`
-	Environment    string   `json:"environment"`
-	EnabledTools   []string `json:"enabledTools"`  // 本会话可用的工具 ID 白名单（空=全部已启用工具）
-	EnabledSkills  []string `json:"enabledSkills"` // 本会话可用的技能 ID 白名单（空=全部已启用技能）
+	Title         string   `json:"title"`
+	Project       string   `json:"project"`
+	Model         string   `json:"model"`
+	Environment   string   `json:"environment"`
+	EnabledTools  []string `json:"enabledTools"`  // 本会话可用的工具 ID 白名单（空=全部已启用工具）
+	EnabledSkills []string `json:"enabledSkills"` // 本会话可用的技能 ID 白名单（空=全部已启用技能）
 }
 
 // SessionPatch 会话部分字段更新（指针为 nil 表示不更新）
 type SessionPatch struct {
-	Title          *string `json:"title,omitempty"`
-	Model          *string `json:"model,omitempty"`
-	PermissionMode *string `json:"permissionMode,omitempty"`
-	Status         *string `json:"status,omitempty"`
-	Project        *string `json:"project,omitempty"`
+	Title   *string `json:"title,omitempty"`
+	Model   *string `json:"model,omitempty"`
+	Status  *string `json:"status,omitempty"`
+	Project *string `json:"project,omitempty"`
 }
 
 // SessionStore 会话存储：每个会话一个 JSON 文件
@@ -110,7 +107,6 @@ func (s *SessionStore) CreateSession(config SessionConfig) (*Session, error) {
 		Title:          config.Title,
 		Project:        config.Project,
 		Model:          config.Model,
-		PermissionMode: config.PermissionMode,
 		Environment:    config.Environment,
 		Status:         "active",
 		StartAt:        now,
@@ -122,9 +118,6 @@ func (s *SessionStore) CreateSession(config SessionConfig) (*Session, error) {
 	}
 	if session.Title == "" {
 		session.Title = "新会话"
-	}
-	if session.PermissionMode == "" {
-		session.PermissionMode = "manual"
 	}
 	if session.Environment == "" {
 		session.Environment = "local"
@@ -300,9 +293,6 @@ func (s *SessionStore) UpdateSession(id string, patch SessionPatch) (*Session, e
 	}
 	if patch.Model != nil {
 		session.Model = *patch.Model
-	}
-	if patch.PermissionMode != nil {
-		session.PermissionMode = *patch.PermissionMode
 	}
 	if patch.Status != nil {
 		session.Status = *patch.Status

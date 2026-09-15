@@ -1,7 +1,6 @@
 <script setup>
 import { reactive, ref, computed, onMounted } from 'vue'
 import { BookOpen } from 'lucide-vue-next'
-import { PERMISSION_MODES } from '@/types'
 import { fetchModelNames } from '@/api/model'
 import { useToolsStore } from '@/stores/tools'
 import { useSkillsStore } from '@/stores/skills'
@@ -48,7 +47,6 @@ const form = reactive({
   environment: 'local',
   project: 'e:\\learn\\local-agent',
   model: '',
-  permissionMode: 'manual',
 })
 
 function toggleTool(id) {
@@ -125,15 +123,6 @@ function confirm() {
           <select v-model="form.model" class="input">
             <option value="">请选择模型</option>
             <option v-for="m in modelNames" :key="m" :value="m">{{ m }}</option>
-          </select>
-        </div>
-
-        <div class="form-group">
-          <label>权限模式</label>
-          <select v-model="form.permissionMode" class="input">
-            <option v-for="p in PERMISSION_MODES" :key="p.value" :value="p.value">
-              {{ p.label }} - {{ p.desc }}
-            </option>
           </select>
         </div>
 

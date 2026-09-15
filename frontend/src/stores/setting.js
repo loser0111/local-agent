@@ -1,13 +1,11 @@
 import { defineStore } from 'pinia'
 import { ref, watch } from 'vue'
-import { PERMISSION_MODES } from '@/types'
 
 const STORAGE_KEY = 'local-agent:settings'
 
 /** 默认设置（新增字段时，旧数据缺省由此兜底） */
 function defaultSettings() {
   return {
-    permissionMode: PERMISSION_MODES[0].value,
     // 流式输出：逐字显示回复（SSE）；旧数据缺该字段时默认开启
     streamResponse: true,
   }
@@ -31,12 +29,6 @@ function loadSettings() {
 export const useSettingStore = defineStore('setting', () => {
   const settings = ref(loadSettings())
 
-  function setPermissionMode(mode) {
-    if (PERMISSION_MODES.some((m) => m.value === mode)) {
-      settings.value.permissionMode = mode
-    }
-  }
-
   function setStreamResponse(v) {
     settings.value.streamResponse = !!v
   }
@@ -54,5 +46,5 @@ export const useSettingStore = defineStore('setting', () => {
     { deep: true }
   )
 
-  return { settings, setPermissionMode, setStreamResponse }
+  return { settings, setStreamResponse }
 })

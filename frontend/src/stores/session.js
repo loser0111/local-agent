@@ -72,7 +72,6 @@ export const useSessionStore = defineStore('session', () => {
         ...sessions.value[idx],
         title: updated.title,
         model: updated.model,
-        permissionMode: updated.permissionMode,
         status: updated.status,
         project: updated.project,
         endAt: updated.endAt,

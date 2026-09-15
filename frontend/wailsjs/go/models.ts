@@ -295,7 +295,6 @@ export namespace main {
 	    title: string;
 	    project: string;
 	    model: string;
-	    permissionMode: string;
 	    environment: string;
 	    status: string;
 	    startAt: number;
@@ -316,7 +315,6 @@ export namespace main {
 	        this.title = source["title"];
 	        this.project = source["project"];
 	        this.model = source["model"];
-	        this.permissionMode = source["permissionMode"];
 	        this.environment = source["environment"];
 	        this.status = source["status"];
 	        this.startAt = source["startAt"];
@@ -350,7 +348,6 @@ export namespace main {
 	    title: string;
 	    project: string;
 	    model: string;
-	    permissionMode: string;
 	    environment: string;
 	    enabledTools: string[];
 	    enabledSkills: string[];
@@ -364,7 +361,6 @@ export namespace main {
 	        this.title = source["title"];
 	        this.project = source["project"];
 	        this.model = source["model"];
-	        this.permissionMode = source["permissionMode"];
 	        this.environment = source["environment"];
 	        this.enabledTools = source["enabledTools"];
 	        this.enabledSkills = source["enabledSkills"];
@@ -373,7 +369,6 @@ export namespace main {
 	export class SessionPatch {
 	    title?: string;
 	    model?: string;
-	    permissionMode?: string;
 	    status?: string;
 	    project?: string;
 	
@@ -385,7 +380,6 @@ export namespace main {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.title = source["title"];
 	        this.model = source["model"];
-	        this.permissionMode = source["permissionMode"];
 	        this.status = source["status"];
 	        this.project = source["project"];
 	    }
