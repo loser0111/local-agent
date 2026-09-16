@@ -8,7 +8,11 @@ export function AppendConversation(arg1:string,arg2:main.Conversation):Promise<v
 
 export function AppendMessage(arg1:string,arg2:main.Message):Promise<main.Message>;
 
-export function Chat(arg1:string,arg2:string,arg3:boolean):Promise<main.ChatResult>;
+export function CancelPlan(arg1:string):Promise<void>;
+
+export function Chat(arg1:string,arg2:string,arg3:boolean,arg4:boolean):Promise<main.ChatResult>;
+
+export function ChatPlan(arg1:string,arg2:string,arg3:boolean):Promise<main.ChatResult>;
 
 export function CreateSession(arg1:main.SessionConfig):Promise<main.Session>;
 
@@ -19,6 +23,8 @@ export function DeleteSession(arg1:string):Promise<void>;
 export function DeleteSkill(arg1:string):Promise<void>;
 
 export function DeleteTool(arg1:string):Promise<void>;
+
+export function ExecutePlan(arg1:string,arg2:boolean):Promise<main.ChatResult>;
 
 export function GetDiff(arg1:string):Promise<Array<main.DiffFile>>;
 
@@ -32,9 +38,13 @@ export function GetModels():Promise<Array<main.Model>>;
 
 export function GetSession(arg1:string):Promise<main.Session>;
 
+export function GetSessionPlan(arg1:string):Promise<main.Plan>;
+
 export function GetSkill(arg1:string):Promise<main.SkillDetail>;
 
 export function Greet(arg1:string):Promise<string>;
+
+export function ListPlans(arg1:string):Promise<Array<main.Plan>>;
 
 export function ListSessions():Promise<Array<main.Session>>;
 
@@ -45,6 +55,8 @@ export function ListTools():Promise<Array<main.ToolInfo>>;
 export function PickDirectory():Promise<string>;
 
 export function RefreshSkills():Promise<Array<main.SkillMeta>>;
+
+export function SavePlan(arg1:main.Plan):Promise<void>;
 
 export function SaveSkill(arg1:string,arg2:string,arg3:string,arg4:string):Promise<void>;
 

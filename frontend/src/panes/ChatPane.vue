@@ -5,6 +5,7 @@ import { useChatStore } from '@/stores/chat'
 import { usePaneStore } from '@/stores/pane'
 import { useDiffStore } from '@/stores/diff'
 import { useSettingStore } from '@/stores/setting'
+import { usePlanStore } from '@/stores/plan'
 import { appendMessage, appendConversation, chat, onDiffUpdate } from '@/api/session'
 import PaneHeader from '@/components/layout/PaneHeader.vue'
 import MessageBubble from '@/components/business/MessageBubble.vue'
@@ -15,6 +16,11 @@ const chatStore = useChatStore()
 const paneStore = usePaneStore()
 const diffStore = useDiffStore()
 const settingStore = useSettingStore()
+const planStore = usePlanStore()
+
+// 计划模式（单次意图，非全局偏好）：开启后下一条消息走规划流程
+const planMode = ref(false)
+const plan = computed(() => planStore.plan)
 
 // 订阅后端 diff 实时推送（有文件改动时刷新差异数据）
 let offDiff = null
@@ -159,6 +165,38 @@ async function sendMessage() {
       sessionStore.touchSession(sid)
     }
 
+    // 计划模式：走规划流程产出可审核的计划（平凡请求由后端直接回复）
+    if (planMode.value) {
+      const result = await chat(sid, text, {
+        stream: false, // 规划器固定非流式；免计划直答取完整回复
+        plan: true,
+        onPlanUpdate: (p) => planStore.applyUpdate(p),
+      })
+      if (result?.plan) {
+        planStore.applyUpdate(result.plan)
+        planMode.value = false // 计划是单次意图，生成后自动复位
+        paneStore.openPane(sid, 'plan')
+      } else if (result?.reply) {
+        chatStore.addLocalMessage({
+          id: `assistant-${Date.now()}`,
+          role: 'assistant',
+          content: result.reply,
+          createdAt: Date.now(),
+          streaming: false,
+        })
+      } else if (result?.error) {
+        chatStore.addLocalMessage({
+          id: `plan-gen-error-${Date.now()}`,
+          role: 'assistant',
+          content: `生成计划失败：${result.error}`,
+          createdAt: Date.now(),
+          streaming: false,
+        })
+      }
+      sessionStore.touchSession(sid)
+      return
+    }
+
     // 2. 创建本地 AI 消息占位（流式显示用，展示工具调用中间状态）
     const localMsg = chatStore.addLocalMessage({
       id: `local-${Date.now()}`,
@@ -248,7 +286,12 @@ async function sendMessage() {
   }
 }
 
-function stopGeneration() {
+async function stopGeneration() {
+  // 计划执行中：触发协作式取消（当前步骤跑完后停止）
+  if (planStore.executing && plan.value) {
+    await planStore.cancel(plan.value.id)
+    return
+  }
   chatStore.isGenerating = false
 }
 
@@ -343,6 +386,19 @@ function openDiff() {
             <path d="M2 4h12M2 8h8M2 12h10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
           </svg>
           流式
+        </button>
+        <button
+          class="tool-btn plan-btn"
+          :class="{ active: planMode }"
+          :disabled="chatStore.isGenerating"
+          :title="planMode ? '计划模式已开启：本条消息将先生成可审核的计划' : '计划模式：复杂任务先生成可审核的计划'"
+          @click="planMode = !planMode"
+        >
+          <svg width="15" height="15" viewBox="0 0 16 16" fill="none">
+            <path d="M3 2.5h7l3 3v8a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1v-10a1 1 0 0 1 1-1z" stroke="currentColor" stroke-width="1.3" />
+            <path d="M5 7h6M5 10h4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" />
+          </svg>
+          计划
         </button>
         <button v-if="chatStore.isGenerating" class="tool-btn stop-btn" @click="stopGeneration">
           <svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor">
@@ -512,9 +568,15 @@ function openDiff() {
     }
   }
 
-  &.stream-btn.active {
+  &.stream-btn.active,
+  &.plan-btn.active {
     color: $color-primary;
     background-color: rgba(124, 58, 237, 0.12);
+  }
+
+  &:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
   }
 }
 

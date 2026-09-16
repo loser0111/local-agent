@@ -14,8 +14,16 @@ export function AppendMessage(arg1, arg2) {
   return window['go']['main']['App']['AppendMessage'](arg1, arg2);
 }
 
-export function Chat(arg1, arg2, arg3) {
-  return window['go']['main']['App']['Chat'](arg1, arg2, arg3);
+export function CancelPlan(arg1) {
+  return window['go']['main']['App']['CancelPlan'](arg1);
+}
+
+export function Chat(arg1, arg2, arg3, arg4) {
+  return window['go']['main']['App']['Chat'](arg1, arg2, arg3, arg4);
+}
+
+export function ChatPlan(arg1, arg2, arg3) {
+  return window['go']['main']['App']['ChatPlan'](arg1, arg2, arg3);
 }
 
 export function CreateSession(arg1) {
@@ -36,6 +44,10 @@ export function DeleteSkill(arg1) {
 
 export function DeleteTool(arg1) {
   return window['go']['main']['App']['DeleteTool'](arg1);
+}
+
+export function ExecutePlan(arg1, arg2) {
+  return window['go']['main']['App']['ExecutePlan'](arg1, arg2);
 }
 
 export function GetDiff(arg1) {
@@ -62,12 +74,20 @@ export function GetSession(arg1) {
   return window['go']['main']['App']['GetSession'](arg1);
 }
 
+export function GetSessionPlan(arg1) {
+  return window['go']['main']['App']['GetSessionPlan'](arg1);
+}
+
 export function GetSkill(arg1) {
   return window['go']['main']['App']['GetSkill'](arg1);
 }
 
 export function Greet(arg1) {
   return window['go']['main']['App']['Greet'](arg1);
+}
+
+export function ListPlans(arg1) {
+  return window['go']['main']['App']['ListPlans'](arg1);
 }
 
 export function ListSessions() {
@@ -88,6 +108,10 @@ export function PickDirectory() {
 
 export function RefreshSkills() {
   return window['go']['main']['App']['RefreshSkills']();
+}
+
+export function SavePlan(arg1) {
+  return window['go']['main']['App']['SavePlan'](arg1);
 }
 
 export function SaveSkill(arg1, arg2, arg3, arg4) {

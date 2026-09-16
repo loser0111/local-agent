@@ -1,5 +1,73 @@
 export namespace main {
 	
+	export class PlanStep {
+	    index: number;
+	    title: string;
+	    detail?: string;
+	    status: string;
+	    summary?: string;
+	    error?: string;
+	    startedAt?: number;
+	    finishedAt?: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new PlanStep(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.index = source["index"];
+	        this.title = source["title"];
+	        this.detail = source["detail"];
+	        this.status = source["status"];
+	        this.summary = source["summary"];
+	        this.error = source["error"];
+	        this.startedAt = source["startedAt"];
+	        this.finishedAt = source["finishedAt"];
+	    }
+	}
+	export class Plan {
+	    id: string;
+	    sessionId: string;
+	    title: string;
+	    status: string;
+	    steps: PlanStep[];
+	    createdAt: number;
+	    updatedAt: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new Plan(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.sessionId = source["sessionId"];
+	        this.title = source["title"];
+	        this.status = source["status"];
+	        this.steps = this.convertValues(source["steps"], PlanStep);
+	        this.createdAt = source["createdAt"];
+	        this.updatedAt = source["updatedAt"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
 	export class DiffLine {
 	    type: string;
 	    oldLineNo: number;
@@ -157,6 +225,7 @@ export namespace main {
 	    toolCalls?: ToolCall[];
 	    messages?: Message[];
 	    diff?: DiffFile[];
+	    plan?: Plan;
 	    error?: string;
 	
 	    static createFrom(source: any = {}) {
@@ -169,6 +238,7 @@ export namespace main {
 	        this.toolCalls = this.convertValues(source["toolCalls"], ToolCall);
 	        this.messages = this.convertValues(source["messages"], Message);
 	        this.diff = this.convertValues(source["diff"], DiffFile);
+	        this.plan = this.convertValues(source["plan"], Plan);
 	        this.error = source["error"];
 	    }
 	
@@ -290,6 +360,8 @@ export namespace main {
 	        this.url = source["url"];
 	    }
 	}
+	
+	
 	export class Session {
 	    id: string;
 	    title: string;

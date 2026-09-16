@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	wailsRuntime "github.com/wailsapp/wails/v2/pkg/runtime"
@@ -20,6 +21,11 @@ type App struct {
 	toolManager  *ToolManager
 	skillStore   *SkillStore
 	diffService  *DiffService
+	planStore    *PlanStore
+
+	// 计划执行取消注册表：planID -> 取消信号（close 即取消）
+	planCancels map[string]chan struct{}
+	planMu      sync.Mutex
 }
 
 // NewApp creates a new App application struct
@@ -55,6 +61,9 @@ func (a *App) startup(ctx context.Context) {
 
 	// 初始化差异服务（基于 git 快照计算工作区 diff）
 	a.diffService = NewDiffService()
+
+	// 初始化计划存储：~/.local-agent/plans/（重启时 running 计划自动置为失败）
+	a.planStore = NewPlanStore(filepath.Join(baseDir, "plans"))
 }
 
 // dataDir 返回本地数据目录（不存在则创建）
@@ -426,10 +435,92 @@ func (a *App) UpdateSession(id string, patch SessionPatch) (*Session, error) {
 // Chat 发送消息并获取 AI 回复（真正的 LLM 调用，支持多轮工具调用）
 // 前端调用此方法前应先监听 "chat:event" 事件以接收工具调用中间状态
 // useStream=true 时以 SSE 流式请求模型，文本分片通过 chat:event 的 reply_delta 事件推送
-func (a *App) Chat(sessionID string, query string, useStream bool) (*ChatResult, error) {
-	result := a.executeChat(sessionID, query, useStream)
+// usePlan=true 时走规划流程（ChatPlan）：产出可审核的结构化计划而非直接执行
+func (a *App) Chat(sessionID string, query string, useStream bool, usePlan bool) (*ChatResult, error) {
+	var result *ChatResult
+	if usePlan {
+		result = a.ChatPlan(sessionID, query, useStream)
+	} else {
+		result = a.executeChat(sessionID, query, useStream)
+	}
 	if result.Error != "" && result.Reply == "" {
 		return result, fmt.Errorf("%s", result.Error)
 	}
 	return result, nil
+}
+
+// ===== 计划管理（Plan & Execute）=====
+
+// GetSessionPlan 返回会话当前（最新创建的）计划；无计划时返回 nil
+func (a *App) GetSessionPlan(sessionID string) *Plan {
+	return a.planStore.GetBySession(sessionID)
+}
+
+// ListPlans 返回会话全部历史计划（按创建时间倒序）
+func (a *App) ListPlans(sessionID string) []*Plan {
+	return a.planStore.ListBySession(sessionID)
+}
+
+// SavePlan 保存审核阶段的计划编辑（仅 awaiting_approval 可改；只更新标题与步骤）
+func (a *App) SavePlan(plan *Plan) error {
+	if plan == nil || plan.ID == "" {
+		return fmt.Errorf("计划不能为空")
+	}
+	cur, err := a.planStore.Get(plan.ID)
+	if err != nil {
+		return err
+	}
+	if cur.Status != PlanAwaitingApproval {
+		return fmt.Errorf("计划当前状态不可编辑: %s", cur.Status)
+	}
+	if len(plan.Steps) == 0 {
+		return fmt.Errorf("计划至少需要包含一个步骤")
+	}
+	cur.Title = plan.Title
+	cur.Steps = plan.Steps
+	for i, st := range cur.Steps {
+		st.Index = i
+		st.Title = strings.TrimSpace(st.Title)
+		if st.Status == "" {
+			st.Status = StepPending
+		}
+	}
+	return a.planStore.Save(cur)
+}
+
+// ExecutePlan 逐步执行计划（长耗时，结束时返回；过程事件经 chat:event 推送）
+func (a *App) ExecutePlan(planID string, useStream bool) *ChatResult {
+	return a.executePlan(planID, useStream)
+}
+
+// CancelPlan 取消执行中的计划：协作式取消，当前步骤跑完后在下一步边界停止
+func (a *App) CancelPlan(planID string) error {
+	a.planMu.Lock()
+	defer a.planMu.Unlock()
+	ch, ok := a.planCancels[planID]
+	if !ok {
+		return fmt.Errorf("计划未在执行中: %s", planID)
+	}
+	close(ch)
+	delete(a.planCancels, planID)
+	return nil
+}
+
+// registerPlanCancel 注册计划取消信号（ExecutePlan 开始时调用）
+func (a *App) registerPlanCancel(planID string) chan struct{} {
+	a.planMu.Lock()
+	defer a.planMu.Unlock()
+	if a.planCancels == nil {
+		a.planCancels = map[string]chan struct{}{}
+	}
+	ch := make(chan struct{})
+	a.planCancels[planID] = ch
+	return ch
+}
+
+// unregisterPlanCancel 注销计划取消信号（ExecutePlan 结束时调用）
+func (a *App) unregisterPlanCancel(planID string) {
+	a.planMu.Lock()
+	defer a.planMu.Unlock()
+	delete(a.planCancels, planID)
 }

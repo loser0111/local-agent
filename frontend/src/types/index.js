@@ -121,6 +121,31 @@
  * @typedef {SkillMeta & {body: string}} SkillDetail
  */
 
+/**
+ * 计划步骤
+ * @typedef {Object} PlanStep
+ * @property {number} index
+ * @property {string} title
+ * @property {string} [detail]
+ * @property {'pending'|'running'|'done'|'failed'|'skipped'} status
+ * @property {string} [summary] 执行结果摘要（done 后）
+ * @property {string} [error] 失败原因
+ * @property {number} [startedAt]
+ * @property {number} [finishedAt]
+ */
+
+/**
+ * 计划
+ * @typedef {Object} Plan
+ * @property {string} id
+ * @property {string} sessionId
+ * @property {string} title
+ * @property {'awaiting_approval'|'running'|'completed'|'failed'|'cancelled'} status
+ * @property {PlanStep[]} steps
+ * @property {number} createdAt
+ * @property {number} updatedAt
+ */
+
 export const SESSION_STATUS = {
   ACTIVE: 'active',
   COMPLETED: 'completed',

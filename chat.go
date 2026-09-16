@@ -94,6 +94,7 @@ type ChatResult struct {
 	ToolCalls []ToolCall `json:"toolCalls,omitempty"` // 工具调用记录
 	Messages  []Message  `json:"messages,omitempty"`  // 后端持久化的所有消息（assistant+tool_calls, tool结果, 最终回复）
 	Diff      []DiffFile `json:"diff,omitempty"`      // 本轮对话产生的工作区差异
+	Plan      *Plan      `json:"plan,omitempty"`      // 规划/执行流程返回时携带的计划
 	Error     string     `json:"error,omitempty"`     // 错误信息
 }
 
@@ -382,24 +383,28 @@ func (a *App) startDeltaFlusher() (enqueue func(string), shutdown func()) {
 
 // ChatEvent 推送给前端的事件数据
 type ChatEvent struct {
-	Type     string     `json:"type"` // tool_call_start / tool_call_end / done / error / diff_update
-	ToolCall *ToolCall  `json:"toolCall,omitempty"`
-	Reply    string     `json:"reply,omitempty"`
-	Error    string     `json:"error,omitempty"`
-	Diff     []DiffFile `json:"diff,omitempty"` // diff_update 事件携带的差异文件
-	Turn     int        `json:"turn,omitempty"` // diff 所属轮次
+	Type      string     `json:"type"` // tool_call_start / tool_call_end / reply_delta / done / error / diff_update / plan_update
+	ToolCall  *ToolCall  `json:"toolCall,omitempty"`
+	Reply     string     `json:"reply,omitempty"`
+	Error     string     `json:"error,omitempty"`
+	Diff      []DiffFile `json:"diff,omitempty"`      // diff_update 事件携带的差异文件
+	Turn      int        `json:"turn,omitempty"`      // diff 所属轮次
+	Plan      *Plan      `json:"plan,omitempty"`      // plan_update 事件全量携带最新计划
+	StepIndex int        `json:"stepIndex,omitempty"` // plan_update 触发步骤索引（计划级变更为 -1，omitempty 时不下发）
 }
 
-// buildLLMMessages 从会话历史消息构造 LLM messages 数组
+// buildLLMMessages 从历史消息构造 LLM messages 数组
 // 正确重建消息序列：assistant(tool_calls) → tool(tool_call_id) → assistant(最终回复)
 // systemPrompt 由调用方拼接（基础人设 + L1 技能清单 + 强制注入正文）
-func buildLLMMessages(session *Session, query, systemPrompt string) []LLMMessage {
+// 约定：当前这条用户输入（普通聊天由前端、计划步骤由执行器）已持久化在 history 末尾，
+// 此处不再重复追加，避免同一句话在模型上下文中出现两次。
+func buildLLMMessages(history []Message, systemPrompt string) []LLMMessage {
 	messages := []LLMMessage{
 		{Role: RoleSystem, Content: systemPrompt},
 	}
 
 	// 添加历史消息
-	for _, msg := range session.Messages {
+	for _, msg := range history {
 		m := LLMMessage{
 			Role:    msg.Role,
 			Content: msg.Content,
@@ -427,29 +432,63 @@ func buildLLMMessages(session *Session, query, systemPrompt string) []LLMMessage
 		messages = append(messages, m)
 	}
 
-	// 添加当前用户消息
-	messages = append(messages, LLMMessage{Role: RoleUser, Content: query})
-
 	return messages
 }
 
-// executeChat 执行完整的多轮对话流程
+// executeChat 执行完整的多轮对话流程（普通聊天入口）
 // 借鉴 01agent 的状态机设计：Preprocessing → LLM Call → Judge → Tool Execute → Rebuild → 循环
 // 持久化所有中间消息（assistant+tool_calls, tool结果, 最终回复），确保下次对话时消息序列完整
 func (a *App) executeChat(sessionID, query string, useStream bool) *ChatResult {
-	// 1. 加载会话
+	session, err := a.sessionStore.GetSession(sessionID)
+	if err != nil {
+		return &ChatResult{Error: fmt.Sprintf("加载会话失败: %v", err)}
+	}
+	model, err := a.modelStore.GetModel(session.Model)
+	if err != nil {
+		return &ChatResult{Error: fmt.Sprintf("获取模型配置失败: %v", err)}
+	}
+	dir, _ := a.resolveProjectDir(sessionID)
+	return a.runToolLoop(sessionID, a.buildBasePrompt(session, dir), &model, useStream, false, nil)
+}
+
+// buildBasePrompt 组装基础系统提示词：基础人设 + 工作区说明 + 技能上下文（L1 清单 / 强制注入正文）
+// dir 为会话工作区目录（为空串时不追加工作区段）
+func (a *App) buildBasePrompt(session *Session, dir string) string {
+	prompt := SystemPrompt
+	// 工作区说明：告知模型当前会话绑定的工作目录（未设置时为进程工作目录）
+	if dir != "" {
+		prompt += fmt.Sprintf("\n\n## 工作区\n"+
+			"当前会话绑定的工作区目录为：%s\n"+
+			"涉及文件读写、目录操作或运行命令时，若未指定绝对路径，默认应基于此目录（相对路径均相对于该目录）。", dir)
+	}
+	if a.skillStore != nil {
+		enabled := a.enabledSkillsForSession(session)
+		if idx := BuildSkillIndex(enabled); idx != "" {
+			prompt += "\n\n## 可用技能（Skills）\n" +
+				"需要时先调用 read_skill 工具获取技能完整说明，再按说明执行：\n" + idx
+		}
+		if block := BuildAlwaysInjectBlock(enabled); block != "" {
+			prompt += "\n\n## 已直接加载的技能正文" + block
+		}
+	}
+	return prompt
+}
+
+// runToolLoop 执行一次「构建请求→LLM→工具循环」的完整运行。
+// 普通聊天（executeChat）与计划步骤执行（ExecutePlan）共用的唯一执行引擎。
+// systemPrompt 由调用方组装（buildBasePrompt，可再叠加计划上下文）；
+// 当前用户消息（普通聊天为用户输入、计划执行为合成的步骤消息）已由调用方持久化进会话历史；
+// compact=true 时对历史消息做确定性压缩（计划执行专用，普通聊天不受影响）；
+// checkCancel 在每轮工具循环前调用，返回 true 则中止（协作式取消，进行中的调用跑完）。
+func (a *App) runToolLoop(sessionID, systemPrompt string, model *Model,
+	useStream, compact bool, checkCancel func() bool) *ChatResult {
+	// 1. 重新加载会话：确保包含调用方刚持久化的用户消息以及此前全部消息（跨步骤上下文连续）
 	session, err := a.sessionStore.GetSession(sessionID)
 	if err != nil {
 		return &ChatResult{Error: fmt.Sprintf("加载会话失败: %v", err)}
 	}
 
-	// 2. 获取模型配置
-	model, err := a.modelStore.GetModel(session.Model)
-	if err != nil {
-		return &ChatResult{Error: fmt.Sprintf("获取模型配置失败: %v", err)}
-	}
-
-	// 3. 确定模型 ID（优先用 ModelID，为空则用 Name）
+	// 2. 确定模型 ID（优先用 ModelID，为空则用 Name）
 	modelID := model.ModelID
 	if modelID == "" {
 		modelID = model.Name
@@ -464,35 +503,31 @@ func (a *App) executeChat(sessionID, query string, useStream bool) *ChatResult {
 		turnBase = a.diffService.TurnSnapshot(dir)
 	}
 
-	// 4. 组装系统提示词：基础人设 + 工作区说明 + 技能上下文（L1 清单 / 强制注入正文）
-	skillPrompt := SystemPrompt
-	// 工作区说明：告知模型当前会话绑定的工作目录（未设置时为进程工作目录）
-	if dir, err := a.resolveProjectDir(sessionID); err == nil && dir != "" {
-		skillPrompt += fmt.Sprintf("\n\n## 工作区\n"+
-			"当前会话绑定的工作区目录为：%s\n"+
-			"涉及文件读写、目录操作或运行命令时，若未指定绝对路径，默认应基于此目录（相对路径均相对于该目录）。", dir)
+	// 3. 构建历史消息；compact 时对早期工具结果做确定性截断（不改动存储）
+	history := session.Messages
+	if compact {
+		history = compactMessages(history)
 	}
-	if a.skillStore != nil {
-		enabled := a.enabledSkillsForSession(session)
-		if idx := BuildSkillIndex(enabled); idx != "" {
-			skillPrompt += "\n\n## 可用技能（Skills）\n" +
-				"需要时先调用 read_skill 工具获取技能完整说明，再按说明执行：\n" + idx
-		}
-		if block := BuildAlwaysInjectBlock(enabled); block != "" {
-			skillPrompt += "\n\n## 已直接加载的技能正文" + block
-		}
-	}
-	messages := buildLLMMessages(session, query, skillPrompt)
+	messages := buildLLMMessages(history, systemPrompt)
 
-	// 5. 按会话白名单装配工具视图，获取暴露给 LLM 的工具定义（仅 tool_router）
+	// 4. 按会话白名单装配工具视图，获取暴露给 LLM 的工具定义（仅 tool_router）
 	toolView := a.toolManager.BuildView(context.Background(), session.EnabledTools, session.EnabledSkills)
 	tools := toolView.GetToolsForLLM()
 
-	// 6. 工具调用循环
+	// 5. 工具调用循环
 	var toolCallRecords []ToolCall
-	var persistedMsgs []Message // 本次对话持久化的所有消息
+	var persistedMsgs []Message // 本次运行持久化的所有消息
 
 	for turn := 0; turn < MaxChatTurns; turn++ {
+		// 协作式取消：进行中的 LLM 调用与工具执行跑完，下一轮循环不再开始
+		if checkCancel != nil && checkCancel() {
+			return &ChatResult{
+				Error:     "执行已取消",
+				ToolCalls: toolCallRecords,
+				Messages:  persistedMsgs,
+			}
+		}
+
 		req := &LLMReq{
 			Model:       modelID,
 			Messages:    messages,
@@ -701,4 +736,221 @@ func (a *App) executeChat(sessionID, query string, useStream bool) *ChatResult {
 		ToolCalls: toolCallRecords,
 		Messages:  persistedMsgs,
 	}
+}
+
+// ===== Plan & Execute（规划-执行模式）=====
+
+// emitPlanUpdate 推送计划状态变更事件（plan_update，全量携带最新计划）
+func (a *App) emitPlanUpdate(plan *Plan, stepIndex int) {
+	if a.ctx != nil {
+		wailsRuntime.EventsEmit(a.ctx, "chat:event", ChatEvent{
+			Type:      "plan_update",
+			Plan:      plan,
+			StepIndex: stepIndex,
+		})
+	}
+}
+
+// ChatPlan 规划流程：调用规划器产出结构化计划（或平凡请求直答）。
+// 用户消息已由前端持久化，此处不再落库；规划器过程消息不持久化（对用户无信息量）。
+func (a *App) ChatPlan(sessionID, query string, useStream bool) *ChatResult {
+	// 1. 会话与模型解析（与 executeChat 一致）
+	session, err := a.sessionStore.GetSession(sessionID)
+	if err != nil {
+		return &ChatResult{Error: fmt.Sprintf("加载会话失败: %v", err)}
+	}
+	model, err := a.modelStore.GetModel(session.Model)
+	if err != nil {
+		return &ChatResult{Error: fmt.Sprintf("获取模型配置失败: %v", err)}
+	}
+	modelID := model.ModelID
+	if modelID == "" {
+		modelID = model.Name
+	}
+	dir, _ := a.resolveProjectDir(sessionID)
+
+	// 2. 规划器调用：无工具、非流式、低温；失败重试一次
+	var resp *LLMResp
+	var lastErr error
+	for attempt := 0; attempt < 2; attempt++ {
+		req := &LLMReq{
+			Model:       modelID,
+			Temperature: 0.2,
+			Messages: []LLMMessage{
+				{Role: RoleSystem, Content: plannerSystemPrompt},
+				{Role: RoleUser, Content: buildPlannerUserPrompt(query, dir)},
+			},
+		}
+		resp, lastErr = callLLM(model.URL, model.APIKey, req)
+		if lastErr == nil {
+			break
+		}
+	}
+	if lastErr != nil {
+		return &ChatResult{Error: fmt.Sprintf("规划失败: %v", lastErr)}
+	}
+	if len(resp.Choices) == 0 {
+		return &ChatResult{Error: "规划器返回空响应"}
+	}
+
+	// 3. 解析规划输出
+	d, err := parsePlanDraft(resp.Choices[0].Message.Content)
+	if err != nil {
+		return &ChatResult{Error: fmt.Sprintf("规划失败: %v", err)}
+	}
+
+	// 4. 平凡请求免计划（G8）：走普通工具循环直答
+	if !d.NeedPlan {
+		return a.runToolLoop(sessionID, a.buildBasePrompt(session, dir), &model, useStream, false, nil)
+	}
+
+	// 5. 组装计划并落盘（待审核状态）
+	now := time.Now().UnixMilli()
+	plan := &Plan{
+		ID:        generatePlanID(),
+		SessionID: sessionID,
+		Title:     d.Title,
+		Status:    PlanAwaitingApproval,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	for i, s := range d.Steps {
+		plan.Steps = append(plan.Steps, &PlanStep{
+			Index:  i,
+			Title:  strings.TrimSpace(s.Title),
+			Detail: s.Detail,
+			Status: StepPending,
+		})
+	}
+	if err := a.planStore.Save(plan); err != nil {
+		return &ChatResult{Error: fmt.Sprintf("保存计划失败: %v", err)}
+	}
+
+	// 6. 推送计划事件并返回
+	a.emitPlanUpdate(plan, -1)
+	return &ChatResult{Plan: plan}
+}
+
+// executePlan 逐步执行计划：每步 = 一次完整工具循环（runToolLoop）。
+// 长耗时，结束时返回；失败即停（后续步骤置 skipped）；done 步骤在重试时自动跳过。
+func (a *App) executePlan(planID string, useStream bool) *ChatResult {
+	// 1. 加载计划并校验状态（running 状态拒绝并发执行，R10）
+	plan, err := a.planStore.Get(planID)
+	if err != nil {
+		return &ChatResult{Error: err.Error()}
+	}
+	if plan.Status != PlanAwaitingApproval && plan.Status != PlanCancelled && plan.Status != PlanFailed {
+		return &ChatResult{Error: "计划状态不允许执行: " + plan.Status}
+	}
+
+	// 2. 会话与模型解析
+	session, err := a.sessionStore.GetSession(plan.SessionID)
+	if err != nil {
+		return &ChatResult{Error: fmt.Sprintf("加载会话失败: %v", err)}
+	}
+	model, err := a.modelStore.GetModel(session.Model)
+	if err != nil {
+		return &ChatResult{Error: fmt.Sprintf("获取模型配置失败: %v", err)}
+	}
+	dir, _ := a.resolveProjectDir(plan.SessionID)
+	basePrompt := a.buildBasePrompt(session, dir)
+
+	// 3. 注册协作式取消信号
+	cancelCh := a.registerPlanCancel(planID)
+	defer a.unregisterPlanCancel(planID)
+	checkCancel := func() bool {
+		select {
+		case <-cancelCh:
+			return true
+		default:
+			return false
+		}
+	}
+
+	// 4. 计划置为执行中
+	plan.Status = PlanRunning
+	_ = a.planStore.Save(plan)
+	a.emitPlanUpdate(plan, -1)
+
+	// 5. 逐步执行
+	for _, step := range plan.Steps {
+		// 步骤边界取消检查
+		if checkCancel() {
+			plan.Status = PlanCancelled
+			markRemainingSkipped(plan, step.Index)
+			_ = a.planStore.Save(plan)
+			a.emitPlanUpdate(plan, step.Index)
+			return &ChatResult{Plan: plan}
+		}
+		// 失败重试时跳过已完成步骤
+		if step.Status == StepDone {
+			continue
+		}
+
+		step.Status = StepRunning
+		step.StartedAt = time.Now().UnixMilli()
+		step.Error = ""
+		_ = a.planStore.Save(plan)
+		a.emitPlanUpdate(plan, step.Index)
+
+		// 步骤用户消息落库（聊天流即审计日志），随后走统一执行引擎
+		if _, err := a.sessionStore.AppendMessage(plan.SessionID, Message{
+			Role:    RoleUser,
+			Content: buildPlanStepQuery(plan, step),
+		}); err != nil {
+			step.Status = StepFailed
+			step.Error = fmt.Sprintf("持久化步骤消息失败: %v", err)
+			step.FinishedAt = time.Now().UnixMilli()
+			plan.Status = PlanFailed
+			markRemainingSkipped(plan, step.Index+1)
+			_ = a.planStore.Save(plan)
+			a.emitPlanUpdate(plan, step.Index)
+			return &ChatResult{Plan: plan, Error: step.Error}
+		}
+
+		sys := buildPlanSystemPrompt(basePrompt, plan, step)
+		res := a.runToolLoop(plan.SessionID, sys, &model, useStream, true /*compact*/, checkCancel)
+
+		// 步骤中途取消：按本步实际结果落状态，计划置 cancelled
+		if checkCancel() {
+			if res.Error == "" {
+				step.Status = StepDone
+				step.Summary = extractStepSummary(res.Reply)
+			} else {
+				step.Status = StepFailed
+				step.Error = "执行取消: " + res.Error
+			}
+			step.FinishedAt = time.Now().UnixMilli()
+			plan.Status = PlanCancelled
+			markRemainingSkipped(plan, step.Index+1)
+			_ = a.planStore.Save(plan)
+			a.emitPlanUpdate(plan, step.Index)
+			return &ChatResult{Plan: plan}
+		}
+
+		// 失败即停
+		if res.Error != "" {
+			step.Status = StepFailed
+			step.Error = res.Error
+			step.FinishedAt = time.Now().UnixMilli()
+			plan.Status = PlanFailed
+			markRemainingSkipped(plan, step.Index+1)
+			_ = a.planStore.Save(plan)
+			a.emitPlanUpdate(plan, step.Index)
+			return &ChatResult{Plan: plan, Error: "步骤执行失败: " + res.Error}
+		}
+
+		// 步骤完成：回写摘要
+		step.Status = StepDone
+		step.Summary = extractStepSummary(res.Reply)
+		step.FinishedAt = time.Now().UnixMilli()
+		_ = a.planStore.Save(plan)
+		a.emitPlanUpdate(plan, step.Index)
+	}
+
+	// 6. 全部完成
+	plan.Status = PlanCompleted
+	_ = a.planStore.Save(plan)
+	a.emitPlanUpdate(plan, -1)
+	return &ChatResult{Plan: plan, Reply: "计划执行完成"}
 }

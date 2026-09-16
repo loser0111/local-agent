@@ -11,6 +11,7 @@ import {
   GetDiffTurns,
 } from '@/../wailsjs/go/main/App'
 import { EventsOn, EventsOff } from '@/../wailsjs/runtime/runtime'
+import { putMockPlan } from '@/api/plan'
 
 /**
  * 判断是否运行在 Wails 桌面环境
@@ -190,16 +191,16 @@ export async function updateSession(id, patch) {
  * 后端会持久化所有中间消息（assistant+tool_calls, tool结果, 最终回复）
  * @param {string} sessionId
  * @param {string} query
- * @param {{stream?:boolean, onReplyDelta?:Function, onToolCallStart?:Function, onToolCallEnd?:Function}} callbacks
- * @returns {Promise<{reply:string, toolCalls?:array, messages?:array, error?:string}>}
+ * @param {{stream?:boolean, plan?:boolean, onReplyDelta?:Function, onToolCallStart?:Function, onToolCallEnd?:Function, onPlanUpdate?:Function}} callbacks
+ * @returns {Promise<{reply:string, toolCalls?:array, messages?:array, plan?:object, error?:string}>}
  */
 export async function chat(
   sessionId,
   query,
-  { stream = true, onReplyDelta, onToolCallStart, onToolCallEnd } = {}
+  { stream = true, plan = false, onReplyDelta, onToolCallStart, onToolCallEnd, onPlanUpdate } = {}
 ) {
   if (isWails()) {
-    // 监听工具调用中间状态与流式分片事件
+    // 监听工具调用中间状态、流式分片与计划状态事件
     const eventHandler = (eventData) => {
       if (!eventData) return
       switch (eventData.type) {
@@ -212,12 +213,15 @@ export async function chat(
         case 'tool_call_end':
           onToolCallEnd?.(eventData.toolCall)
           break
+        case 'plan_update':
+          onPlanUpdate?.(eventData.plan)
+          break
       }
     }
     EventsOn('chat:event', eventHandler)
 
     try {
-      const result = await Chat(sessionId, query, !!stream)
+      const result = await Chat(sessionId, query, !!stream, !!plan)
       return result
     } finally {
       EventsOff('chat:event')
@@ -225,6 +229,29 @@ export async function chat(
   }
 
   // ===== 浏览器开发模式 mock =====
+
+  // 计划模式：返回模拟计划（3 步骤，待审核状态）
+  if (plan) {
+    await new Promise((r) => setTimeout(r, 800))
+    const now = Date.now()
+    const mockPlan = {
+      id: `plan_${now}_m0ck`,
+      sessionId,
+      title: `「${(query || '').slice(0, 12)}…」执行计划`,
+      status: 'awaiting_approval',
+      steps: [
+        { index: 0, title: '梳理现有结构与依赖', detail: '阅读相关文件并总结现状', status: 'pending' },
+        { index: 1, title: '实施主要变更', detail: '', status: 'pending' },
+        { index: 2, title: '验证并汇总结果', detail: '', status: 'pending' },
+      ],
+      createdAt: now,
+      updatedAt: now,
+    }
+    putMockPlan(mockPlan) // 落库，供 savePlan/executePlan mock 读写
+    onPlanUpdate?.(mockPlan)
+    return { plan: mockPlan }
+  }
+
   // 模拟工具调用 + AI 回复（返回 messages 模拟后端持久化的消息）
   const tcId = `tc-${Date.now()}`
   const toolCall = {
