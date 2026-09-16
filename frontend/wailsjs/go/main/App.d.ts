@@ -42,6 +42,8 @@ export function ListSkills():Promise<Array<main.SkillMeta>>;
 
 export function ListTools():Promise<Array<main.ToolInfo>>;
 
+export function PickDirectory():Promise<string>;
+
 export function RefreshSkills():Promise<Array<main.SkillMeta>>;
 
 export function SaveSkill(arg1:string,arg2:string,arg3:string,arg4:string):Promise<void>;

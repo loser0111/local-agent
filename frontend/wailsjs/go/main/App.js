@@ -82,6 +82,10 @@ export function ListTools() {
   return window['go']['main']['App']['ListTools']();
 }
 
+export function PickDirectory() {
+  return window['go']['main']['App']['PickDirectory']();
+}
+
 export function RefreshSkills() {
   return window['go']['main']['App']['RefreshSkills']();
 }

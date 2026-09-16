@@ -464,8 +464,14 @@ func (a *App) executeChat(sessionID, query string, useStream bool) *ChatResult {
 		turnBase = a.diffService.TurnSnapshot(dir)
 	}
 
-	// 4. 组装技能上下文（L1 清单 + 强制注入正文）并构造 LLM messages
+	// 4. 组装系统提示词：基础人设 + 工作区说明 + 技能上下文（L1 清单 / 强制注入正文）
 	skillPrompt := SystemPrompt
+	// 工作区说明：告知模型当前会话绑定的工作目录（未设置时为进程工作目录）
+	if dir, err := a.resolveProjectDir(sessionID); err == nil && dir != "" {
+		skillPrompt += fmt.Sprintf("\n\n## 工作区\n"+
+			"当前会话绑定的工作区目录为：%s\n"+
+			"涉及文件读写、目录操作或运行命令时，若未指定绝对路径，默认应基于此目录（相对路径均相对于该目录）。", dir)
+	}
 	if a.skillStore != nil {
 		enabled := a.enabledSkillsForSession(session)
 		if idx := BuildSkillIndex(enabled); idx != "" {

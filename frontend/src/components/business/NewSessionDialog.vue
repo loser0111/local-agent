@@ -6,6 +6,7 @@ import { fetchModelNames } from '@/api/model'
 import { useToolsStore } from '@/stores/tools'
 import { useSkillsStore } from '@/stores/skills'
 import ToolIcon from './ToolIcon.vue'
+import { PickDirectory } from '@/../wailsjs/go/main/App'
 
 const emit = defineEmits(['close', 'confirm'])
 
@@ -50,6 +51,24 @@ const form = reactive({
   model: '',
   permissionMode: 'manual',
 })
+
+/**
+ * 浏览选择工作区文件夹
+ * Wails 环境调用系统目录选择对话框；浏览器 mock 模式降级为手动输入框
+ */
+async function browseProject() {
+  if (window.go && window.go.main && window.go.main.App) {
+    try {
+      const dir = await PickDirectory()
+      if (dir) form.project = dir
+    } catch (e) {
+      console.error('打开目录选择器失败:', e)
+    }
+  } else {
+    const dir = window.prompt('输入工作区文件夹路径：', form.project)
+    if (dir) form.project = dir
+  }
+}
 
 function toggleTool(id) {
   const idx = selectedToolIds.value.indexOf(id)
@@ -113,10 +132,10 @@ function confirm() {
         </div>
 
         <div class="form-group">
-          <label>项目文件夹</label>
+          <label>项目文件夹（工作区）</label>
           <div class="path-input">
-            <input v-model="form.project" class="input" />
-            <button class="btn btn-default">浏览</button>
+            <input v-model="form.project" class="input" placeholder="选择或输入工作区路径" />
+            <button class="btn btn-default" @click="browseProject">浏览</button>
           </div>
         </div>
 

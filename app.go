@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	wailsRuntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
 // App struct
@@ -338,6 +340,15 @@ func (a *App) enabledSkillsForSession(session *Session) []*SkillMeta {
 		}
 	}
 	return out
+}
+
+// ===== 目录选择 =====
+
+// PickDirectory 打开系统目录选择对话框，返回所选目录路径；用户取消时返回空字符串
+func (a *App) PickDirectory() (string, error) {
+	return wailsRuntime.OpenDirectoryDialog(a.ctx, wailsRuntime.OpenDialogOptions{
+		Title: "选择工作区文件夹",
+	})
 }
 
 // ===== 差异视图 =====
