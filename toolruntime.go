@@ -34,6 +34,8 @@ func renderTemplate(tpl string, args map[string]interface{}) string {
 type DynamicCLITool struct {
 	*BaseTool
 	cfg *ToolConfig
+	// Dir 工作目录（会话项目目录），为空时继承进程工作目录
+	Dir string
 }
 
 func NewDynamicCLITool(cfg *ToolConfig) *DynamicCLITool {
@@ -71,11 +73,26 @@ func (t *DynamicCLITool) Execute(ctx context.Context, args map[string]interface{
 	} else {
 		cmd = exec.CommandContext(cctx, "bash", "-c", cmdLine)
 	}
+	if t.Dir != "" {
+		cmd.Dir = t.Dir
+	}
 	out, err := cmd.CombinedOutput()
 	if cctx.Err() == context.DeadlineExceeded {
 		return string(out), fmt.Errorf("命令执行超时（%ds）", timeout)
 	}
 	return string(out), err
+}
+
+// PermissionSubject 声明判定主体：把参数模板展开成真正要执行的命令后再判定。
+// 若配置无法解析，返回不可信主体（trusted=false），判定会落到"询问"。
+func (t *DynamicCLITool) PermissionSubject(args map[string]interface{}) Subject {
+	rawSubject := newRawSubject(t.GetName(), "CLI 工具配置解析失败")
+	var cliCfg CLIToolConfig
+	if err := json.Unmarshal(t.cfg.Config, &cliCfg); err != nil {
+		rawSubject.Trusted = false
+		return rawSubject
+	}
+	return newCommandSubject(t.GetName(), renderTemplate(cliCfg.Command, args))
 }
 
 // ===== 动态 HTTP API 工具 =====
@@ -159,6 +176,22 @@ func (t *DynamicAPITool) Execute(ctx context.Context, args map[string]interface{
 		return result, fmt.Errorf("HTTP %d: %s", resp.StatusCode, resp.Status)
 	}
 	return result, nil
+}
+
+// PermissionSubject 声明判定主体：HTTP API 工具的副作用不可知，主体取「方法 + 展开后的 URL」，
+// 便于用户按目标地址授权。
+func (t *DynamicAPITool) PermissionSubject(args map[string]interface{}) Subject {
+	var apiCfg APIToolConfig
+	if err := json.Unmarshal(t.cfg.Config, &apiCfg); err != nil {
+		s := newRawSubject(t.GetName(), "API 工具配置解析失败")
+		s.Trusted = false
+		return s
+	}
+	method := strings.ToUpper(strings.TrimSpace(apiCfg.Method))
+	if method == "" {
+		method = http.MethodGet
+	}
+	return newRawSubject(t.GetName(), fmt.Sprintf("%s %s", method, renderTemplate(apiCfg.URL, args)))
 }
 
 // ===== MCP Server 连接池 =====

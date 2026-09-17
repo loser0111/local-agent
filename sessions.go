@@ -23,6 +23,9 @@ type ToolCall struct {
 	Status   string                 `json:"status"`
 	Duration float64                `json:"duration,omitempty"`
 	Result   string                 `json:"result,omitempty"`
+	// Files 本次调用改动的文件（相对工作区路径）。仅在文件工具产生写入时有值，
+	// 让差异可以归因到具体是哪次工具调用改的。
+	Files []string `json:"files,omitempty"`
 }
 
 // Message 会话中的一条聊天消息
@@ -71,7 +74,11 @@ func normalizeViewMode(mode string) string {
 	}
 }
 
-// Session 一个完整会话，每个会话持久化为一个 JSON 文件
+// Session 一个完整会话，每个会话持久化为一个 JSON 文件。
+//
+// DiffBaseline / DiffTouched 是会话级 diff 状态：基线 commit 与本会话触碰过的文件
+// （仓库相对路径）。落盘是为了重启后仍能算出「本会话改了哪些文件」，
+// 而不是把整个工作区的改动都算进来（详见 DiffService 的注释）。
 type Session struct {
 	ID             string          `json:"id"`
 	Title          string          `json:"title"`
@@ -86,6 +93,8 @@ type Session struct {
 	Messages       []Message       `json:"messages"`
 	Conversations  []*Conversation `json:"conversations"`
 	Diffs          []DiffTurn      `json:"diffs,omitempty"`         // 每轮对话产生的文件差异
+	DiffBaseline   string          `json:"diffBaseline,omitempty"`
+	DiffTouched    []string        `json:"diffTouched,omitempty"`
 	EnabledTools   []string        `json:"enabledTools,omitempty"`  // 本会话可用的工具 ID 白名单（空=全部已启用工具）
 	EnabledSkills  []string        `json:"enabledSkills,omitempty"` // 本会话可用的技能 ID 白名单（空=全部已启用技能）
 }
@@ -153,9 +162,8 @@ func (s *SessionStore) CreateSession(config SessionConfig) (*Session, error) {
 	if session.Title == "" {
 		session.Title = "新会话"
 	}
-	if session.PermissionMode == "" {
-		session.PermissionMode = "manual"
-	}
+	// 权限模式：空值与非法值一律归一化到最严格的 manual（fail closed）
+	session.PermissionMode = string(NormalizeMode(session.PermissionMode))
 	session.ViewMode = normalizeViewMode(session.ViewMode)
 	if session.Environment == "" {
 		session.Environment = "local"
@@ -194,6 +202,8 @@ func (s *SessionStore) loadSession(id string) (*Session, error) {
 	}
 	// 旧会话文件没有 viewMode 字段，统一兜底，避免前端拿到空值
 	session.ViewMode = normalizeViewMode(session.ViewMode)
+	// 权限模式同样兜底：旧数据或手改过的文件可能是空值/脏值
+	session.PermissionMode = string(NormalizeMode(session.PermissionMode))
 	return &session, nil
 }
 
@@ -299,8 +309,10 @@ func (s *SessionStore) AppendConversation(id string, conv *Conversation) error {
 	return s.saveSession(session)
 }
 
-// AppendDiff 追加一轮差异并落盘，轮次号自动递增，返回本轮轮次号
-func (s *SessionStore) AppendDiff(id string, turn DiffTurn) (int, error) {
+// AppendDiff 追加一轮差异并落盘，轮次号自动递增，返回本轮轮次号。
+// 同时把会话级 diff 状态（基线 + 触碰过的路径）一并落盘——与 diff 同一次写入，
+// 避免为了同步状态再写一遍整个会话文件。
+func (s *SessionStore) AppendDiff(id string, turn DiffTurn, baseline string, touched []string) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -313,6 +325,12 @@ func (s *SessionStore) AppendDiff(id string, turn DiffTurn) (int, error) {
 		turn.Label = fmt.Sprintf("第 %d 轮", turn.Turn)
 	}
 	session.Diffs = append(session.Diffs, turn)
+	if baseline != "" {
+		session.DiffBaseline = baseline
+	}
+	if len(touched) > 0 {
+		session.DiffTouched = touched
+	}
 	if err := s.saveSession(session); err != nil {
 		return 0, err
 	}
@@ -335,7 +353,8 @@ func (s *SessionStore) UpdateSession(id string, patch SessionPatch) (*Session, e
 		session.Model = *patch.Model
 	}
 	if patch.PermissionMode != nil {
-		session.PermissionMode = *patch.PermissionMode
+		// 归一化而非报错：前端下拉与旧数据都可能带上不可识别的值，回退到最严格模式
+		session.PermissionMode = string(NormalizeMode(*patch.PermissionMode))
 	}
 	if patch.ViewMode != nil {
 		session.ViewMode = normalizeViewMode(*patch.ViewMode)

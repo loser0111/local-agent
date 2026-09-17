@@ -56,7 +56,7 @@
 
 /**
  * 权限模式
- * @typedef {'manual'|'acceptEdits'|'plan'|'auto'|'bypassPermissions'} PermissionMode
+ * @typedef {'manual'|'acceptEdits'|'plan'|'auto'} PermissionMode
  */
 
 /**
@@ -155,11 +155,22 @@ export const SESSION_STATUS = {
 }
 
 export const PERMISSION_MODES = [
-  { value: 'manual', label: 'Manual', desc: '编辑文件或运行命令前均需确认' },
-  { value: 'acceptEdits', label: 'Accept edits', desc: '自动接受文件编辑，命令仍需确认' },
-  { value: 'plan', label: 'Plan', desc: '只读探索并提出计划，不修改代码' },
-  { value: 'auto', label: 'Auto', desc: '后台安全检查，减少权限提示' },
+  { value: 'manual', label: 'Manual', desc: '写操作与命令都需确认（只读白名单除外）' },
+  {
+    value: 'acceptEdits',
+    label: 'Accept edits',
+    desc: '文件编辑类自动放行、命令仍需确认（待 write_file/edit_file 工具落地后生效）',
+  },
+  { value: 'plan', label: 'Plan', desc: '只读探索：非只读操作直接拒绝' },
+  {
+    value: 'auto',
+    label: 'Auto',
+    desc: '仅项目目录内的本地写操作自动放行；越界路径、网络、包管理、解释器、删除类仍会询问',
+  },
 ]
+
+/** 权限模式默认值（与 Go 侧 ModeManual 保持一致：无法识别时一律回退到最严格的模式） */
+export const DEFAULT_PERMISSION_MODE = 'manual'
 
 export const VIEW_MODES = [
   { value: 'verbose', label: 'Verbose', desc: '完整展示工具调用过程，参数与输出默认展开' },

@@ -6,12 +6,20 @@ export function AddModel(arg1) {
   return window['go']['main']['App']['AddModel'](arg1);
 }
 
+export function AddPermissionRule(arg1, arg2, arg3, arg4) {
+  return window['go']['main']['App']['AddPermissionRule'](arg1, arg2, arg3, arg4);
+}
+
 export function AppendConversation(arg1, arg2) {
   return window['go']['main']['App']['AppendConversation'](arg1, arg2);
 }
 
 export function AppendMessage(arg1, arg2) {
   return window['go']['main']['App']['AppendMessage'](arg1, arg2);
+}
+
+export function CancelPermissionWait(arg1) {
+  return window['go']['main']['App']['CancelPermissionWait'](arg1);
 }
 
 export function CancelPlan(arg1) {
@@ -24,6 +32,14 @@ export function Chat(arg1, arg2, arg3, arg4) {
 
 export function ChatPlan(arg1, arg2, arg3) {
   return window['go']['main']['App']['ChatPlan'](arg1, arg2, arg3);
+}
+
+export function ClearPermissionGrants(arg1) {
+  return window['go']['main']['App']['ClearPermissionGrants'](arg1);
+}
+
+export function ClearToolFileChanges(arg1) {
+  return window['go']['main']['App']['ClearToolFileChanges'](arg1);
 }
 
 export function CreateSession(arg1) {
@@ -74,6 +90,14 @@ export function GetModels() {
   return window['go']['main']['App']['GetModels']();
 }
 
+export function GetPermissionAudit(arg1) {
+  return window['go']['main']['App']['GetPermissionAudit'](arg1);
+}
+
+export function GetPermissionState(arg1) {
+  return window['go']['main']['App']['GetPermissionState'](arg1);
+}
+
 export function GetSession(arg1) {
   return window['go']['main']['App']['GetSession'](arg1);
 }
@@ -84,6 +108,10 @@ export function GetSessionPlan(arg1) {
 
 export function GetSkill(arg1) {
   return window['go']['main']['App']['GetSkill'](arg1);
+}
+
+export function GetToolFileChanges(arg1) {
+  return window['go']['main']['App']['GetToolFileChanges'](arg1);
 }
 
 export function Greet(arg1) {
@@ -114,6 +142,14 @@ export function RefreshSkills() {
   return window['go']['main']['App']['RefreshSkills']();
 }
 
+export function RemovePermissionRule(arg1, arg2, arg3, arg4) {
+  return window['go']['main']['App']['RemovePermissionRule'](arg1, arg2, arg3, arg4);
+}
+
+export function ResolvePermission(arg1, arg2, arg3, arg4, arg5) {
+  return window['go']['main']['App']['ResolvePermission'](arg1, arg2, arg3, arg4, arg5);
+}
+
 export function SavePlan(arg1) {
   return window['go']['main']['App']['SavePlan'](arg1);
 }
@@ -124,6 +160,10 @@ export function SaveSkill(arg1, arg2, arg3, arg4) {
 
 export function SaveTool(arg1) {
   return window['go']['main']['App']['SaveTool'](arg1);
+}
+
+export function SetSessionPermissionMode(arg1, arg2) {
+  return window['go']['main']['App']['SetSessionPermissionMode'](arg1, arg2);
 }
 
 export function SetSkillAlwaysInject(arg1, arg2) {

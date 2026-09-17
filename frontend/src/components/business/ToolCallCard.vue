@@ -22,6 +22,8 @@ const statusText = computed(() => {
   switch (props.toolCall.status) {
     case 'running':
       return '运行中'
+    case 'pending':
+      return '等待授权'
     case 'success':
       return '完成'
     case 'error':
@@ -35,6 +37,8 @@ const statusColor = computed(() => {
   switch (props.toolCall.status) {
     case 'running':
       return '#ffb86c'
+    case 'pending':
+      return '#f5a623'
     case 'success':
       return '#50fa7b'
     case 'error':
@@ -54,6 +58,12 @@ const friendlyName = computed(() => {
   const map = {
     exec_shell: '终端命令',
     tool_router: '工具路由',
+    read_file: '读取文件',
+    write_file: '写入文件',
+    edit_file: '编辑文件',
+    glob: '查找文件',
+    grep: '搜索内容',
+    list_dir: '列出目录',
   }
   return map[props.toolCall.name] || props.toolCall.name
 })
@@ -82,6 +92,7 @@ const argSummary = computed(() => {
       <span class="tool-args" v-if="argSummary" :title="argSummary">· {{ argSummary }}</span>
       <span class="tool-status" :style="{ color: statusColor }">
         <span v-if="toolCall.status === 'running'" class="mini-spinner"></span>
+        <span v-else-if="toolCall.status === 'pending'" class="mini-spinner pending-spinner"></span>
         {{ statusText }}
         <span v-if="toolCall.duration"> · {{ toolCall.duration >= 1 ? toolCall.duration.toFixed(1) : (toolCall.duration * 1000).toFixed(0) + 'ms' }}</span>
       </span>
@@ -92,6 +103,13 @@ const argSummary = computed(() => {
       <div v-if="toolCall.args && Object.keys(toolCall.args).length" class="detail-section">
         <div class="detail-label">参数</div>
         <pre class="detail-content">{{ JSON.stringify(toolCall.args, null, 2) }}</pre>
+      </div>
+      <!-- 改动文件：由后端按工具调用归因（write_file / edit_file 才有值） -->
+      <div v-if="toolCall.files && toolCall.files.length" class="detail-section">
+        <div class="detail-label">改动文件（{{ toolCall.files.length }}）</div>
+        <ul class="file-list">
+          <li v-for="(f, i) in toolCall.files" :key="i" class="mono">{{ f }}</li>
+        </ul>
       </div>
       <div v-if="toolCall.result" class="detail-section">
         <div class="detail-label">结果</div>
@@ -111,6 +129,11 @@ const argSummary = computed(() => {
 
   &.running {
     border-color: rgba(245, 158, 11, 0.5);
+  }
+  // 等待用户授权：与运行中区分（更醒目的橙色描边）
+  &.pending {
+    border-color: rgba(245, 166, 35, 0.75);
+    box-shadow: 0 0 0 1px rgba(245, 166, 35, 0.25);
   }
   &.success {
     border-color: rgba(16, 185, 129, 0.3);
@@ -183,6 +206,12 @@ const argSummary = computed(() => {
   display: inline-block;
 }
 
+// 等待授权：转得慢一些，暗示"卡在等人"而不是"正在干活"
+.pending-spinner {
+  border-top-color: #f5a623;
+  animation-duration: 1.6s;
+}
+
 @keyframes spin {
   to {
     transform: rotate(360deg);
@@ -212,6 +241,21 @@ const argSummary = computed(() => {
   font-size: $font-size-xs;
   color: $color-text-secondary;
   margin-bottom: $space-xs;
+}
+
+.mono {
+  font-family: $font-family-mono;
+}
+
+.file-list {
+  margin: 0;
+  padding-left: 18px;
+  font-size: $font-size-xs;
+  color: $color-text-primary;
+
+  li {
+    word-break: break-all;
+  }
 }
 
 .detail-content {

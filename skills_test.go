@@ -215,7 +215,7 @@ func TestReadSkillEndToEnd(t *testing.T) {
 	tm := NewToolManager(store, ss)
 
 	// 全部技能可用：read_skill 已注册，list 可见，execute 取到正文
-	view := tm.BuildView(context.Background(), nil, nil)
+	view := tm.BuildView(context.Background(), BuildOptions{Enforcer: AllowAllEnforcer{}})
 	list, err := view.ExecuteTool("tool_router", map[string]interface{}{"action": "list"})
 	if err != nil {
 		t.Fatal(err)
@@ -232,7 +232,7 @@ func TestReadSkillEndToEnd(t *testing.T) {
 	}
 
 	// 会话白名单只含 beta：alpha 不可读，beta 可读
-	view2 := tm.BuildView(context.Background(), nil, []string{"beta"})
+	view2 := tm.BuildView(context.Background(), BuildOptions{EnabledSkills: []string{"beta"}, Enforcer: AllowAllEnforcer{}})
 	if _, err := view2.ExecuteTool("read_skill", map[string]interface{}{"id": "alpha"}); err == nil {
 		t.Fatal("白名单外技能不应可读")
 	}
@@ -247,7 +247,7 @@ func TestReadSkillEndToEnd(t *testing.T) {
 	if err := ss.SetEnabled("beta", false); err != nil {
 		t.Fatal(err)
 	}
-	view3 := tm.BuildView(context.Background(), nil, nil)
+	view3 := tm.BuildView(context.Background(), BuildOptions{Enforcer: AllowAllEnforcer{}})
 	list3, _ := view3.ExecuteTool("tool_router", map[string]interface{}{"action": "list"})
 	if strings.Contains(list3, "read_skill") {
 		t.Fatalf("无可用技能时不应注册 read_skill: %s", list3)

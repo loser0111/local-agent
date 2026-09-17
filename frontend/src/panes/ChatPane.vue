@@ -8,6 +8,8 @@ import { useSettingStore } from '@/stores/setting'
 import { usePlanStore } from '@/stores/plan'
 import { appendMessage, appendConversation, chat, onDiffUpdate } from '@/api/session'
 import { DEFAULT_VIEW_MODE } from '@/types'
+import { usePermissionStore } from '@/stores/permissions'
+import PermissionDialog from '@/components/business/PermissionDialog.vue'
 import PaneHeader from '@/components/layout/PaneHeader.vue'
 import MessageBubble from '@/components/business/MessageBubble.vue'
 import ToolProcess from '@/components/business/ToolProcess.vue'
@@ -18,6 +20,7 @@ const paneStore = usePaneStore()
 const diffStore = useDiffStore()
 const settingStore = useSettingStore()
 const planStore = usePlanStore()
+const permissionStore = usePermissionStore()
 
 // 计划模式（单次意图，非全局偏好）：开启后下一条消息走规划流程
 const planMode = ref(false)
@@ -228,6 +231,19 @@ async function sendMessage() {
           result: tc.result,
         })
       },
+      onPermissionRequest: (req) => {
+        if (!req) return
+        permissionStore.setPending(req)
+        // 把「当前运行中」的工具卡片标为等待授权。工具循环是串行执行的，
+        // 所以匹配最后一个 running 且同名的卡片是准确的（后端事件里没有工具调用 ID）。
+        const calls = localMsg.toolCalls || []
+        for (let i = calls.length - 1; i >= 0; i--) {
+          if (calls[i].status === 'running' && calls[i].name === req.tool) {
+            chatStore.updateToolCall(localMsg.id, calls[i].id, { status: 'pending' })
+            break
+          }
+        }
+      },
     })
 
     // 4. 移除流式占位消息，用后端持久化的消息替换
@@ -290,6 +306,10 @@ async function sendMessage() {
 }
 
 async function stopGeneration() {
+  // 有待应答的授权请求：先取消它（后端按拒绝处理并立刻返回），避免一直挂着
+  if (permissionStore.hasPending) {
+    await permissionStore.cancel(sessionId.value)
+  }
   // 计划执行中：触发协作式取消（当前步骤跑完后停止）
   if (planStore.executing && plan.value) {
     await planStore.cancel(plan.value.id)
@@ -297,6 +317,22 @@ async function stopGeneration() {
   }
   chatStore.isGenerating = false
 }
+
+// 授权请求被应答后，把对应卡片从「等待授权」还原为「运行中」，
+// 终态（成功/失败）随后由 tool_call_end 事件覆盖
+watch(
+  () => permissionStore.pending,
+  (val, old) => {
+    if (val || !old || !streamingMessageId.value) return
+    const msg = chatStore.messages.find((m) => m.id === streamingMessageId.value)
+    if (!msg || !msg.toolCalls) return
+    for (const tc of msg.toolCalls) {
+      if (tc.status === 'pending') {
+        chatStore.updateToolCall(msg.id, tc.id, { status: 'running' })
+      }
+    }
+  }
+)
 
 function handleKeydown(e) {
   if (e.key === 'Enter' && !e.shiftKey) {
@@ -317,6 +353,9 @@ function openDiff() {
 <template>
   <div class="chat-pane">
     <PaneHeader type="chat" :closable="false" />
+
+    <!-- 授权弹窗：后端此刻阻塞等待答复，超时/取消按拒绝处理 -->
+    <PermissionDialog />
 
     <div class="messages scroll-container" ref="messagesContainer" @scroll="handleScroll">
       <div v-if="chatStore.loadingHistory" class="loading-history">历史消息加载中...</div>

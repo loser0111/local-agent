@@ -382,8 +382,9 @@ func (a *App) startDeltaFlusher() (enqueue func(string), shutdown func()) {
 // ===== 对话流程（借鉴 01agent 的状态机，简化为循环）=====
 
 // ChatEvent 推送给前端的事件数据
+// ChatEvent 聊天过程事件（经 "chat:event" 通道推送给前端）
 type ChatEvent struct {
-	Type      string     `json:"type"` // tool_call_start / tool_call_end / reply_delta / done / error / diff_update / plan_update
+	Type      string     `json:"type"` // tool_call_start / tool_call_end / reply_delta / done / error / diff_update / plan_update / permission_request
 	ToolCall  *ToolCall  `json:"toolCall,omitempty"`
 	Reply     string     `json:"reply,omitempty"`
 	Error     string     `json:"error,omitempty"`
@@ -391,6 +392,25 @@ type ChatEvent struct {
 	Turn      int        `json:"turn,omitempty"`      // diff 所属轮次
 	Plan      *Plan      `json:"plan,omitempty"`      // plan_update 事件全量携带最新计划
 	StepIndex int        `json:"stepIndex,omitempty"` // plan_update 触发步骤索引（计划级变更为 -1，omitempty 时不下发）
+	// Permission 权限授权请求（type=permission_request）：前端应弹出授权弹窗，
+	// 并把结果经 ResolvePermission 回传。请求期间后端阻塞等待，超时/取消一律按拒绝处理。
+	Permission *PermissionAskRequest `json:"permission,omitempty"`
+}
+
+// 事件类型常量（前端按同名分支分发）
+const (
+	ChatEventToolCallStart = "tool_call_start"
+	ChatEventToolCallEnd   = "tool_call_end"
+	ChatEventReplyDelta    = "reply_delta"
+	ChatEventPermission    = "permission_request"
+)
+
+// emitChatEvent 向前端推送一个聊天事件（无 Wails 上下文时静默跳过）
+func (a *App) emitChatEvent(ev ChatEvent) {
+	if a.ctx == nil {
+		return
+	}
+	wailsRuntime.EventsEmit(a.ctx, "chat:event", ev)
 }
 
 // buildLLMMessages 从历史消息构造 LLM messages 数组
@@ -461,6 +481,12 @@ func (a *App) buildBasePrompt(session *Session, dir string) string {
 			"当前会话绑定的工作区目录为：%s\n"+
 			"涉及文件读写、目录操作或运行命令时，若未指定绝对路径，默认应基于此目录（相对路径均相对于该目录）。", dir)
 	}
+	prompt += "\n\n## 工具使用偏好\n" +
+		"读写文件请用 read_file / write_file / edit_file（相对路径相对于工作区目录）；" +
+		"查找文件用 glob、搜索内容用 grep、查看目录用 list_dir。这些工具要么只读、要么按路径精确操作，" +
+		"比 shell 命令更安全，也不会被 shell 语法（引号、重定向、命令替换）影响。\n" +
+		"exec_shell 留给构建、测试、git 等真正的命令；不要用它做 cat / sed -i / echo > 这类文件读写。"
+
 	if a.skillStore != nil {
 		enabled := a.enabledSkillsForSession(session)
 		if idx := BuildSkillIndex(enabled); idx != "" {
@@ -499,7 +525,10 @@ func (a *App) runToolLoop(sessionID, systemPrompt string, model *Model,
 	isRepo := dir != "" && a.diffService.IsRepo(dir)
 	turnBase := ""
 	if isRepo {
+		// 先恢复会话里持久化的 diff 状态（基线与已归因的路径），重启后仍能算会话级 diff
+		a.diffService.RestoreSession(sessionID, session.DiffBaseline, session.DiffTouched)
 		a.diffService.EnsureBaseline(sessionID, dir)
+		a.diffService.BeginTurn(sessionID)
 		turnBase = a.diffService.TurnSnapshot(dir)
 	}
 
@@ -510,8 +539,15 @@ func (a *App) runToolLoop(sessionID, systemPrompt string, model *Model,
 	}
 	messages := buildLLMMessages(history, systemPrompt)
 
-	// 4. 按会话白名单装配工具视图，获取暴露给 LLM 的工具定义（仅 tool_router）
-	toolView := a.toolManager.BuildView(context.Background(), session.EnabledTools, session.EnabledSkills)
+	// 4. 按会话白名单装配工具视图（装配期统一包一层权限网关），获取暴露给 LLM 的工具定义（仅 tool_router）
+	toolView := a.toolManager.BuildView(context.Background(), BuildOptions{
+		EnabledTools:  session.EnabledTools,
+		EnabledSkills: session.EnabledSkills,
+		ProjectDir:    dir,
+		SessionID:     sessionID,
+		Changes:       a.fileChanges,
+		Enforcer:      a.newPermissionEnforcer(session, dir),
+	})
 	tools := toolView.GetToolsForLLM()
 
 	// 5. 工具调用循环
@@ -586,16 +622,25 @@ func (a *App) runToolLoop(sessionID, systemPrompt string, model *Model,
 					Args:   args,
 					Status: "running",
 				}
-				if a.ctx != nil {
-					wailsRuntime.EventsEmit(a.ctx, "chat:event", ChatEvent{
-						Type:     "tool_call_start",
-						ToolCall: &toolCallRecord,
-					})
-				}
+				a.emitChatEvent(ChatEvent{
+					Type:     ChatEventToolCallStart,
+					ToolCall: &toolCallRecord,
+				})
 
-				// 执行工具
+				// 执行工具（记录改动游标，执行后取本次调用改了哪些文件）
+				mark := a.fileChanges.Mark(sessionID)
+				// 前后各扫一次工作区：执行窗口内的改动归因给本会话（含 exec_shell 改的文件）
+				a.diffService.NoteActivity(sessionID, dir, false)
 				result, execErr := toolView.ExecuteTool(tc.Function.Name, args)
+				a.diffService.NoteActivity(sessionID, dir, true)
 				duration := time.Since(startTime).Seconds()
+				if changed := a.fileChanges.Since(sessionID, mark); len(changed) > 0 {
+					files := make([]string, 0, len(changed))
+					for _, c := range changed {
+						files = append(files, c.Rel)
+					}
+					toolCallRecord.Files = files
+				}
 
 				if execErr != nil {
 					toolCallRecord.Status = "error"
@@ -610,12 +655,10 @@ func (a *App) runToolLoop(sessionID, systemPrompt string, model *Model,
 				executedToolCalls = append(executedToolCalls, toolCallRecord)
 
 				// 推送工具调用完成事件
-				if a.ctx != nil {
-					wailsRuntime.EventsEmit(a.ctx, "chat:event", ChatEvent{
-						Type:     "tool_call_end",
-						ToolCall: &toolCallRecord,
-					})
-				}
+				a.emitChatEvent(ChatEvent{
+					Type:     ChatEventToolCallEnd,
+					ToolCall: &toolCallRecord,
+				})
 			}
 
 			// 持久化 assistant 消息（含 tool_calls 执行记录）
@@ -692,17 +735,19 @@ func (a *App) runToolLoop(sessionID, systemPrompt string, model *Model,
 		}
 		persistedMsgs = append(persistedMsgs, *savedFinal)
 
-		// ★ 计算本轮工作区 diff：相对轮初快照，有改动则持久化并推送事件
+		// ★ 计算本轮 diff：只统计本会话在本轮触碰过的路径（会话级隔离）
 		var diffFiles []DiffFile
 		if isRepo {
-			if files, err := a.diffService.Diff(dir, turnBase); err == nil && len(files) > 0 {
+			turnPaths := a.diffService.TurnTouched(sessionID)
+			if files, err := a.diffService.DiffScoped(dir, turnBase, turnPaths); err == nil && len(files) > 0 {
 				diffFiles = files
+				base, touched := a.diffService.SnapshotState(sessionID)
 				turnNo, appendErr := a.sessionStore.AppendDiff(sessionID, DiffTurn{
 					Files:     files,
 					Additions: sumAdd(files),
 					Deletions: sumDel(files),
 					CreatedAt: time.Now().UnixMilli(),
-				})
+				}, base, touched)
 				if appendErr == nil && a.ctx != nil {
 					wailsRuntime.EventsEmit(a.ctx, "diff:update", ChatEvent{
 						Type: "diff_update",

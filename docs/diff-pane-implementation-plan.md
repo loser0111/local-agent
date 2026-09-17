@@ -1108,7 +1108,7 @@ return {
 | **P0** | 后端 `diff.go` + `App.GetDiff` + 前端 `stores/diff.js` + `DiffPane` 接真实数据 | 1–2h | 打开 Diff 面板能看到工作区真实 diff，且与 `git status` 一致 |
 | **P1** | `chat.go` 每轮 `diff:update` + `sessions.AppendDiff` 持久化 + 轮次切换 UI | 1–2h | 让 AI 用 `exec_shell` 改一个文件：右侧栏自动弹出并显示该轮 diff；刷新后仍可见 |
 | **P2** | `ChatPane` 自动开面板 + 工具栏 Diff 按钮 + Review code 打通 | 0.5h | 点击 Review code，AI 收到审查请求并回复 |
-| **P3（可选）** | 新增 `write_file` / `edit_file` 工具，工具层记录 before/after | 1–2h | 工具卡片出现“查看差异”，且差异可归因到具体工具调用 |
+| **P3（可选）** | 新增 `write_file` / `edit_file` 工具，工具层记录 before/after **（2026-09-17 已实现：文件六件套 + `FileChangeLog` 归因，工具卡片展示改动文件，hunks 经 `GetToolFileChanges` 提供）** | 1–2h | 工具卡片出现“查看差异”，且差异可归因到具体工具调用 |
 
 **P3 的低成本实现技巧**：工具层不必自研 Myers 算法——把 before / after 各写一个临时文件，执行 `git diff --no-index --unified=3 old.tmp new.tmp`，**复用同一个 `ParseUnifiedDiff`**，零额外算法成本。
 
@@ -1194,3 +1194,29 @@ cd frontend && npm run dev
 ---
 
 （完）
+
+---
+
+## 会话级差异（2026-09-17 实现）
+
+**问题**：diff 面板会出现「别的会话改的东西」。根因在 `DiffService.Diff`——两条路径都不受会话约束：
+
+1. 已跟踪文件走 `git diff <基线>`。基线虽然是每会话一份，但 git 的 diff 本身是**仓库级**的，只按时间过滤、不区分谁改的；于是会话 B 会看到会话 A 在 B 的基线之后做的改动。
+2. 未跟踪文件走 `git ls-files --others`，**没有任何会话过滤**，仓库里所有未跟踪文件会出现在每个会话的面板里——这是最刺眼的一处。
+
+**做法**：给每个会话维护「触碰过的路径」集合，diff 时用这些路径做 pathspec 过滤。
+
+- **归因**：每次工具调用**前**后各扫一次工作区（`git status --porcelain -z --untracked-files=normal`），把「执行窗口内出现的改动」归给当前会话。用文件签名（mtime+size）判断变化——与 git 自身判定文件是否变化的信号同类，比读全文便宜。
+- **扫描基线必须是全局的**：若每会话各存一份上次扫描，会话 A 空闲期间 B 改了文件，A 下次调用的起始扫描会把 B 的改动算成自己的（A 的基线还停在 B 改动之前）。全局基线保证每个变化只被「第一个看到它的扫描」消费掉；再配合**只在窗口之后归因**，空闲会话就不会沾上别人的改动。
+- **过滤**：`DiffScoped(dir, baseline, paths)` 用 `git diff <基线> -- <paths>` 取已跟踪改动，再用 `ls-files --others -- <paths>` 补齐这些路径下的未跟踪文件（同一份 pathspec，因此新建的文件只出现在创建它的会话里）。
+- **落盘**：`Session.DiffBaseline` / `DiffTouched` 随会话 JSON 保存，重启后仍能算出「本会话改了哪些文件」（此前基线只在内存，重启后 diff 直接为空）。`AppendDiff` 顺带写入这两个字段，不额外多一次落盘。
+- **每轮 diff** 同样按会话过滤：`BeginTurn` / `TurnTouched` 维护本轮归因集合。
+
+**为什么不用 `-uall`**：目录折叠（`-unormal`）把未跟踪目录记成一条（`newdir/`），扫描成本不随目录内文件数增长；pathspec 传目录时 `ls-files --others` 仍会列出内部文件，所以面板该显示的新文件不会少。`-uall` 在未被 gitignore 的大目录（如 node_modules）下会把每次扫描变成几万条。
+
+**已知取舍**（写在这里以免将来被当成 bug）：
+
+- 两个会话**同时在执行**工具时，某次改动可能被两边的执行窗口同时看到 → 会被同时归因。偏向多算，不会漏显示。
+- 用户在某个工具调用的执行窗口内手动编辑文件，也会算进那个会话。
+- 归因信号是 mtime+size；理论上「同尺寸且 mtime 未变」的改写无法识别（实际写入必然更新 mtime）。
+- 面板现在只显示本会话改过的文件：如果你自己用编辑器改的文件没被任何会话碰过，它不会出现在面板里（这是会话级隔离的应有之义）。

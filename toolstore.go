@@ -11,7 +11,7 @@ import (
 // ===== 工具配置模型（持久化到 ~/.local-agent/tools.json）=====
 
 const (
-	ToolTypeBuiltin = "builtin" // 内置工具（exec_shell）
+	ToolTypeBuiltin = "builtin" // 内置工具（exec_shell + 文件六件套）
 	ToolTypeCLI     = "cli"     // 自定义 CLI 命令工具
 	ToolTypeMCP     = "mcp"     // MCP Server 工具
 	ToolTypeAPI     = "api"     // HTTP API 工具
@@ -98,17 +98,20 @@ func NewToolStore(filePath string) *ToolStore {
 		ts.tools = defaultTools()
 		_ = ts.save()
 	}
+	// 版本升级后新增的内置工具要补齐（老的 tools.json 里没有它们）
+	ts.ensureBuiltins()
 	return ts
 }
 
-// defaultTools 首次启动的内置工具
+// defaultTools 内置工具：终端命令 + 文件六件套。
+// 文件类工具让「文件操作」不必挤过 shell，权限判定因此能落到「工具 + 路径」上。
 func defaultTools() []*ToolConfig {
 	return []*ToolConfig{
 		{
 			ID:          "exec_shell",
 			Name:        "exec_shell",
 			Label:       "执行终端命令",
-			Description: "在本机终端执行shell/终端命令，用于查看文件、查询目录、执行系统指令",
+			Description: "在本机终端执行shell/终端命令，用于运行构建、测试、git 等；读写文件请优先用文件工具",
 			Type:        ToolTypeBuiltin,
 			Icon:        "terminal",
 			Enabled:     true,
@@ -117,7 +120,123 @@ func defaultTools() []*ToolConfig {
 				{Name: "cmd", Description: "要执行的终端命令，linux/mac用bash指令，windows用cmd/powershell指令", Required: true},
 			},
 		},
+		{
+			ID:          "read_file",
+			Name:        "read_file",
+			Label:       "读取文件",
+			Description: "读取工作区内某个文本文件的内容（带行号，支持 offset/limit 分片）",
+			Type:        ToolTypeBuiltin,
+			Icon:        "file-text",
+			Enabled:     true,
+			Builtin:     true,
+			Parameters: []ToolParamConfig{
+				{Name: "path", Description: "文件路径（相对工作区目录或绝对路径）", Required: true},
+				{Name: "offset", Description: "起始行号（从 1 开始，可选）"},
+				{Name: "limit", Description: fmt.Sprintf("最多读取行数（默认 %d）", defaultReadLimit)},
+			},
+		},
+		{
+			ID:          "write_file",
+			Name:        "write_file",
+			Label:       "写入文件",
+			Description: "新建或整体覆盖一个文本文件",
+			Type:        ToolTypeBuiltin,
+			Icon:        "file-plus",
+			Enabled:     true,
+			Builtin:     true,
+			Parameters: []ToolParamConfig{
+				{Name: "path", Description: "文件路径", Required: true},
+				{Name: "content", Description: "完整文件内容（会覆盖原有内容）", Required: true},
+			},
+		},
+		{
+			ID:          "edit_file",
+			Name:        "edit_file",
+			Label:       "编辑文件",
+			Description: "对文件做精确字符串替换（old_string 需唯一匹配）",
+			Type:        ToolTypeBuiltin,
+			Icon:        "file-code",
+			Enabled:     true,
+			Builtin:     true,
+			Parameters: []ToolParamConfig{
+				{Name: "path", Description: "文件路径", Required: true},
+				{Name: "old_string", Description: "被替换的原文（含缩进，需完全一致）", Required: true},
+				{Name: "new_string", Description: "替换后的新文本", Required: true},
+				{Name: "replace_all", Description: "true 时替换所有匹配处"},
+			},
+		},
+		{
+			ID:          "glob",
+			Name:        "glob",
+			Label:       "查找文件",
+			Description: "按 glob 模式查找文件（支持 ** 跨目录）",
+			Type:        ToolTypeBuiltin,
+			Icon:        "search",
+			Enabled:     true,
+			Builtin:     true,
+			Parameters: []ToolParamConfig{
+				{Name: "pattern", Description: "匹配模式，如 *.go、src/**/*.ts", Required: true},
+				{Name: "path", Description: "搜索起点目录（默认工作区根目录）"},
+			},
+		},
+		{
+			ID:          "grep",
+			Name:        "grep",
+			Label:       "搜索内容",
+			Description: "按正则搜索文件内容（只读，不解释 shell 语法）",
+			Type:        ToolTypeBuiltin,
+			Icon:        "search",
+			Enabled:     true,
+			Builtin:     true,
+			Parameters: []ToolParamConfig{
+				{Name: "pattern", Description: "正则表达式", Required: true},
+				{Name: "path", Description: "搜索起点目录或文件"},
+				{Name: "glob", Description: "只搜索匹配该模式的文件，如 *.go"},
+				{Name: "output_mode", Description: "files_with_matches（默认）/ content / count"},
+				{Name: "case_insensitive", Description: "忽略大小写"},
+			},
+		},
+		{
+			ID:          "list_dir",
+			Name:        "list_dir",
+			Label:       "列出目录",
+			Description: "列出目录内容（目录在前，含文件大小）",
+			Type:        ToolTypeBuiltin,
+			Icon:        "folder",
+			Enabled:     true,
+			Builtin:     true,
+			Parameters: []ToolParamConfig{
+				{Name: "path", Description: "要列出的目录（默认工作区根目录）"},
+			},
+		},
 	}
+}
+
+// ensureBuiltins 补齐缺失的内置工具（老版本 tools.json 里没有新内置工具时自动追加）
+func (ts *ToolStore) ensureBuiltins() {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+
+	existing := make(map[string]bool, len(ts.tools))
+	for _, t := range ts.tools {
+		existing[t.Name] = true
+	}
+	added := false
+	for _, def := range defaultTools() {
+		if existing[def.Name] {
+			continue
+		}
+		ts.tools = append(ts.tools, def)
+		added = true
+	}
+	if !added {
+		return
+	}
+	if err := ts.save(); err != nil {
+		fmt.Printf("[ToolStore] 补齐内置工具失败: %v\n", err)
+		return
+	}
+	fmt.Printf("[ToolStore] 已补齐 %d 个内置工具配置\n", len(defaultTools())-len(existing))
 }
 
 // load 读取配置文件，返回是否成功加载

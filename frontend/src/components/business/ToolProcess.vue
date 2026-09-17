@@ -37,7 +37,11 @@ function toolLabel(tc) {
 }
 
 // ===== 状态统计 =====
-const runningCount = computed(() => props.toolCalls.filter((t) => t.status === 'running').length)
+// 等待授权的工具卡片也算"进行中"：否则过程块会在等人应答时自动折叠，把提问藏起来
+const pendingCount = computed(() => props.toolCalls.filter((t) => t.status === 'pending').length)
+const runningCount = computed(
+  () => props.toolCalls.filter((t) => t.status === 'running' || t.status === 'pending').length
+)
 const errorCount = computed(() => props.toolCalls.filter((t) => t.status === 'error').length)
 const successCount = computed(() => props.toolCalls.filter((t) => t.status === 'success').length)
 const totalDuration = computed(() =>
@@ -84,6 +88,10 @@ function toggle() {
 
 // 折叠态摘要
 const summary = computed(() => {
+  // 有人在等用户授权：这是最需要被看见的状态，优先展示
+  if (pendingCount.value > 0) {
+    return `等待授权确认（${pendingCount.value} 个操作）`
+  }
   if (isRunning.value) {
     return runningCount.value > 0
       ? `正在执行 ${runningCount.value} 个工具…`

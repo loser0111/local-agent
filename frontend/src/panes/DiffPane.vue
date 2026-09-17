@@ -138,7 +138,13 @@ function reviewCode() {
       </div>
 
       <div v-else class="diff-empty">
-        {{ diffStore.loading ? '正在计算差异…' : '本轮对话暂无文件改动' }}
+        <template v-if="diffStore.loading">正在计算差异…</template>
+        <template v-else>
+          <div>本会话暂无文件改动</div>
+          <div class="diff-empty-hint">
+            差异按会话隔离：只显示本会话改过的文件（含 exec_shell 改的）
+          </div>
+        </template>
       </div>
     </div>
   </div>
@@ -314,10 +320,20 @@ function reviewCode() {
 .diff-empty {
   flex: 1;
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
+  gap: $space-xs;
   color: $color-text-muted;
   font-size: $font-size-sm;
+  text-align: center;
+  padding: $space-lg;
+}
+
+.diff-empty-hint {
+  font-size: $font-size-xs;
+  color: $color-text-muted;
+  opacity: 0.75;
 }
 
 .btn-sm {

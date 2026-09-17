@@ -23,6 +23,17 @@ type App struct {
 	diffService  *DiffService
 	planStore    *PlanStore
 
+	// baseDir 本地数据目录（~/.local-agent）：权限配置的用户全局层也放在这里
+	baseDir string
+
+	// 权限管理：授权（内存，会话结束即失效）、审计、授权询问回路
+	permissionGrants *GrantStore
+	permissionAudit  *AuditLog
+	permissionBroker *permissionBroker
+
+	// 文件改动归因：文件工具写入时记录 before/after（内存）
+	fileChanges *FileChangeLog
+
 	// 计划执行取消注册表：planID -> 取消信号（close 即取消）
 	planCancels map[string]chan struct{}
 	planMu      sync.Mutex
@@ -64,6 +75,11 @@ func (a *App) startup(ctx context.Context) {
 
 	// 初始化计划存储：~/.local-agent/plans/（重启时 running 计划自动置为失败）
 	a.planStore = NewPlanStore(filepath.Join(baseDir, "plans"))
+
+	// 初始化权限管理（授权存储 / 审计 / 授权询问回路）与文件改动归因
+	a.baseDir = baseDir
+	a.ensurePermissionState()
+	a.fileChanges = NewFileChangeLog(500)
 }
 
 // dataDir 返回本地数据目录（不存在则创建）
@@ -180,9 +196,24 @@ func (a *App) TestModelConnection(model Model) error {
 
 // ===== 会话管理 =====
 
-// CreateSession 创建新会话
+// CreateSession 创建新会话。
+// 未显式指定权限模式时，采用权限配置里建议的默认模式（三层合并的 mode 字段）。
 func (a *App) CreateSession(config SessionConfig) (*Session, error) {
+	if strings.TrimSpace(config.PermissionMode) == "" {
+		config.PermissionMode = string(a.defaultPermissionMode(config.Project))
+	}
 	return a.sessionStore.CreateSession(config)
+}
+
+// defaultPermissionMode 取权限配置建议的默认模式；未配置或不可识别时回退 manual
+func (a *App) defaultPermissionMode(projectDir string) Mode {
+	rules, _, _ := LoadRuleSet(a.baseDir, projectDir)
+	if rules != nil {
+		if m := Mode(strings.TrimSpace(rules.Mode)); ValidMode(m) {
+			return m
+		}
+	}
+	return ModeManual
 }
 
 // ListSessions 返回所有会话（元数据，按最近活跃倒序）
@@ -450,8 +481,12 @@ func (a *App) GetDiff(sessionID string) ([]DiffFile, error) {
 	if !a.diffService.IsRepo(dir) {
 		return []DiffFile{}, nil // 非 git 仓库不报错，返回空列表
 	}
-	base := a.diffService.GetBaseline(sessionID) // 只读取，不懒初始化
-	files, err := a.diffService.Diff(dir, base)
+	// 恢复会话里持久化的 diff 状态（基线 + 已归因的路径），再只算这些路径的差异。
+	// 这样两个会话开在同一个项目里也不会互相看到对方的改动。
+	if s, err := a.sessionStore.GetSession(sessionID); err == nil {
+		a.diffService.RestoreSession(sessionID, s.DiffBaseline, s.DiffTouched)
+	}
+	files, err := a.diffService.DiffForSession(sessionID, dir)
 	if err != nil {
 		return []DiffFile{}, err
 	}
@@ -590,4 +625,39 @@ func (a *App) unregisterPlanCancel(planID string) {
 	a.planMu.Lock()
 	defer a.planMu.Unlock()
 	delete(a.planCancels, planID)
+}
+
+// ===== 文件改动归因（供差异面板与工具卡片展示）=====
+
+// GetToolFileChanges 返回本会话由文件工具产生的改动，可归因到具体工具调用。
+// 记录里带统一 diff 文本，这里按差异面板的结构解析后返回。
+func (a *App) GetToolFileChanges(sessionID string) []ToolFileChange {
+	list := a.fileChanges.List(sessionID)
+	out := make([]ToolFileChange, 0, len(list))
+	for _, c := range list {
+		// 差异文本里的文件名是临时的 before/after 占位，这里改回真实路径，
+		// 便于界面直接按路径展示
+		files := ParseUnifiedDiff(c.Diff)
+		for i := range files {
+			files[i].Path = c.Rel
+			files[i].OldPath = ""
+		}
+		out = append(out, ToolFileChange{
+			Time:    c.Time,
+			Tool:    c.Tool,
+			Path:    c.Path,
+			Rel:     c.Rel,
+			Action:  c.Action,
+			Added:   c.Added,
+			Removed: c.Removed,
+			Files:   files,
+		})
+	}
+	return out
+}
+
+// ClearToolFileChanges 清空本会话的文件改动记录
+func (a *App) ClearToolFileChanges(sessionID string) error {
+	a.fileChanges.Clear(sessionID)
+	return nil
 }

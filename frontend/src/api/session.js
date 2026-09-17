@@ -193,16 +193,24 @@ export async function updateSession(id, patch) {
  * 后端会持久化所有中间消息（assistant+tool_calls, tool结果, 最终回复）
  * @param {string} sessionId
  * @param {string} query
- * @param {{stream?:boolean, plan?:boolean, onReplyDelta?:Function, onToolCallStart?:Function, onToolCallEnd?:Function, onPlanUpdate?:Function}} callbacks
+ * @param {{stream?:boolean, plan?:boolean, onReplyDelta?:Function, onToolCallStart?:Function, onToolCallEnd?:Function, onPlanUpdate?:Function, onPermissionRequest?:Function}} callbacks
  * @returns {Promise<{reply:string, toolCalls?:array, messages?:array, plan?:object, error?:string}>}
  */
 export async function chat(
   sessionId,
   query,
-  { stream = true, plan = false, onReplyDelta, onToolCallStart, onToolCallEnd, onPlanUpdate } = {}
+  {
+    stream = true,
+    plan = false,
+    onReplyDelta,
+    onToolCallStart,
+    onToolCallEnd,
+    onPlanUpdate,
+    onPermissionRequest,
+  } = {}
 ) {
   if (isWails()) {
-    // 监听工具调用中间状态、流式分片与计划状态事件
+    // 监听工具调用中间状态、流式分片、计划状态与授权请求事件
     const eventHandler = (eventData) => {
       if (!eventData) return
       switch (eventData.type) {
@@ -217,6 +225,10 @@ export async function chat(
           break
         case 'plan_update':
           onPlanUpdate?.(eventData.plan)
+          break
+        case 'permission_request':
+          // 后端此刻阻塞等待答复：前端必须弹出授权弹窗并尽快回传结果
+          onPermissionRequest?.(eventData.permission)
           break
       }
     }

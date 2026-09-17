@@ -4,15 +4,23 @@ import {main} from '../models';
 
 export function AddModel(arg1:main.Model):Promise<void>;
 
+export function AddPermissionRule(arg1:string,arg2:string,arg3:string,arg4:string):Promise<void>;
+
 export function AppendConversation(arg1:string,arg2:main.Conversation):Promise<void>;
 
 export function AppendMessage(arg1:string,arg2:main.Message):Promise<main.Message>;
+
+export function CancelPermissionWait(arg1:string):Promise<void>;
 
 export function CancelPlan(arg1:string):Promise<void>;
 
 export function Chat(arg1:string,arg2:string,arg3:boolean,arg4:boolean):Promise<main.ChatResult>;
 
 export function ChatPlan(arg1:string,arg2:string,arg3:boolean):Promise<main.ChatResult>;
+
+export function ClearPermissionGrants(arg1:string):Promise<void>;
+
+export function ClearToolFileChanges(arg1:string):Promise<void>;
 
 export function CreateSession(arg1:main.SessionConfig):Promise<main.Session>;
 
@@ -38,11 +46,17 @@ export function GetModelNames():Promise<Array<string>>;
 
 export function GetModels():Promise<Array<main.Model>>;
 
+export function GetPermissionAudit(arg1:string):Promise<Array<main.AuditEntry>>;
+
+export function GetPermissionState(arg1:string):Promise<main.PermissionState>;
+
 export function GetSession(arg1:string):Promise<main.Session>;
 
 export function GetSessionPlan(arg1:string):Promise<main.Plan>;
 
 export function GetSkill(arg1:string):Promise<main.SkillDetail>;
+
+export function GetToolFileChanges(arg1:string):Promise<Array<main.ToolFileChange>>;
 
 export function Greet(arg1:string):Promise<string>;
 
@@ -58,11 +72,17 @@ export function PickDirectory():Promise<string>;
 
 export function RefreshSkills():Promise<Array<main.SkillMeta>>;
 
+export function RemovePermissionRule(arg1:string,arg2:string,arg3:string,arg4:string):Promise<void>;
+
+export function ResolvePermission(arg1:string,arg2:string,arg3:string,arg4:string,arg5:string):Promise<void>;
+
 export function SavePlan(arg1:main.Plan):Promise<void>;
 
 export function SaveSkill(arg1:string,arg2:string,arg3:string,arg4:string):Promise<void>;
 
 export function SaveTool(arg1:main.ToolConfig):Promise<main.ToolConfig>;
+
+export function SetSessionPermissionMode(arg1:string,arg2:string):Promise<main.Session>;
 
 export function SetSkillAlwaysInject(arg1:string,arg2:boolean):Promise<void>;
 
