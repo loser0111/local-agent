@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -101,5 +102,101 @@ func TestSessionStore_FullFlow(t *testing.T) {
 	}
 	if err := store.DeleteSession("nonexistent"); err == nil {
 		t.Fatal("删除不存在的会话应报错")
+	}
+}
+
+// TestSessionStore_ViewMode 视图模式是会话级配置：新建兜底、显式指定、patch 更新、
+// 非法值兜底，以及旧会话文件（无该字段）读取时补齐。
+func TestSessionStore_ViewMode(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "sessions")
+	store := NewSessionStore(dir)
+
+	// 未指定 → 默认 normal
+	s1, err := store.CreateSession(SessionConfig{Title: "s1"})
+	if err != nil {
+		t.Fatalf("CreateSession 失败: %v", err)
+	}
+	if s1.ViewMode != DefaultViewMode {
+		t.Fatalf("未指定视图模式时应为 %q，实际: %q", DefaultViewMode, s1.ViewMode)
+	}
+
+	// 显式指定 → 原样保留
+	s2, err := store.CreateSession(SessionConfig{Title: "s2", ViewMode: ViewModeVerbose})
+	if err != nil {
+		t.Fatalf("CreateSession 失败: %v", err)
+	}
+	if s2.ViewMode != ViewModeVerbose {
+		t.Fatalf("显式指定的视图模式应保留，实际: %q", s2.ViewMode)
+	}
+
+	// 创建时传入非法值 → 兜底为默认值
+	s3, err := store.CreateSession(SessionConfig{Title: "s3", ViewMode: "invalid"})
+	if err != nil {
+		t.Fatalf("CreateSession 失败: %v", err)
+	}
+	if s3.ViewMode != DefaultViewMode {
+		t.Fatalf("非法视图模式应兜底为 %q，实际: %q", DefaultViewMode, s3.ViewMode)
+	}
+
+	// patch 更新
+	summary := ViewModeSummary
+	updated, err := store.UpdateSession(s1.ID, SessionPatch{ViewMode: &summary})
+	if err != nil {
+		t.Fatalf("UpdateSession 失败: %v", err)
+	}
+	if updated.ViewMode != ViewModeSummary {
+		t.Fatalf("视图模式更新失败，实际: %q", updated.ViewMode)
+	}
+	// 重新加载确认已落盘
+	reloaded, err := store.GetSession(s1.ID)
+	if err != nil {
+		t.Fatalf("GetSession 失败: %v", err)
+	}
+	if reloaded.ViewMode != ViewModeSummary {
+		t.Fatalf("视图模式未持久化，实际: %q", reloaded.ViewMode)
+	}
+
+	// patch 传非法值 → 兜底为默认值，不把脏数据写进文件
+	bad := "verbose; rm -rf /"
+	if _, err := store.UpdateSession(s1.ID, SessionPatch{ViewMode: &bad}); err != nil {
+		t.Fatalf("UpdateSession 失败: %v", err)
+	}
+	reloaded, _ = store.GetSession(s1.ID)
+	if reloaded.ViewMode != DefaultViewMode {
+		t.Fatalf("非法视图模式应兜底为 %q，实际: %q", DefaultViewMode, reloaded.ViewMode)
+	}
+
+	// patch 不传 ViewMode（nil）→ 保持原值不动
+	title := "改名了"
+	untouched, err := store.UpdateSession(s2.ID, SessionPatch{Title: &title})
+	if err != nil {
+		t.Fatalf("UpdateSession 失败: %v", err)
+	}
+	if untouched.ViewMode != ViewModeVerbose {
+		t.Fatalf("未传 viewMode 时不应改动，实际: %q", untouched.ViewMode)
+	}
+
+	// 旧会话文件（早于该字段的版本）读取时补齐默认值
+	legacy := `{"id":"legacy","title":"旧会话","model":"m","permissionMode":"manual"}`
+	if err := os.WriteFile(filepath.Join(dir, "legacy.json"), []byte(legacy), 0o644); err != nil {
+		t.Fatalf("写入旧会话文件失败: %v", err)
+	}
+	legacySession, err := store.GetSession("legacy")
+	if err != nil {
+		t.Fatalf("读取旧会话失败: %v", err)
+	}
+	if legacySession.ViewMode != DefaultViewMode {
+		t.Fatalf("旧会话应补齐为 %q，实际: %q", DefaultViewMode, legacySession.ViewMode)
+	}
+
+	// 列表接口同样应带出补齐后的值（前端顶栏直接读列表项）
+	list, err := store.ListSessions()
+	if err != nil {
+		t.Fatalf("ListSessions 失败: %v", err)
+	}
+	for _, s := range list {
+		if s.ViewMode == "" {
+			t.Fatalf("会话 %s 的视图模式为空，前端将无法高亮当前模式", s.ID)
+		}
 	}
 }

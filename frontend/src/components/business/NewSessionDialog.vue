@@ -2,6 +2,7 @@
 import { reactive, ref, computed, onMounted } from 'vue'
 import { BookOpen } from 'lucide-vue-next'
 import { PERMISSION_MODES } from '@/types'
+import { useSettingStore } from '@/stores/setting'
 import { fetchModelNames } from '@/api/model'
 import { useToolsStore } from '@/stores/tools'
 import { useSkillsStore } from '@/stores/skills'
@@ -12,6 +13,7 @@ const emit = defineEmits(['close', 'confirm'])
 
 const modelNames = ref([])
 const toolsStore = useToolsStore()
+const settingStore = useSettingStore()
 const skillsStore = useSkillsStore()
 // 选中的工具 ID；全部选中时以空数组提交（后端语义：空=全部已启用工具）
 const selectedToolIds = ref([])
@@ -28,6 +30,13 @@ const allSkillsSelected = computed(
 onMounted(async () => {
   try {
     modelNames.value = await fetchModelNames()
+    // 优先使用设置的默认模型
+    const dm = settingStore.settings.defaultModel
+    if (dm && modelNames.value.includes(dm)) {
+      form.model = dm
+    } else if (modelNames.value.length > 0) {
+      form.model = modelNames.value[0]
+    }
   } catch (e) {
     console.error('加载模型列表失败:', e)
   }

@@ -45,6 +45,32 @@ type Conversation struct {
 	Error     string `json:"error,omitempty"`
 }
 
+// ===== 视图模式（会话级）=====
+//
+// 控制聊天流里「工具调用过程块」的展示粒度，取自 Claude Code 桌面端的视图模式设计：
+//   - verbose：完整展示工具调用过程（过程块常展开，每张工具卡片默认展开参数与输出）
+//   - normal ：平衡展示（默认）：执行中展开、完成后折叠，可手动展开
+//   - summary：仅保留一行摘要，隐藏工具调用细节（工具报错时强制展开，避免漏掉失败）
+const (
+	ViewModeVerbose = "verbose"
+	ViewModeNormal  = "normal"
+	ViewModeSummary = "summary"
+)
+
+// DefaultViewMode 新建会话的默认视图模式
+const DefaultViewMode = ViewModeNormal
+
+// normalizeViewMode 把空值或非法值兜底为默认模式。
+// 旧会话文件没有 viewMode 字段（反序列化为空串），走这里补齐为 normal。
+func normalizeViewMode(mode string) string {
+	switch mode {
+	case ViewModeVerbose, ViewModeNormal, ViewModeSummary:
+		return mode
+	default:
+		return DefaultViewMode
+	}
+}
+
 // Session 一个完整会话，每个会话持久化为一个 JSON 文件
 type Session struct {
 	ID             string          `json:"id"`
@@ -52,6 +78,7 @@ type Session struct {
 	Project        string          `json:"project"`
 	Model          string          `json:"model"`
 	PermissionMode string          `json:"permissionMode"`
+	ViewMode       string          `json:"viewMode"` // 视图模式：控制工具调用过程的展示粒度
 	Environment    string          `json:"environment"`
 	Status         string          `json:"status"` // active / completed / archived
 	StartAt        int64           `json:"startAt"`
@@ -69,6 +96,7 @@ type SessionConfig struct {
 	Project        string   `json:"project"`
 	Model          string   `json:"model"`
 	PermissionMode string   `json:"permissionMode"`
+	ViewMode       string   `json:"viewMode"` // 视图模式：控制工具调用过程的展示粒度
 	Environment    string   `json:"environment"`
 	EnabledTools   []string `json:"enabledTools"`  // 本会话可用的工具 ID 白名单（空=全部已启用工具）
 	EnabledSkills  []string `json:"enabledSkills"` // 本会话可用的技能 ID 白名单（空=全部已启用技能）
@@ -79,6 +107,7 @@ type SessionPatch struct {
 	Title          *string `json:"title,omitempty"`
 	Model          *string `json:"model,omitempty"`
 	PermissionMode *string `json:"permissionMode,omitempty"`
+	ViewMode       *string `json:"viewMode,omitempty"`
 	Status         *string `json:"status,omitempty"`
 	Project        *string `json:"project,omitempty"`
 }
@@ -111,6 +140,7 @@ func (s *SessionStore) CreateSession(config SessionConfig) (*Session, error) {
 		Project:        config.Project,
 		Model:          config.Model,
 		PermissionMode: config.PermissionMode,
+		ViewMode:       config.ViewMode,
 		Environment:    config.Environment,
 		Status:         "active",
 		StartAt:        now,
@@ -126,6 +156,7 @@ func (s *SessionStore) CreateSession(config SessionConfig) (*Session, error) {
 	if session.PermissionMode == "" {
 		session.PermissionMode = "manual"
 	}
+	session.ViewMode = normalizeViewMode(session.ViewMode)
 	if session.Environment == "" {
 		session.Environment = "local"
 	}
@@ -161,6 +192,8 @@ func (s *SessionStore) loadSession(id string) (*Session, error) {
 	if session.Conversations == nil {
 		session.Conversations = []*Conversation{}
 	}
+	// 旧会话文件没有 viewMode 字段，统一兜底，避免前端拿到空值
+	session.ViewMode = normalizeViewMode(session.ViewMode)
 	return &session, nil
 }
 
@@ -304,6 +337,9 @@ func (s *SessionStore) UpdateSession(id string, patch SessionPatch) (*Session, e
 	if patch.PermissionMode != nil {
 		session.PermissionMode = *patch.PermissionMode
 	}
+	if patch.ViewMode != nil {
+		session.ViewMode = normalizeViewMode(*patch.ViewMode)
+	}
 	if patch.Status != nil {
 		session.Status = *patch.Status
 	}
@@ -357,4 +393,68 @@ func truncateTitle(s string, max int) string {
 		return s
 	}
 	return string(runes[:max]) + "..."
+}
+
+// CountSessionsByModel 返回引用指定模型名称的会话数量
+func (s *SessionStore) CountSessionsByModel(modelName string) (int, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	entries, err := os.ReadDir(s.dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("读取会话目录失败: %w", err)
+	}
+
+	count := 0
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+			continue
+		}
+		id := strings.TrimSuffix(entry.Name(), ".json")
+		session, err := s.loadSession(id)
+		if err != nil {
+			continue
+		}
+		if session.Model == modelName {
+			count++
+		}
+	}
+	return count, nil
+}
+
+// RenameModelReference 将所有会话中引用 oldName 的 model 字段更新为 newName
+func (s *SessionStore) RenameModelReference(oldName, newName string) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	entries, err := os.ReadDir(s.dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("读取会话目录失败: %w", err)
+	}
+
+	updated := 0
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+			continue
+		}
+		id := strings.TrimSuffix(entry.Name(), ".json")
+		session, err := s.loadSession(id)
+		if err != nil {
+			continue
+		}
+		if session.Model == oldName {
+			session.Model = newName
+			if err := s.saveSession(session); err != nil {
+				return updated, err
+			}
+			updated++
+		}
+	}
+	return updated, nil
 }

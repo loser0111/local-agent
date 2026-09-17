@@ -32,6 +32,8 @@ export function GetDiffTurns(arg1:string):Promise<Array<main.DiffTurn>>;
 
 export function GetModel(arg1:string):Promise<main.Model>;
 
+export function GetModelFull(arg1:string):Promise<main.Model>;
+
 export function GetModelNames():Promise<Array<string>>;
 
 export function GetModels():Promise<Array<main.Model>>;
@@ -66,10 +68,14 @@ export function SetSkillAlwaysInject(arg1:string,arg2:boolean):Promise<void>;
 
 export function SkillsDir():Promise<string>;
 
+export function TestModelConnection(arg1:main.Model):Promise<void>;
+
 export function TestToolConnection(arg1:main.ToolConfig):Promise<Array<main.MCPToolMeta>>;
 
 export function ToggleSkill(arg1:string,arg2:boolean):Promise<void>;
 
 export function ToggleTool(arg1:string,arg2:boolean):Promise<void>;
+
+export function UpdateModel(arg1:string,arg2:main.Model):Promise<void>;
 
 export function UpdateSession(arg1:string,arg2:main.SessionPatch):Promise<main.Session>;

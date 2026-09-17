@@ -62,6 +62,10 @@ export function GetModel(arg1) {
   return window['go']['main']['App']['GetModel'](arg1);
 }
 
+export function GetModelFull(arg1) {
+  return window['go']['main']['App']['GetModelFull'](arg1);
+}
+
 export function GetModelNames() {
   return window['go']['main']['App']['GetModelNames']();
 }
@@ -130,6 +134,10 @@ export function SkillsDir() {
   return window['go']['main']['App']['SkillsDir']();
 }
 
+export function TestModelConnection(arg1) {
+  return window['go']['main']['App']['TestModelConnection'](arg1);
+}
+
 export function TestToolConnection(arg1) {
   return window['go']['main']['App']['TestToolConnection'](arg1);
 }
@@ -140,6 +148,10 @@ export function ToggleSkill(arg1, arg2) {
 
 export function ToggleTool(arg1, arg2) {
   return window['go']['main']['App']['ToggleTool'](arg1, arg2);
+}
+
+export function UpdateModel(arg1, arg2) {
+  return window['go']['main']['App']['UpdateModel'](arg1, arg2);
 }
 
 export function UpdateSession(arg1, arg2) {

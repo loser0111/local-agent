@@ -443,7 +443,7 @@ func (a *App) executeChat(sessionID, query string, useStream bool) *ChatResult {
 	if err != nil {
 		return &ChatResult{Error: fmt.Sprintf("加载会话失败: %v", err)}
 	}
-	model, err := a.modelStore.GetModel(session.Model)
+	model, err := a.modelStore.GetModelForCall(session.Model)
 	if err != nil {
 		return &ChatResult{Error: fmt.Sprintf("获取模型配置失败: %v", err)}
 	}
@@ -544,10 +544,10 @@ func (a *App) runToolLoop(sessionID, systemPrompt string, model *Model,
 		)
 		if useStream {
 			flusher, flushShutdown = a.startDeltaFlusher()
-			resp, err = callLLMStream(context.Background(), model.URL, model.APIKey, req, flusher)
+			resp, err = callLLMStreamForModel(context.Background(), model, req, flusher)
 			flushShutdown() // 确保残余分片在进入工具执行/done 前全部发出
 		} else {
-			resp, err = callLLM(model.URL, model.APIKey, req)
+			resp, err = callLLMForModel(model, req)
 		}
 		if err != nil {
 			return &ChatResult{
@@ -759,7 +759,7 @@ func (a *App) ChatPlan(sessionID, query string, useStream bool) *ChatResult {
 	if err != nil {
 		return &ChatResult{Error: fmt.Sprintf("加载会话失败: %v", err)}
 	}
-	model, err := a.modelStore.GetModel(session.Model)
+	model, err := a.modelStore.GetModelForCall(session.Model)
 	if err != nil {
 		return &ChatResult{Error: fmt.Sprintf("获取模型配置失败: %v", err)}
 	}
@@ -781,7 +781,7 @@ func (a *App) ChatPlan(sessionID, query string, useStream bool) *ChatResult {
 				{Role: RoleUser, Content: buildPlannerUserPrompt(query, dir)},
 			},
 		}
-		resp, lastErr = callLLM(model.URL, model.APIKey, req)
+		resp, lastErr = callLLMForModel(&model, req)
 		if lastErr == nil {
 			break
 		}
@@ -848,7 +848,7 @@ func (a *App) executePlan(planID string, useStream bool) *ChatResult {
 	if err != nil {
 		return &ChatResult{Error: fmt.Sprintf("加载会话失败: %v", err)}
 	}
-	model, err := a.modelStore.GetModel(session.Model)
+	model, err := a.modelStore.GetModelForCall(session.Model)
 	if err != nil {
 		return &ChatResult{Error: fmt.Sprintf("获取模型配置失败: %v", err)}
 	}

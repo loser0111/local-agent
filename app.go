@@ -86,7 +86,7 @@ func (a *App) Greet(name string) string {
 
 // ===== 模型管理 =====
 
-// GetModels 返回所有已配置的模型列表
+// GetModels 返回所有已配置的模型列表（APIKey 脱敏）
 func (a *App) GetModels() []Model {
 	return a.modelStore.GetModels()
 }
@@ -101,14 +101,81 @@ func (a *App) AddModel(model Model) error {
 	return a.modelStore.AddModel(model)
 }
 
-// DeleteModel 根据模型名称删除配置
+// UpdateModel 更新已有模型配置。支持重命名：若 model.Name 与旧 name 不同，
+// 自动级联更新所有引用该模型名称的会话。
+func (a *App) UpdateModel(name string, model Model) error {
+	if err := a.modelStore.UpdateModel(name, model); err != nil {
+		return err
+	}
+	// 检查是否发生了重命名
+	newName := model.Name
+	if newName == "" {
+		newName = name
+	}
+	if newName != name {
+		// 级联更新所有会话中的模型引用
+		if _, err := a.sessionStore.RenameModelReference(name, newName); err != nil {
+			return fmt.Errorf("模型已更新但级联更新会话引用失败: %w", err)
+		}
+	}
+	return nil
+}
+
+// DeleteModel 根据模型名称删除配置。若有会话正在引用该模型则拒绝删除。
 func (a *App) DeleteModel(name string) error {
+	count, err := a.sessionStore.CountSessionsByModel(name)
+	if err != nil {
+		return fmt.Errorf("检查模型引用失败: %w", err)
+	}
+	if count > 0 {
+		return fmt.Errorf("有 %d 个会话正在使用该模型，请先切换或删除相关会话", count)
+	}
 	return a.modelStore.DeleteModel(name)
 }
 
-// GetModel 根据名称获取模型详情
+// GetModel 根据名称获取模型详情（APIKey 脱敏）
 func (a *App) GetModel(name string) (Model, error) {
 	return a.modelStore.GetModel(name)
+}
+
+// GetModelFull 根据名称获取模型完整信息（不脱敏，供编辑时回填）
+func (a *App) GetModelFull(name string) (Model, error) {
+	return a.modelStore.GetModelFull(name)
+}
+
+// TestModelConnection 测试模型连通性：发送一条简短消息验证 API 配置是否正确
+func (a *App) TestModelConnection(model Model) error {
+	if model.Name == "" {
+		return fmt.Errorf("模型名称不能为空")
+	}
+	if model.URL == "" {
+		return fmt.Errorf("模型 API URL 不能为空")
+	}
+
+	modelID := model.ModelID
+	if modelID == "" {
+		modelID = model.Name
+	}
+
+	req := &LLMReq{
+		Model:       modelID,
+		Temperature: 0,
+		Messages: []LLMMessage{
+			{Role: RoleSystem, Content: "You are a test assistant. Reply with: OK"},
+			{Role: RoleUser, Content: "ping"},
+		},
+		Stream: false,
+	}
+
+	// 复用已有的协议适配逻辑（OpenAI / Anthropic 自动分发）
+	resp, err := callLLMForModel(&model, req)
+	if err != nil {
+		return err
+	}
+	if len(resp.Choices) == 0 {
+		return fmt.Errorf("模型返回空响应")
+	}
+	return nil
 }
 
 // ===== 会话管理 =====

@@ -162,10 +162,13 @@ export const PERMISSION_MODES = [
 ]
 
 export const VIEW_MODES = [
-  { value: 'verbose', label: 'Verbose' },
-  { value: 'normal', label: 'Normal' },
-  { value: 'summary', label: 'Summary' },
+  { value: 'verbose', label: 'Verbose', desc: '完整展示工具调用过程，参数与输出默认展开' },
+  { value: 'normal', label: 'Normal', desc: '执行中展开、完成后折叠，可手动展开（默认）' },
+  { value: 'summary', label: 'Summary', desc: '仅保留一行摘要，隐藏工具细节；工具报错时强制展开' },
 ]
+
+/** 视图模式默认值（新建会话与旧数据兜底，与 Go 侧 DefaultViewMode 保持一致） */
+export const DEFAULT_VIEW_MODE = 'normal'
 
 export const PANE_TITLES = {
   chat: 'Chat',

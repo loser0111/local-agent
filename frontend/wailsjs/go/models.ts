@@ -346,6 +346,7 @@ export namespace main {
 	    modelId: string;
 	    apiKey: string;
 	    url: string;
+	    protocol?: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new Model(source);
@@ -358,6 +359,7 @@ export namespace main {
 	        this.modelId = source["modelId"];
 	        this.apiKey = source["apiKey"];
 	        this.url = source["url"];
+	        this.protocol = source["protocol"];
 	    }
 	}
 	
@@ -368,6 +370,7 @@ export namespace main {
 	    project: string;
 	    model: string;
 	    permissionMode: string;
+	    viewMode: string;
 	    environment: string;
 	    status: string;
 	    startAt: number;
@@ -389,6 +392,7 @@ export namespace main {
 	        this.project = source["project"];
 	        this.model = source["model"];
 	        this.permissionMode = source["permissionMode"];
+	        this.viewMode = source["viewMode"];
 	        this.environment = source["environment"];
 	        this.status = source["status"];
 	        this.startAt = source["startAt"];
@@ -423,6 +427,7 @@ export namespace main {
 	    project: string;
 	    model: string;
 	    permissionMode: string;
+	    viewMode: string;
 	    environment: string;
 	    enabledTools: string[];
 	    enabledSkills: string[];
@@ -437,6 +442,7 @@ export namespace main {
 	        this.project = source["project"];
 	        this.model = source["model"];
 	        this.permissionMode = source["permissionMode"];
+	        this.viewMode = source["viewMode"];
 	        this.environment = source["environment"];
 	        this.enabledTools = source["enabledTools"];
 	        this.enabledSkills = source["enabledSkills"];
@@ -446,6 +452,7 @@ export namespace main {
 	    title?: string;
 	    model?: string;
 	    permissionMode?: string;
+	    viewMode?: string;
 	    status?: string;
 	    project?: string;
 	
@@ -458,6 +465,7 @@ export namespace main {
 	        this.title = source["title"];
 	        this.model = source["model"];
 	        this.permissionMode = source["permissionMode"];
+	        this.viewMode = source["viewMode"];
 	        this.status = source["status"];
 	        this.project = source["project"];
 	    }

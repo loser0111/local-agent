@@ -7,6 +7,7 @@ import { useDiffStore } from '@/stores/diff'
 import { useSettingStore } from '@/stores/setting'
 import { usePlanStore } from '@/stores/plan'
 import { appendMessage, appendConversation, chat, onDiffUpdate } from '@/api/session'
+import { DEFAULT_VIEW_MODE } from '@/types'
 import PaneHeader from '@/components/layout/PaneHeader.vue'
 import MessageBubble from '@/components/business/MessageBubble.vue'
 import ToolProcess from '@/components/business/ToolProcess.vue'
@@ -37,6 +38,8 @@ const autoScroll = ref(true)
 
 const sessionId = computed(() => sessionStore.currentSessionId)
 const messages = computed(() => chatStore.messages)
+// 视图模式（会话级）：控制工具调用过程块的展示粒度；旧会话无该字段时兜底为默认值
+const viewMode = computed(() => sessionStore.currentSession?.viewMode || DEFAULT_VIEW_MODE)
 
 /**
  * 展示分组：把一次问答中连续的多轮工具调用消息（无正文的 assistant+toolCalls）
@@ -348,6 +351,7 @@ function openDiff() {
             <ToolProcess
               :tool-calls="item.toolCalls"
               :streaming="item.streaming"
+              :view-mode="viewMode"
             />
           </div>
         </div>

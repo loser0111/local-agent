@@ -10,6 +10,8 @@ function defaultSettings() {
     permissionMode: PERMISSION_MODES[0].value,
     // 流式输出：逐字显示回复（SSE）；旧数据缺该字段时默认开启
     streamResponse: true,
+    // 默认模型名称（新建会话时自动选中，空串表示不设默认）
+    defaultModel: '',
   }
 }
 
@@ -41,6 +43,10 @@ export const useSettingStore = defineStore('setting', () => {
     settings.value.streamResponse = !!v
   }
 
+  function setDefaultModel(v) {
+    settings.value.defaultModel = v || ''
+  }
+
   // 持久化（深监听整个 settings）
   watch(
     settings,
@@ -54,5 +60,5 @@ export const useSettingStore = defineStore('setting', () => {
     { deep: true }
   )
 
-  return { settings, setPermissionMode, setStreamResponse }
+  return { settings, setPermissionMode, setStreamResponse, setDefaultModel }
 })

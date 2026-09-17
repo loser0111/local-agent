@@ -1,11 +1,22 @@
 <script setup>
-import { ref, computed } from 'vue'
+import { ref, computed, watch } from 'vue'
 
 const props = defineProps({
   toolCall: { type: Object, required: true },
+  // Verbose 视图模式下默认展开参数与输出（完整展示工具调用过程）
+  defaultExpanded: { type: Boolean, default: false },
 })
 
-const expanded = ref(false)
+// 用户是否手动切换过（手动操作后不再跟随视图模式）
+const userToggled = ref(false)
+const expanded = ref(props.defaultExpanded)
+
+watch(
+  () => props.defaultExpanded,
+  (v) => {
+    if (!userToggled.value) expanded.value = v
+  }
+)
 
 const statusText = computed(() => {
   switch (props.toolCall.status) {
@@ -34,6 +45,7 @@ const statusColor = computed(() => {
 })
 
 function toggleExpand() {
+  userToggled.value = true
   expanded.value = !expanded.value
 }
 
