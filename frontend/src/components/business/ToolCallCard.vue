@@ -48,6 +48,11 @@ const statusColor = computed(() => {
   }
 })
 
+// 耗时展示：≥1 秒用秒（带 s 后缀，避免把 300.3 秒误读成毫秒），否则用毫秒
+function formatDuration(seconds) {
+  return seconds >= 1 ? `${seconds.toFixed(1)}s` : `${Math.round(seconds * 1000)}ms`
+}
+
 function toggleExpand() {
   userToggled.value = true
   expanded.value = !expanded.value
@@ -94,7 +99,7 @@ const argSummary = computed(() => {
         <span v-if="toolCall.status === 'running'" class="mini-spinner"></span>
         <span v-else-if="toolCall.status === 'pending'" class="mini-spinner pending-spinner"></span>
         {{ statusText }}
-        <span v-if="toolCall.duration"> · {{ toolCall.duration >= 1 ? toolCall.duration.toFixed(1) : (toolCall.duration * 1000).toFixed(0) + 'ms' }}</span>
+        <span v-if="toolCall.duration"> · {{ formatDuration(toolCall.duration) }}</span>
       </span>
       <span class="expand-icon">{{ expanded ? '▼' : '▶' }}</span>
     </button>

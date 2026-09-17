@@ -18,6 +18,10 @@ export function AppendMessage(arg1, arg2) {
   return window['go']['main']['App']['AppendMessage'](arg1, arg2);
 }
 
+export function CancelAskUser(arg1) {
+  return window['go']['main']['App']['CancelAskUser'](arg1);
+}
+
 export function CancelPermissionWait(arg1) {
   return window['go']['main']['App']['CancelPermissionWait'](arg1);
 }
@@ -90,6 +94,14 @@ export function GetModels() {
   return window['go']['main']['App']['GetModels']();
 }
 
+export function GetPendingAsk(arg1) {
+  return window['go']['main']['App']['GetPendingAsk'](arg1);
+}
+
+export function GetPendingInteraction(arg1) {
+  return window['go']['main']['App']['GetPendingInteraction'](arg1);
+}
+
 export function GetPermissionAudit(arg1) {
   return window['go']['main']['App']['GetPermissionAudit'](arg1);
 }
@@ -144,6 +156,14 @@ export function RefreshSkills() {
 
 export function RemovePermissionRule(arg1, arg2, arg3, arg4) {
   return window['go']['main']['App']['RemovePermissionRule'](arg1, arg2, arg3, arg4);
+}
+
+export function ReopenPlan(arg1) {
+  return window['go']['main']['App']['ReopenPlan'](arg1);
+}
+
+export function ResolveAskUser(arg1) {
+  return window['go']['main']['App']['ResolveAskUser'](arg1);
 }
 
 export function ResolvePermission(arg1, arg2, arg3, arg4, arg5) {

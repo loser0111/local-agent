@@ -3,6 +3,7 @@ import {
   SavePlan,
   ExecutePlan,
   CancelPlan,
+  ReopenPlan,
   ListPlans,
 } from '@/../wailsjs/go/main/App'
 import { EventsOn, EventsOff } from '@/../wailsjs/runtime/runtime'
@@ -189,6 +190,33 @@ function finishMockCancel(plan, fromIndex, handlers) {
   mockCancelFlags.delete(plan.id)
   handlers.onPlanUpdate?.(clone(plan))
   return { plan: clone(plan) }
+}
+
+/**
+ * 把已结束的计划退回待审核（失败/取消/完成后「修改后重试」用）。
+ * 已完成的步骤保留，失败与跳过的步骤重置为待执行。
+ * @param {string} planId
+ * @returns {Promise<import('@/types').Plan>}
+ */
+export async function reopenPlan(planId) {
+  if (isWails()) {
+    return await ReopenPlan(planId)
+  }
+  const found = findMockPlanById(planId)
+  if (!found) throw new Error('计划不存在')
+  const plan = found.plan
+  if (plan.status === 'running') throw new Error('计划正在执行中，请先取消再修改')
+  for (const st of plan.steps) {
+    if (st.status === 'done') continue
+    st.status = 'pending'
+    st.error = ''
+    st.startedAt = 0
+    st.finishedAt = 0
+  }
+  plan.status = 'awaiting_approval'
+  plan.updatedAt = Date.now()
+  writeMockPlan(plan.sessionId, plan)
+  return clone(plan)
 }
 
 /**

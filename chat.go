@@ -114,6 +114,10 @@ const (
 
 	MaxChatTurns = 50
 
+	// llmStreamHeaderTimeout 流式请求等待响应头的上限。
+	// 只约束"网关多久开始回话"，不限制整体时长（长回复不能被砍断）。
+	llmStreamHeaderTimeout = 120 * time.Second
+
 	SystemPrompt = "你是一个智能助手，可以调用工具来帮助用户解决问题。"
 )
 
@@ -199,10 +203,12 @@ func callLLMStream(ctx context.Context, url, token string, req *LLMReq, onConten
 	httpReq.Header.Set("Accept", "text/event-stream")
 	httpReq.Header.Set("Cache-Control", "no-cache")
 
-	// 流式响应不能设置整体超时（长回复会被砍断），只约束建连与响应头
+	// 流式响应不能设置整体超时（长回复会被砍断），只约束建连与响应头。
+	// 120s 而不是 30s：网关（尤其 coding-plan 这类代理）在 prompt 很长时要考虑一阵子
+	// 才吐首字节，30s 会变成"timeout awaiting response headers"这类假失败。
 	client := &http.Client{
 		Transport: &http.Transport{
-			ResponseHeaderTimeout: 30 * time.Second,
+			ResponseHeaderTimeout: llmStreamHeaderTimeout,
 			Proxy:                 http.ProxyFromEnvironment,
 		},
 	}
@@ -384,7 +390,7 @@ func (a *App) startDeltaFlusher() (enqueue func(string), shutdown func()) {
 // ChatEvent 推送给前端的事件数据
 // ChatEvent 聊天过程事件（经 "chat:event" 通道推送给前端）
 type ChatEvent struct {
-	Type      string     `json:"type"` // tool_call_start / tool_call_end / reply_delta / done / error / diff_update / plan_update / permission_request
+	Type      string     `json:"type"` // tool_call_start / tool_call_end / reply_delta / done / error / diff_update / plan_update / permission_request / ask_user
 	ToolCall  *ToolCall  `json:"toolCall,omitempty"`
 	Reply     string     `json:"reply,omitempty"`
 	Error     string     `json:"error,omitempty"`
@@ -395,6 +401,9 @@ type ChatEvent struct {
 	// Permission 权限授权请求（type=permission_request）：前端应弹出授权弹窗，
 	// 并把结果经 ResolvePermission 回传。请求期间后端阻塞等待，超时/取消一律按拒绝处理。
 	Permission *PermissionAskRequest `json:"permission,omitempty"`
+	// Ask 模型主动提问（type=ask_user）：前端应弹出提问弹窗，用户作答后经 ResolveAskUser 回传。
+	// 等待期间后端阻塞；超时/取消会以"用户未作答"回给模型，让它自行决策而不是让整轮失败。
+	Ask *AskRequest `json:"ask,omitempty"`
 }
 
 // 事件类型常量（前端按同名分支分发）
@@ -406,6 +415,31 @@ const (
 )
 
 // emitChatEvent 向前端推送一个聊天事件（无 Wails 上下文时静默跳过）
+// EventUserInteraction 需要用户交互的阻塞式请求（授权 / 提问）专用事件名。
+//
+// 为什么不复用 "chat:event"：前端每次调用结束都会 EventsOff("chat:event")，而 Wails 的
+// EventsOff 会移除该事件的**全部**监听——于是这类"无论从哪条链路发起都要能弹出来"的请求，
+// 一旦挂在按调用注册的回调上就会漏（曾经就漏了计划执行路径：授权弹窗没弹，后端白等 5 分钟
+// 才超时失败）。独立通道让前端只需在应用根部订阅一次，新增任何调用入口都不会再漏。
+const EventUserInteraction = "user:interaction"
+
+// emitInteraction 推送需要用户应答的交互事件。
+//
+// **同时发到两条通道**，是为了对「前端产物与 Go 二进制版本不一致」免疫：
+// main.go 用 go:embed 把 frontend/dist 打进二进制，只要构建顺序不当（先 build Go 后 build 前端，
+// 或只重建了一侧），就会出现"后端在新通道喊、前端在旧通道听"（或反之），
+// 表现为弹窗永不出现、工具卡片一直卡在"运行中"直到超时。
+// 两条通道都发，新前端听 user:interaction、旧前端听 chat:event，各自只收到一次。
+func (a *App) emitInteraction(ev ChatEvent) {
+	if a.ctx == nil {
+		return
+	}
+	wailsRuntime.EventsEmit(a.ctx, EventUserInteraction, ev)
+	wailsRuntime.EventsEmit(a.ctx, "chat:event", ev) // 兼容旧前端产物
+	// 打一行日志：下次界面没弹出时，看控制台就能判断是"后端没发"还是"前端没收到"
+	fmt.Printf("[交互] 已推送 %s，等待界面应答（若弹窗没出现，请确认前端产物与二进制来自同一次构建）\n", ev.Type)
+}
+
 func (a *App) emitChatEvent(ev ChatEvent) {
 	if a.ctx == nil {
 		return
@@ -547,6 +581,10 @@ func (a *App) runToolLoop(sessionID, systemPrompt string, model *Model,
 		SessionID:     sessionID,
 		Changes:       a.fileChanges,
 		Enforcer:      a.newPermissionEnforcer(session, dir),
+		// ask_user 的回路：绑定当前会话（阻塞等待用户作答后把结果回填给模型）
+		Ask: func(ctx context.Context, req AskRequest) (AskAnswer, error) {
+			return a.askUser(ctx, sessionID, req)
+		},
 	})
 	tools := toolView.GetToolsForLLM()
 
@@ -878,7 +916,7 @@ func (a *App) ChatPlan(sessionID, query string, useStream bool) *ChatResult {
 
 // executePlan 逐步执行计划：每步 = 一次完整工具循环（runToolLoop）。
 // 长耗时，结束时返回；失败即停（后续步骤置 skipped）；done 步骤在重试时自动跳过。
-func (a *App) executePlan(planID string, useStream bool) *ChatResult {
+func (a *App) executePlan(planID string, useStream bool) (result *ChatResult) {
 	// 1. 加载计划并校验状态（running 状态拒绝并发执行，R10）
 	plan, err := a.planStore.Get(planID)
 	if err != nil {
@@ -916,6 +954,40 @@ func (a *App) executePlan(planID string, useStream bool) *ChatResult {
 	plan.Status = PlanRunning
 	_ = a.planStore.Save(plan)
 	a.emitPlanUpdate(plan, -1)
+
+	// 兜底：无论从哪条路径离开（含 panic 与任何提前 return），都不能把计划留在 running。
+	// 留在 running 的后果是前端永久显示"执行中"、取消又找不到活跃通道而失败，
+	// 用户只能重启应用——这正是"计划失败后无法修改进度"的成因之一。
+	defer func() {
+		if r := recover(); r != nil {
+			for _, st := range plan.Steps {
+				if st.Status == StepRunning {
+					st.Status = StepFailed
+					st.Error = fmt.Sprintf("执行异常中断: %v", r)
+					st.FinishedAt = time.Now().UnixMilli()
+				}
+			}
+			markRemainingSkipped(plan, 0)
+			plan.Status = PlanFailed
+			_ = a.planStore.Save(plan)
+			a.emitPlanUpdate(plan, -1)
+			result = &ChatResult{Plan: plan, Error: fmt.Sprintf("计划执行异常中断: %v", r)}
+			return
+		}
+		if plan.Status != PlanRunning {
+			return // 已正常收尾（completed / failed / cancelled）
+		}
+		for _, st := range plan.Steps {
+			if st.Status == StepRunning {
+				st.Status = StepFailed
+				st.Error = "执行中断（未正常结束）"
+				st.FinishedAt = time.Now().UnixMilli()
+			}
+		}
+		plan.Status = PlanFailed
+		_ = a.planStore.Save(plan)
+		a.emitPlanUpdate(plan, -1)
+	}()
 
 	// 5. 逐步执行
 	for _, step := range plan.Steps {

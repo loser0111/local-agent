@@ -744,9 +744,12 @@ func isReadOnlyCommand(units []string) bool {
 	return true
 }
 
-// readOnlyTools 内置只读工具：无副作用，直接放行（不弹窗）
+// readOnlyTools 内置无副作用工具：直接放行（不弹窗）
 var readOnlyTools = map[string]bool{
 	"read_skill": true,
+	// ask_user 只与用户交互，不碰文件系统也不执行命令；它本身就是"问用户"，
+	// 再叠一层权限弹窗只会变成连续两个弹窗，且没有任何安全收益。
+	toolAskUser: true,
 }
 
 // isReadOnlySubject 判定主体是否只读。

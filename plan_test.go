@@ -415,3 +415,201 @@ func TestExecutePlanCancel(t *testing.T) {
 		t.Fatalf("原 skipped 步骤应重跑并完成: %+v", execRes2.Plan.Steps[1])
 	}
 }
+
+// ===== 失败/中断后的恢复能力（修复「计划失败后无法修改进度」）=====
+
+// 计划失败后必须能退回待审核，且已完成步骤的进度不丢
+func TestPlanStoreReopen(t *testing.T) {
+	s := NewPlanStore(t.TempDir())
+	plan := &Plan{
+		ID: "p1", SessionID: "s1", Title: "t", Status: PlanFailed, CreatedAt: 1,
+		Steps: []*PlanStep{
+			{Index: 0, Title: "已完成", Status: StepDone, Summary: "摘要"},
+			{Index: 1, Title: "失败步骤", Status: StepFailed, Error: "网络错误"},
+			{Index: 2, Title: "被跳过", Status: StepSkipped},
+		},
+	}
+	if err := s.Save(plan); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.Reopen("p1")
+	if err != nil {
+		t.Fatalf("重开失败: %v", err)
+	}
+	if got.Status != PlanAwaitingApproval {
+		t.Fatalf("重开后应为待审核，实际 %s", got.Status)
+	}
+	if got.Steps[0].Status != StepDone || got.Steps[0].Summary != "摘要" {
+		t.Fatalf("已完成步骤的进度应保留: %+v", got.Steps[0])
+	}
+	if got.Steps[1].Status != StepPending || got.Steps[1].Error != "" {
+		t.Fatalf("失败步骤应重置为待执行并清掉原因: %+v", got.Steps[1])
+	}
+	if got.Steps[2].Status != StepPending {
+		t.Fatalf("被跳过的步骤应重置为待执行: %+v", got.Steps[2])
+	}
+
+	// 幂等：已处于待审核时再次重开不应报错
+	if _, err := s.Reopen("p1"); err != nil {
+		t.Fatalf("重复重开应幂等: %v", err)
+	}
+
+	// 执行中不允许重开（有活跃执行者，应先取消）
+	if err := s.Save(&Plan{ID: "p2", SessionID: "s1", Status: PlanRunning}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Reopen("p2"); err == nil {
+		t.Fatal("running 计划应拒绝重开")
+	}
+	if _, err := s.Reopen("不存在"); err == nil {
+		t.Fatal("不存在的计划应报错")
+	}
+
+	// 已完成/已取消的计划也允许重开（继续加步骤或重跑）
+	for _, st := range []string{PlanCompleted, PlanCancelled} {
+		if err := s.Save(&Plan{ID: "p3", SessionID: "s1", Status: st}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.Reopen("p3"); err != nil {
+			t.Fatalf("%s 计划应可重开: %v", st, err)
+		}
+	}
+}
+
+// 执行协程异常退出（计划停在 running、没有活跃取消通道）时，取消必须能强制收尾，
+// 否则前端会永久停在"执行中"且取消失败，只能重启应用。
+func TestCancelPlanRecoversStuckRunning(t *testing.T) {
+	app := &App{planStore: NewPlanStore(t.TempDir())}
+	if err := app.planStore.Save(&Plan{
+		ID: "p1", SessionID: "s1", Status: PlanRunning,
+		Steps: []*PlanStep{
+			{Index: 0, Title: "进行中", Status: StepRunning},
+			{Index: 1, Title: "待执行", Status: StepPending},
+			{Index: 2, Title: "已完成", Status: StepDone},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := app.CancelPlan("p1"); err != nil {
+		t.Fatalf("卡在 running 的计划应能强制取消: %v", err)
+	}
+	got, _ := app.planStore.Get("p1")
+	if got.Status != PlanCancelled {
+		t.Fatalf("应置为已取消，实际 %s", got.Status)
+	}
+	if got.Steps[0].Status != StepFailed || got.Steps[0].Error == "" {
+		t.Fatalf("进行中的步骤应置失败并说明原因: %+v", got.Steps[0])
+	}
+	if got.Steps[1].Status != StepSkipped {
+		t.Fatalf("待执行步骤应置为跳过: %+v", got.Steps[1])
+	}
+	if got.Steps[2].Status != StepDone {
+		t.Fatalf("已完成步骤不应被改动: %+v", got.Steps[2])
+	}
+
+	// 非 running 且无通道：明确报错，不能误改状态
+	if err := app.planStore.Save(&Plan{ID: "p2", SessionID: "s1", Status: PlanCompleted}); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.CancelPlan("p2"); err == nil {
+		t.Fatal("已完成计划不应被取消")
+	}
+	if p, _ := app.planStore.Get("p2"); p.Status != PlanCompleted {
+		t.Fatalf("已完成计划的状态不应被改动: %s", p.Status)
+	}
+}
+
+// 端到端回归：步骤执行遇到网络/接口失败 → 计划落到 failed（而不是卡在 running），
+// 随后可以 ReopenPlan 修改并重新执行，已完成的步骤不重跑。
+func TestExecutePlanFailureThenReopenAndResume(t *testing.T) {
+	var failNext int32 = 1 // 1 = 步骤执行时让 LLM 接口报错
+	var stepCalls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var req LLMReq
+		_ = json.Unmarshal(body, &req)
+		w.Header().Set("Content-Type", "application/json")
+		if len(req.Tools) == 0 {
+			// 规划器：返回两步计划
+			_ = json.NewEncoder(w).Encode(LLMResp{Choices: []LLMChoice{{
+				FinishReason: FinishReasonStop,
+				Message: LLMMessage{Role: RoleAssistant,
+					Content: `{"needPlan":true,"title":"网络失败测试","steps":[{"title":"第一步"},{"title":"第二步"}]}`},
+			}}})
+			return
+		}
+		atomic.AddInt32(&stepCalls, 1)
+		if atomic.LoadInt32(&failNext) == 1 {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"error":"upstream unavailable"}`))
+			return
+		}
+		_ = json.NewEncoder(w).Encode(LLMResp{Choices: []LLMChoice{{
+			FinishReason: FinishReasonStop,
+			Message:      LLMMessage{Role: RoleAssistant, Content: "步骤完成：结果正常"},
+		}}})
+	}))
+	defer srv.Close()
+
+	app, sess := newPlanTestApp(t, srv.URL)
+	if _, err := app.sessionStore.AppendMessage(sess.ID, Message{Role: RoleUser, Content: "两步任务"}); err != nil {
+		t.Fatal(err)
+	}
+	planRes := app.ChatPlan(sess.ID, "两步任务", false)
+	if planRes.Error != "" || planRes.Plan == nil {
+		t.Fatalf("规划失败: %s", planRes.Error)
+	}
+	planID := planRes.Plan.ID
+
+	// 第一次执行：步骤接口 500 → 计划必须落到 failed，而不是留在 running
+	res := app.ExecutePlan(planID, false)
+	if res.Error == "" {
+		t.Fatal("接口失败时应返回错误")
+	}
+	plan, err := app.planStore.Get(planID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Status != PlanFailed {
+		t.Fatalf("执行失败后计划应为 failed（不能卡在 running），实际 %s", plan.Status)
+	}
+	if plan.Steps[0].Status != StepFailed || plan.Steps[0].Error == "" {
+		t.Fatalf("失败步骤应带原因: %+v", plan.Steps[0])
+	}
+	if plan.Steps[1].Status != StepSkipped {
+		t.Fatalf("后续步骤应置为跳过: %+v", plan.Steps[1])
+	}
+
+	// 失败后必须能取消（这条路径以前会因为找不到活跃通道而失败）
+	if err := app.CancelPlan(planID); err == nil {
+		t.Fatal("已经 failed 的计划不应能被再次取消")
+	}
+
+	// 重开 → 修改状态 → 重新执行：应能跑到完成，且不再重跑已完成步骤
+	reopened, err := app.ReopenPlan(planID)
+	if err != nil {
+		t.Fatalf("失败的计划应可重开: %v", err)
+	}
+	if reopened.Status != PlanAwaitingApproval {
+		t.Fatalf("重开后应为待审核，实际 %s", reopened.Status)
+	}
+	atomic.StoreInt32(&failNext, 0) // 网络恢复
+	res2 := app.ExecutePlan(planID, false)
+	if res2.Error != "" {
+		t.Fatalf("恢复后应执行成功: %s", res2.Error)
+	}
+	final, _ := app.planStore.Get(planID)
+	if final.Status != PlanCompleted {
+		t.Fatalf("恢复执行后应完成，实际 %s", final.Status)
+	}
+	for i, st := range final.Steps {
+		if st.Status != StepDone {
+			t.Fatalf("第 %d 步应为完成，实际 %s", i+1, st.Status)
+		}
+	}
+	if got := atomic.LoadInt32(&stepCalls); got < 3 {
+		t.Fatalf("两次执行至少应发生 3 次步骤调用（首次失败 + 重试两步），实际 %d", got)
+	}
+}

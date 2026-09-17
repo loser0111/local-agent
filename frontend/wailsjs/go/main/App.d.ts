@@ -10,6 +10,8 @@ export function AppendConversation(arg1:string,arg2:main.Conversation):Promise<v
 
 export function AppendMessage(arg1:string,arg2:main.Message):Promise<main.Message>;
 
+export function CancelAskUser(arg1:string):Promise<void>;
+
 export function CancelPermissionWait(arg1:string):Promise<void>;
 
 export function CancelPlan(arg1:string):Promise<void>;
@@ -46,6 +48,10 @@ export function GetModelNames():Promise<Array<string>>;
 
 export function GetModels():Promise<Array<main.Model>>;
 
+export function GetPendingAsk(arg1:string):Promise<main.AskRequest>;
+
+export function GetPendingInteraction(arg1:string):Promise<main.PendingInteraction>;
+
 export function GetPermissionAudit(arg1:string):Promise<Array<main.AuditEntry>>;
 
 export function GetPermissionState(arg1:string):Promise<main.PermissionState>;
@@ -73,6 +79,10 @@ export function PickDirectory():Promise<string>;
 export function RefreshSkills():Promise<Array<main.SkillMeta>>;
 
 export function RemovePermissionRule(arg1:string,arg2:string,arg3:string,arg4:string):Promise<void>;
+
+export function ReopenPlan(arg1:string):Promise<main.Plan>;
+
+export function ResolveAskUser(arg1:main.AskAnswer):Promise<void>;
 
 export function ResolvePermission(arg1:string,arg2:string,arg3:string,arg4:string,arg5:string):Promise<void>;
 

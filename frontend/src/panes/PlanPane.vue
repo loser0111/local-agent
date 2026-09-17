@@ -124,7 +124,29 @@ async function saveOnly() {
 }
 
 async function cancelExec() {
-  if (plan.value) await planStore.cancel(plan.value.id)
+  if (!plan.value) return
+  try {
+    await planStore.cancel(plan.value.id)
+  } catch (e) {
+    // 取消失败要显式暴露：以前只 console.warn，卡在执行中时用户完全看不出原因
+    alert(`取消失败：${e?.message || e}`)
+  }
+}
+
+/** 从失败/取消处继续执行：已完成的步骤不会重跑 */
+async function resumeExec() {
+  if (!plan.value) return
+  await planStore.execute(plan.value.id, settingStore.settings.streamResponse)
+}
+
+/** 退回待审核以便修改步骤（失败后「修改后重试」） */
+async function reopenForEdit() {
+  if (!plan.value) return
+  try {
+    await planStore.reopen(plan.value.id)
+  } catch (e) {
+    alert(`无法修改计划：${e?.message || e}`)
+  }
 }
 
 function backToChat() {
@@ -207,9 +229,22 @@ function backToChat() {
           <template v-else-if="plan.status === 'running'">
             <button class="btn cancel-btn" @click="cancelExec">取消执行</button>
           </template>
+          <!-- 失败/取消：可从断点继续，也可先改计划再执行 -->
+          <template v-else-if="plan.status === 'failed' || plan.status === 'cancelled'">
+            <p class="resume-hint">
+              <template v-if="plan.status === 'failed'">
+                执行中断了。可以直接重新执行（已完成的步骤不会重跑），也可以先修改计划再执行。
+              </template>
+              <template v-else>计划已取消，已完成的步骤会保留。</template>
+            </p>
+            <button class="btn btn-primary" :disabled="busy" @click="resumeExec">
+              {{ executing ? '执行中...' : '重新执行' }}
+            </button>
+            <button class="btn" :disabled="busy" @click="reopenForEdit">修改后重试</button>
+          </template>
           <template v-else>
             <p class="terminal-hint">
-              计划已结束（{{ STATUS_META[plan.status]?.label }}）。回到聊天重新发送可生成新计划。
+              计划已结束（{{ STATUS_META[plan.status]?.label }}）。
             </p>
             <button class="btn" @click="backToChat">返回聊天</button>
           </template>
@@ -422,6 +457,14 @@ function backToChat() {
   justify-content: center;
   gap: $space-md;
   flex-wrap: wrap;
+}
+
+.resume-hint {
+  flex: 1;
+  margin: 0;
+  font-size: $font-size-xs;
+  color: $color-text-secondary;
+  line-height: 1.5;
 }
 
 .terminal-hint {

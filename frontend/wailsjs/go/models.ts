@@ -1,5 +1,148 @@
 export namespace main {
 	
+	export class AskItem {
+	    questionId?: string;
+	    selected?: string[];
+	    text?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new AskItem(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.questionId = source["questionId"];
+	        this.selected = source["selected"];
+	        this.text = source["text"];
+	    }
+	}
+	export class AskAnswer {
+	    id: string;
+	    sessionId?: string;
+	    answers: AskItem[];
+	    cancelled?: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new AskAnswer(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.sessionId = source["sessionId"];
+	        this.answers = this.convertValues(source["answers"], AskItem);
+	        this.cancelled = source["cancelled"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	
+	export class AskOption {
+	    label: string;
+	    description?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new AskOption(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.label = source["label"];
+	        this.description = source["description"];
+	    }
+	}
+	export class AskQuestion {
+	    id?: string;
+	    header?: string;
+	    question: string;
+	    options?: AskOption[];
+	    multiSelect?: boolean;
+	    allowFreeText: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new AskQuestion(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.header = source["header"];
+	        this.question = source["question"];
+	        this.options = this.convertValues(source["options"], AskOption);
+	        this.multiSelect = source["multiSelect"];
+	        this.allowFreeText = source["allowFreeText"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class AskRequest {
+	    id: string;
+	    sessionId: string;
+	    questions: AskQuestion[];
+	    createdAt: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new AskRequest(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.sessionId = source["sessionId"];
+	        this.questions = this.convertValues(source["questions"], AskQuestion);
+	        this.createdAt = source["createdAt"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
 	export class AuditEntry {
 	    time: number;
 	    sessionId: string;
@@ -410,6 +553,67 @@ export namespace main {
 	        this.protocol = source["protocol"];
 	    }
 	}
+	export class PermissionAskRequest {
+	    id: string;
+	    sessionId: string;
+	    tool: string;
+	    subject: string;
+	    units: string[];
+	    stage: string;
+	    reason: string;
+	    createdAt: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new PermissionAskRequest(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.sessionId = source["sessionId"];
+	        this.tool = source["tool"];
+	        this.subject = source["subject"];
+	        this.units = source["units"];
+	        this.stage = source["stage"];
+	        this.reason = source["reason"];
+	        this.createdAt = source["createdAt"];
+	    }
+	}
+	export class PendingInteraction {
+	    kind: string;
+	    permission?: PermissionAskRequest;
+	    ask?: AskRequest;
+	
+	    static createFrom(source: any = {}) {
+	        return new PendingInteraction(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.kind = source["kind"];
+	        this.permission = this.convertValues(source["permission"], PermissionAskRequest);
+	        this.ask = this.convertValues(source["ask"], AskRequest);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	
 	export class RuleSource {
 	    scope: string;
 	    path: string;

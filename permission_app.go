@@ -97,7 +97,31 @@ type permissionBroker struct {
 
 type permissionPending struct {
 	sessionID string
+	req       PermissionAskRequest
 	ch        chan PermissionAnswer
+}
+
+// setRequest 补全挂起请求的本体（ID 生成后才能写回），供兜底查询使用
+func (b *permissionBroker) setRequest(id string, req PermissionAskRequest) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if p, ok := b.pending[id]; ok {
+		p.req = req
+	}
+}
+
+// Pending 返回某会话挂起的授权请求；没有则返回 nil。
+// 前端在模型运行期间轮询它作为兜底：事件万一没送达，弹窗仍能补上。
+func (b *permissionBroker) Pending(sessionID string) *PermissionAskRequest {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for _, p := range b.pending {
+		if p.sessionID == sessionID {
+			req := p.req
+			return &req
+		}
+	}
+	return nil
 }
 
 // newPermissionBroker 创建回路；timeout<=0 时默认 5 分钟
@@ -120,6 +144,19 @@ func (b *permissionBroker) register(sessionID string) (string, chan PermissionAn
 	}
 	b.pending[id] = &permissionPending{sessionID: sessionID, ch: ch}
 	return id, ch
+}
+
+// PendingCount 当前挂起的请求数（测试与诊断用）
+func (b *permissionBroker) PendingCount(sessionID string) int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	n := 0
+	for _, p := range b.pending {
+		if p.sessionID == sessionID {
+			n++
+		}
+	}
+	return n
 }
 
 // forget 注销挂起请求
@@ -229,6 +266,15 @@ type permissionEnforcer struct {
 // Enforce 判定一次工具调用。
 func (e *permissionEnforcer) Enforce(ctx context.Context, tool ToolInterface, args map[string]interface{}) error {
 	subject := e.subjectFor(tool, args)
+
+	// 命令为空属于**调用错误**（常见于模型把参数写成 command 而不是 cmd），
+	// 直接报错让模型改正即可——不该让用户为一条根本不存在的命令等授权弹窗。
+	// 注意：只有"空"走这条；"有内容但解析不可信"仍然询问（fail closed），别混为一谈。
+	if subject.Kind == SubjectCommand && strings.TrimSpace(subject.Raw) == "" {
+		e.audit(subject, Verdict{Decision: DecisionDeny, Stage: StageInvalid, Reason: "命令为空（参数缺失）"})
+		return fmt.Errorf("命令为空：请检查是否把参数名写成了 cmd")
+	}
+
 	verdict := Authorize(AuthorizeInput{
 		Subject:    subject,
 		Mode:       e.mode,
@@ -306,6 +352,7 @@ func (e *permissionEnforcer) askAndApply(ctx context.Context, subject Subject, v
 		Reason:    verdict.Reason,
 		CreatedAt: time.Now().UnixMilli(),
 	}
+	e.app.permissionBroker.setRequest(id, req)
 	e.app.emitPermissionRequest(req)
 
 	ans, err := e.app.permissionBroker.Wait(id, ch, ctx)
@@ -372,6 +419,10 @@ func (a *App) ensurePermissionState() {
 	if a.permissionBroker == nil {
 		a.permissionBroker = newPermissionBroker(5 * time.Minute)
 	}
+	// 用户提问回路（ask_user）与权限回路共用这个懒初始化入口
+	if a.askBroker == nil {
+		a.askBroker = newAskBroker(10 * time.Minute)
+	}
 }
 
 // newPermissionEnforcer 为一次运行构造网关（规则快照取自当前配置）
@@ -398,10 +449,32 @@ func (a *App) newPermissionEnforcer(session *Session, projectDir string) *permis
 
 // emitPermissionRequest 把授权请求推给前端
 func (a *App) emitPermissionRequest(req PermissionAskRequest) {
-	a.emitChatEvent(ChatEvent{
+	a.emitInteraction(ChatEvent{
 		Type:       ChatEventPermission,
 		Permission: &req,
 	})
+}
+
+// PendingInteraction 该会话当前挂起的交互请求（授权或提问）；没有则返回 nil。
+//
+// 前端在模型运行期间轮询它，作为事件通道的兜底：只要后端在等人，
+// 即使事件因版本错配或时序问题没送达，弹窗也能补上。
+type PendingInteraction struct {
+	Kind       string                `json:"kind"` // permission | ask
+	Permission *PermissionAskRequest `json:"permission,omitempty"`
+	Ask        *AskRequest           `json:"ask,omitempty"`
+}
+
+// GetPendingInteraction 返回该会话挂起的交互请求（bound 方法）
+func (a *App) GetPendingInteraction(sessionID string) *PendingInteraction {
+	a.ensurePermissionState()
+	if p := a.permissionBroker.Pending(sessionID); p != nil {
+		return &PendingInteraction{Kind: "permission", Permission: p}
+	}
+	if q := a.askBroker.Pending(sessionID); q != nil {
+		return &PendingInteraction{Kind: "ask", Ask: q}
+	}
+	return nil
 }
 
 // ResolvePermission 前端应答授权请求

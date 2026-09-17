@@ -193,7 +193,7 @@ export async function updateSession(id, patch) {
  * 后端会持久化所有中间消息（assistant+tool_calls, tool结果, 最终回复）
  * @param {string} sessionId
  * @param {string} query
- * @param {{stream?:boolean, plan?:boolean, onReplyDelta?:Function, onToolCallStart?:Function, onToolCallEnd?:Function, onPlanUpdate?:Function, onPermissionRequest?:Function}} callbacks
+ * @param {{stream?:boolean, plan?:boolean, onReplyDelta?:Function, onToolCallStart?:Function, onToolCallEnd?:Function, onPlanUpdate?:Function, }} callbacks
  * @returns {Promise<{reply:string, toolCalls?:array, messages?:array, plan?:object, error?:string}>}
  */
 export async function chat(
@@ -206,7 +206,6 @@ export async function chat(
     onToolCallStart,
     onToolCallEnd,
     onPlanUpdate,
-    onPermissionRequest,
   } = {}
 ) {
   if (isWails()) {
@@ -226,10 +225,8 @@ export async function chat(
         case 'plan_update':
           onPlanUpdate?.(eventData.plan)
           break
-        case 'permission_request':
-          // 后端此刻阻塞等待答复：前端必须弹出授权弹窗并尽快回传结果
-          onPermissionRequest?.(eventData.permission)
-          break
+        // 授权请求 / 模型提问走独立的 user:interaction 通道（由 App.vue 统一订阅），
+        // 不在这里分发 —— 否则计划执行等入口会漏（详见 api/interaction.js 的说明）
       }
     }
     EventsOn('chat:event', eventHandler)

@@ -7,9 +7,12 @@ import { useDiffStore } from '@/stores/diff'
 import { useSettingStore } from '@/stores/setting'
 import { usePlanStore } from '@/stores/plan'
 import { appendMessage, appendConversation, chat, onDiffUpdate } from '@/api/session'
+import { fetchPendingInteraction } from '@/api/interaction'
 import { DEFAULT_VIEW_MODE } from '@/types'
 import { usePermissionStore } from '@/stores/permissions'
+import { useAskStore } from '@/stores/asks'
 import PermissionDialog from '@/components/business/PermissionDialog.vue'
+import AskUserDialog from '@/components/business/AskUserDialog.vue'
 import PaneHeader from '@/components/layout/PaneHeader.vue'
 import MessageBubble from '@/components/business/MessageBubble.vue'
 import ToolProcess from '@/components/business/ToolProcess.vue'
@@ -21,6 +24,7 @@ const diffStore = useDiffStore()
 const settingStore = useSettingStore()
 const planStore = usePlanStore()
 const permissionStore = usePermissionStore()
+const askStore = useAskStore()
 
 // 计划模式（单次意图，非全局偏好）：开启后下一条消息走规划流程
 const planMode = ref(false)
@@ -33,8 +37,8 @@ onMounted(() => {
 })
 onUnmounted(() => {
   if (offDiff) offDiff()
+  stopInteractionPolling()
 })
-
 const input = ref('')
 const messagesContainer = ref(null)
 const autoScroll = ref(true)
@@ -120,6 +124,45 @@ watch(
     if (autoScroll.value) {
       await nextTick()
       scrollToBottom()
+    }
+  }
+)
+
+// 切换会话时恢复该会话挂起的提问（后端仍在阻塞等待，弹窗必须补回来）
+watch(sessionId, (id) => askStore.loadPending(id), { immediate: true })
+
+// 运行期间轮询“是否有人在等我应答”作为兜底：事件万一没送达（前后端产物版本错配、
+// 运行时时序），弹窗仍然会补出来，而不是让工具卡片一直卡在“运行中”直到超时。
+let interactionTimer = null
+
+function stopInteractionPolling() {
+  if (interactionTimer) {
+    clearInterval(interactionTimer)
+    interactionTimer = null
+  }
+}
+
+async function syncPendingInteraction() {
+  const sid = sessionId.value
+  if (!sid) return
+  const p = await fetchPendingInteraction(sid)
+  if (!p) return
+  if (p.kind === 'permission' && p.permission && permissionStore.pending?.id !== p.permission.id) {
+    permissionStore.setPending(p.permission)
+  } else if (p.kind === 'ask' && p.ask && askStore.pending?.id !== p.ask.id) {
+    askStore.setPending(p.ask)
+  }
+}
+
+// 模型运行（含计划执行）期间才轮询：闲置时不做任何额外请求
+watch(
+  () => chatStore.isGenerating,
+  (generating) => {
+    if (generating) {
+      if (!interactionTimer) interactionTimer = setInterval(syncPendingInteraction, 1200)
+      syncPendingInteraction()
+    } else {
+      stopInteractionPolling()
     }
   }
 )
@@ -231,19 +274,6 @@ async function sendMessage() {
           result: tc.result,
         })
       },
-      onPermissionRequest: (req) => {
-        if (!req) return
-        permissionStore.setPending(req)
-        // 把「当前运行中」的工具卡片标为等待授权。工具循环是串行执行的，
-        // 所以匹配最后一个 running 且同名的卡片是准确的（后端事件里没有工具调用 ID）。
-        const calls = localMsg.toolCalls || []
-        for (let i = calls.length - 1; i >= 0; i--) {
-          if (calls[i].status === 'running' && calls[i].name === req.tool) {
-            chatStore.updateToolCall(localMsg.id, calls[i].id, { status: 'pending' })
-            break
-          }
-        }
-      },
     })
 
     // 4. 移除流式占位消息，用后端持久化的消息替换
@@ -305,7 +335,30 @@ async function sendMessage() {
   }
 }
 
+/**
+ * 把「正在运行」的工具卡片标为等待授权（后端阻塞在授权/提问上）。
+ * 工具循环是串行执行的，所以匹配最后一个同名 running 卡片是准确的
+ * （事件里没有工具调用 ID）；从后往前找也天然适配计划执行期间的多条消息。
+ */
+function markPendingToolCard(tool) {
+  if (!tool) return
+  const msgs = chatStore.messages
+  for (let mi = msgs.length - 1; mi >= 0; mi--) {
+    const calls = msgs[mi].toolCalls || []
+    for (let i = calls.length - 1; i >= 0; i--) {
+      if (calls[i].status === 'running' && calls[i].name === tool) {
+        chatStore.updateToolCall(msgs[mi].id, calls[i].id, { status: 'pending' })
+        return
+      }
+    }
+  }
+}
+
 async function stopGeneration() {
+  // 有挂起的提问：先取消（后端把"用户未作答"回给模型），否则会一直阻塞到超时
+  if (askStore.hasPending) {
+    await askStore.skip(sessionId.value)
+  }
   // 有待应答的授权请求：先取消它（后端按拒绝处理并立刻返回），避免一直挂着
   if (permissionStore.hasPending) {
     await permissionStore.cancel(sessionId.value)
@@ -323,12 +376,21 @@ async function stopGeneration() {
 watch(
   () => permissionStore.pending,
   (val, old) => {
-    if (val || !old || !streamingMessageId.value) return
-    const msg = chatStore.messages.find((m) => m.id === streamingMessageId.value)
-    if (!msg || !msg.toolCalls) return
-    for (const tc of msg.toolCalls) {
-      if (tc.status === 'pending') {
-        chatStore.updateToolCall(msg.id, tc.id, { status: 'running' })
+    // 新的等待授权请求：把对应工具卡片标成"等待授权"（从 store 派生，不再订阅事件——
+    // 事件通道的监听是进程级常驻的，组件卸载时不许去动它）
+    if (val && !old) {
+      markPendingToolCard(val.tool)
+      return
+    }
+    if (val || !old) return
+    // 应答后把卡片还原为「运行中」，终态随后由 tool_call_end 覆盖。
+    // 不依赖 streamingMessageId：计划执行期间它是空的，但卡片同样需要还原。
+    for (const msg of chatStore.messages) {
+      if (!msg.toolCalls) continue
+      for (const tc of msg.toolCalls) {
+        if (tc.status === 'pending') {
+          chatStore.updateToolCall(msg.id, tc.id, { status: 'running' })
+        }
       }
     }
   }
@@ -356,6 +418,9 @@ function openDiff() {
 
     <!-- 授权弹窗：后端此刻阻塞等待答复，超时/取消按拒绝处理 -->
     <PermissionDialog />
+
+    <!-- 模型提问弹窗（ask_user）：答复作为工具结果回到模型手里 -->
+    <AskUserDialog />
 
     <div class="messages scroll-container" ref="messagesContainer" @scroll="handleScroll">
       <div v-if="chatStore.loadingHistory" class="loading-history">历史消息加载中...</div>

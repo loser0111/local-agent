@@ -22,6 +22,16 @@
 - **内置工具会补齐**：`ToolStore` 新增 `ensureBuiltins()`，老用户的 `tools.json` 里缺的新内置工具会在启动时自动追加并落盘。
 - 系统提示词增加了「工具使用偏好」一段，引导模型用 `read_file`/`edit_file` 而不是 `cat`/`sed -i`——否则文件工具做出来了，模型仍走 shell，acceptEdits 的价值也就落空了。
 
+### 后续增量：模型主动提问（ask_user）
+
+补齐的能力：模型不确定怎么实现、不知道某类信息从哪获取、或几种做法需要用户拍板时，可以**主动向用户提问并等待作答**，而不是把问题写在回复里、结束这一轮。答复作为工具结果回填，同一轮对话继续往下走。
+
+- 工具 `ask_user`（`ask.go`）：参数 `questions[1-4]`，每项含 `header` / `question` / `options[0-4]`（label + description）/ `multiSelect` / `allowFreeText`。参数非法时**不打扰用户**，直接把错误回给模型让它改正。
+- 回路 `askBroker`：与权限回路（`permissionBroker`）刻意分开——语义不同（"允许做吗" vs "你想怎么做"），失败方向也不同（权限超时=拒绝；提问超时/取消=**用户未作答**，工具返回可读错误，提示模型自行决策并说明假设，而不是让整轮失败）。超时 10 分钟（比权限的 5 分钟长：提问常需要用户查一下或想一会儿）。
+- 事件与前端：`ChatEvent.Ask`（type=`ask_user`）→ `AskUserDialog.vue` 弹窗（单选点选即提交、多选、自由文本补充、跳过）→ `ResolveAskUser` 回传。切走会话再切回会用 `GetPendingAsk` 把弹窗补回来（否则后端还在阻塞、界面上却什么都没有）。点「停止」会取消挂起提问。
+- 权限侧：`ask_user` 进 `readOnlyTools` 直接放行——它本身就是问用户，再叠一层授权弹窗只会变成连续两个弹窗且毫无安全收益。
+- 直出给模型（`directToolOrder`），模型不必先经 `tool_router` 发现。
+
 ### 六个决策点的落地
 
 | # | 决策点 | 决定 |

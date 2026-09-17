@@ -177,6 +177,46 @@ func (s *PlanStore) ListBySession(sessionID string) []*Plan {
 	return out
 }
 
+// Reopen 把已结束的计划退回待审核，供「修改后重试」使用。
+//
+// 允许对 failed / cancelled / completed 调用；failed / skipped / running 的步骤重置为
+// pending 并清掉失败原因，**已完成的步骤原样保留** —— 所以「接着上次的进度继续」是默认行为，
+// 不会让已经做完的步骤重跑。running 状态拒绝（此时有活跃执行者，应先取消）。
+func (s *PlanStore) Reopen(id string) (*Plan, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	p, ok := s.plans[id]
+	if !ok {
+		return nil, fmt.Errorf("计划不存在: %s", id)
+	}
+	switch p.Status {
+	case PlanFailed, PlanCancelled, PlanCompleted:
+		// 可重开
+	case PlanAwaitingApproval:
+		return p, nil // 已经是可编辑状态，幂等
+	case PlanRunning:
+		return nil, fmt.Errorf("计划正在执行中，请先取消再修改")
+	default:
+		return nil, fmt.Errorf("计划状态不可修改: %s", p.Status)
+	}
+
+	for _, st := range p.Steps {
+		if st.Status == StepDone {
+			continue // 保留进度
+		}
+		st.Status = StepPending
+		st.Error = ""
+		st.StartedAt = 0
+		st.FinishedAt = 0
+	}
+	p.Status = PlanAwaitingApproval
+	if err := s.saveLocked(p); err != nil {
+		return nil, err
+	}
+	return p, nil
+}
+
 // ===== 规划器 =====
 
 const plannerSystemPrompt = `你是任务规划器。把用户的请求拆解为可逐步执行的计划。

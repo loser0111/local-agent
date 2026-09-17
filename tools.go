@@ -259,12 +259,16 @@ type BuildOptions struct {
 	SessionID     string         // 会话 ID（文件改动的归因记录按会话隔离）
 	Changes       *FileChangeLog // 文件改动记录；为 nil 时不记录
 	Enforcer      Enforcer       // 权限网关；为空时装配 fail-closed 的拒绝网关
+	// Ask 用户提问回路（ask_user 工具）：发事件给前端并阻塞等待作答。
+	// 为 nil 时该工具仍会装配，但调用会返回"界面未就绪"——便于测试与降级。
+	Ask func(ctx context.Context, req AskRequest) (AskAnswer, error)
 }
 
 // buildContext 装配期传给内置工具构造函数的上下文
 type buildContext struct {
-	dir     string          // 工作区目录（命令类工具的工作目录）
-	fileCtx fileToolContext // 文件类工具的上下文（目录 + 归因记录）
+	dir     string                             // 工作区目录（命令类工具的工作目录）
+	fileCtx fileToolContext                    // 文件类工具的上下文（目录 + 归因记录）
+	asker   func(ctx context.Context, req AskRequest) (AskAnswer, error) // ask_user 的回路
 }
 
 // newBuiltinTool 构造内置工具。
@@ -290,6 +294,8 @@ func newBuiltinTool(name string, cfg *ToolConfig, bc buildContext) (ToolInterfac
 		return newGrepTool(bc), true
 	case toolListDir:
 		return newListDirTool(bc), true
+	case toolAskUser:
+		return newAskUserTool(bc), true
 	default:
 		return nil, false
 	}
@@ -361,6 +367,7 @@ func (tm *ToolManager) BuildView(ctx context.Context, opts BuildOptions) *Sessio
 			sessionID: opts.SessionID,
 			changes:   opts.Changes,
 		},
+		asker: opts.Ask,
 	}
 
 	for _, cfg := range tm.store.GetAll() {

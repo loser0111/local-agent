@@ -31,6 +31,9 @@ type App struct {
 	permissionAudit  *AuditLog
 	permissionBroker *permissionBroker
 
+	// 用户提问回路（ask_user 工具阻塞等待用户作答）
+	askBroker *askBroker
+
 	// 文件改动归因：文件工具写入时记录 before/after（内存）
 	fileChanges *FileChangeLog
 
@@ -595,16 +598,54 @@ func (a *App) ExecutePlan(planID string, useStream bool) *ChatResult {
 	return a.executePlan(planID, useStream)
 }
 
-// CancelPlan 取消执行中的计划：协作式取消，当前步骤跑完后在下一步边界停止
+// ReopenPlan 把已结束的计划退回待审核（失败后「修改后重试」的入口）。
+// 已完成的步骤保留，失败/跳过/中断的步骤重置为待执行。
+func (a *App) ReopenPlan(planID string) (*Plan, error) {
+	plan, err := a.planStore.Reopen(planID)
+	if err != nil {
+		return nil, err
+	}
+	a.emitPlanUpdate(plan, -1)
+	return plan, nil
+}
+
+// CancelPlan 取消执行中的计划：协作式取消，当前步骤跑完后在下一步边界停止。
+//
+// 若找不到活跃的取消通道（执行协程已异常退出，而计划还停在 running），
+// 则强制把计划收尾为 cancelled —— 否则前端只能重启应用才能脱困。
 func (a *App) CancelPlan(planID string) error {
 	a.planMu.Lock()
-	defer a.planMu.Unlock()
 	ch, ok := a.planCancels[planID]
-	if !ok {
+	if ok {
+		close(ch)
+		delete(a.planCancels, planID)
+	}
+	a.planMu.Unlock()
+
+	if ok {
+		return nil
+	}
+
+	plan, err := a.planStore.Get(planID)
+	if err != nil {
+		return err
+	}
+	if plan.Status != PlanRunning {
 		return fmt.Errorf("计划未在执行中: %s", planID)
 	}
-	close(ch)
-	delete(a.planCancels, planID)
+	for _, st := range plan.Steps {
+		if st.Status == StepRunning {
+			st.Status = StepFailed
+			st.Error = "执行中断（已强制取消）"
+			st.FinishedAt = time.Now().UnixMilli()
+		}
+	}
+	markRemainingSkipped(plan, 0)
+	plan.Status = PlanCancelled
+	if err := a.planStore.Save(plan); err != nil {
+		return err
+	}
+	a.emitPlanUpdate(plan, -1)
 	return nil
 }
 

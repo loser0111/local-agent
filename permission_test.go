@@ -800,3 +800,101 @@ func TestAuthorizePathSubject(t *testing.T) {
 		t.Fatalf("不可信路径主体应询问，实际 %v（stage=%s）", v.Decision, v.Stage)
 	}
 }
+
+// 空命令（模型把参数写成 command 而非 cmd）不该弹窗让用户等 5 分钟，
+// 而应立刻报错让模型改正；"有内容但解析不可信"仍走询问（fail closed）。
+func TestEmptyCommandFailsFastWithoutAsking(t *testing.T) {
+	cases := []map[string]interface{}{
+		{},                        // 完全没给
+		{"command": "rm -rf /"},   // 给错了参数名（真实出现过的模型错误）
+		{"cmd": "   "},            // 只有空白
+	}
+	for i, args := range cases {
+		app := &App{}
+		app.ensurePermissionState()
+		app.ctx = context.Background() // 让"要不要问用户"这条路径可见（否则会因无界面提前失败）
+		e := &permissionEnforcer{app: app, sessionID: "s1", mode: ModeManual}
+
+		start := time.Now()
+		err := e.Enforce(context.Background(), &CLITool{BaseTool: &BaseTool{Name: "exec_shell"}}, args)
+		if err == nil {
+			t.Fatalf("第 %d 组：空命令应报错", i+1)
+		}
+		if strings.Contains(err.Error(), "授权") {
+			t.Errorf("第 %d 组：空命令不应走授权弹窗，实际: %v", i+1, err)
+		}
+		if elapsed := time.Since(start); elapsed > time.Second {
+			t.Errorf("第 %d 组：应立刻返回，实际耗时 %s", i+1, elapsed)
+		}
+		if app.permissionBroker.PendingCount("s1") != 0 {
+			t.Errorf("第 %d 组：不应留下挂起的授权请求", i+1)
+		}
+	}
+
+	// 对照：有内容但引号不闭合 → 仍应询问（fail closed）
+	app := &App{}
+	app.ensurePermissionState()
+	app.ctx = context.Background()
+	e := &permissionEnforcer{app: app, sessionID: "s1", mode: ModeManual}
+	done := make(chan error, 1)
+	go func() {
+		done <- e.Enforce(context.Background(), &CLITool{BaseTool: &BaseTool{Name: "exec_shell"}},
+			map[string]interface{}{"cmd": `echo "unterminated`})
+	}()
+	deadline := time.Now().Add(2 * time.Second)
+	for app.permissionBroker.PendingCount("s1") == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("解析不可信的命令应当进入询问流程")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	// 取消掉这 5 分钟的等待，避免拖慢测试
+	app.permissionBroker.CancelSession("s1")
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("取消后应立即返回")
+	}
+}
+
+// 兜底查询：后端在等人时，前端轮询必须能拿到请求本体（事件没送达也能补弹窗）
+func TestGetPendingInteraction(t *testing.T) {
+	app := &App{}
+	app.ensurePermissionState()
+	app.ctx = context.Background()
+
+	if p := app.GetPendingInteraction("s1"); p != nil {
+		t.Fatalf("没有挂起请求时应返回 nil，实际 %+v", p)
+	}
+
+	// 模型提问
+	_, ch := app.askBroker.register("s1", AskRequest{Questions: []AskQuestion{{Question: "用哪个？"}}})
+	_ = ch
+	p := app.GetPendingInteraction("s1")
+	if p == nil || p.Kind != "ask" || p.Ask == nil {
+		t.Fatalf("应返回挂起的提问，实际 %+v", p)
+	}
+	if len(p.Ask.Questions) != 1 || p.Ask.Questions[0].Question != "用哪个？" {
+		t.Fatalf("提问本体应完整带回（前端要据此渲染弹窗），实际 %+v", p.Ask)
+	}
+	if app.GetPendingInteraction("s2") != nil {
+		t.Fatal("挂起请求应按会话隔离")
+	}
+
+	// 授权请求（与提问同时挂起时优先返回授权：它卡住的是执行，更紧急）
+	id, _ := app.permissionBroker.register("s1")
+	app.permissionBroker.setRequest(id, PermissionAskRequest{
+		ID: id, SessionID: "s1", Tool: "exec_shell", Subject: "rm -rf build", Stage: "fallback-ask", Reason: "需要确认",
+	})
+	p = app.GetPendingInteraction("s1")
+	if p == nil || p.Kind != "permission" || p.Permission == nil || p.Permission.Subject != "rm -rf build" {
+		t.Fatalf("应优先返回挂起的授权请求，实际 %+v", p)
+	}
+
+	// 注销后不再返回
+	app.permissionBroker.forget(id)
+	app.askBroker.forget("")
+	if p := app.GetPendingInteraction("s1"); p == nil || p.Kind != "ask" {
+		t.Fatalf("授权注销后应回落到提问，实际 %+v", p)
+	}
+}

@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
-import { getPlan, savePlan, executePlan, cancelPlan } from '@/api/plan'
+import { getPlan, savePlan, executePlan, cancelPlan, reopenPlan } from '@/api/plan'
 import { useChatStore } from '@/stores/chat'
 
 /**
@@ -161,6 +161,17 @@ export const usePlanStore = defineStore('plan', () => {
   }
 
   /**
+   * 把已结束的计划退回待审核（失败后「修改后重试」）：
+   * 已完成步骤保留，失败/跳过步骤重置为待执行，随后即可编辑并再次批准执行。
+   * @param {string} planId
+   */
+  async function reopen(planId) {
+    const p = await reopenPlan(planId)
+    plan.value = p
+    return p
+  }
+
+  /**
    * 取消执行中的计划
    */
   async function cancel(planId) {
@@ -182,6 +193,7 @@ export const usePlanStore = defineStore('plan', () => {
     applyUpdate,
     save,
     execute,
+    reopen,
     cancel,
     reset,
   }

@@ -37,7 +37,7 @@ const (
 // directToolOrder 直出给模型的工具顺序（固定顺序便于断言与提示缓存）。
 // 其余工具（MCP / 自定义 CLI / API）仍经 tool_router 发现，避免 prompt 膨胀。
 var directToolOrder = []string{
-	toolReadFile, toolWriteFile, toolEditFile, toolGlob, toolGrep, toolListDir,
+	toolReadFile, toolWriteFile, toolEditFile, toolGlob, toolGrep, toolListDir, toolAskUser,
 }
 
 // 各类上限：避免一次工具调用把上下文或内存撑爆

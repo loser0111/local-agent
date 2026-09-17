@@ -197,6 +197,19 @@ func defaultTools() []*ToolConfig {
 			},
 		},
 		{
+			ID:          "ask_user",
+			Name:        "ask_user",
+			Label:       "向用户提问",
+			Description: "模型缺少关键信息或有多种做法需要用户拍板时，向用户提问并等待作答",
+			Type:        ToolTypeBuiltin,
+			Icon:        "message-square",
+			Enabled:     true,
+			Builtin:     true,
+			Parameters: []ToolParamConfig{
+				{Name: "questions", Description: "问题列表（1-4 个），每项含 question / header / options / multiSelect", Required: true},
+			},
+		},
+		{
 			ID:          "list_dir",
 			Name:        "list_dir",
 			Label:       "列出目录",
