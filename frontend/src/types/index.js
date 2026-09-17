@@ -103,22 +103,73 @@
  */
 
 /**
- * 技能元数据（L1，常驻 system prompt 的部分）
- * @typedef {Object} SkillMeta
- * @property {string} id 技能目录名，唯一主键
- * @property {string} name frontmatter.name
- * @property {string} description frontmatter.description
- * @property {string} dir 技能目录绝对路径
- * @property {boolean} enabled 全局启用开关
- * @property {boolean} alwaysInject true=正文直接注入 system prompt
- * @property {boolean} builtin 内置不可删
- * @property {boolean} hasScripts 是否存在 scripts/ 目录
- * @property {string} error 解析/校验错误
+ * 技能内一个可读资源（L3）
+ * @typedef {Object} SkillResource
+ * @property {string} path 相对技能目录的路径，如 references/api.md
+ * @property {number} size 字节数
+ * @property {'scripts'|'references'|'assets'|'other'} kind 归类
  */
 
 /**
- * 技能详情（含 SKILL.md 正文，L2 按需加载）
- * @typedef {SkillMeta & {body: string}} SkillDetail
+ * 技能安装来源（手动创建的技能没有该字段）
+ * @typedef {Object} SkillInstallInfo
+ * @property {'folder'|'zip'|'git'|'manual'} sourceType
+ * @property {string} [source] 原始路径或 git URL
+ * @property {string} [ref] git 分支/标签
+ * @property {string} [subdir] 仓库内子目录
+ * @property {number} [installedAt] Unix 秒
+ * @property {boolean} canUpdate git 来源可重新拉取
+ */
+
+/**
+ * 技能元数据（L1；进入 system prompt 的只有 id 与 description）
+ * @typedef {Object} SkillMeta
+ * @property {string} id 技能目录名，唯一主键
+ * @property {string} name frontmatter.name（缺失时为目录名）
+ * @property {string} description frontmatter.description，模型据此判断是否触发
+ * @property {string} dir 技能目录绝对路径
+ * @property {boolean} enabled 全局启用开关
+ * @property {boolean} builtin 内置不可删
+ * @property {string} [version] frontmatter.version
+ * @property {string} [license] frontmatter.license
+ * @property {string} [author] frontmatter.author
+ * @property {string[]} [allowedTools] frontmatter.allowed-tools
+ * @property {boolean} disableModelInvocation true=模型不可自动触发，仅允许 /名称 显式调用
+ * @property {boolean} userInvocable false=不允许 /名称 显式调用
+ * @property {boolean} hasScripts 是否存在 scripts/ 目录
+ * @property {SkillResource[]} [resources] 技能内可读资源（L3）
+ * @property {string[]} [errors] 阻断性错误（界面标红、不参与路由）
+ * @property {string[]} [warnings] 提示性告警（不影响使用）
+ * @property {SkillInstallInfo} [install] 安装来源
+ */
+
+/**
+ * 技能详情（含 SKILL.md 正文与完整 frontmatter，L2 按需加载）
+ * @typedef {SkillMeta & {body: string, frontmatter?: Object}} SkillDetail
+ */
+
+/**
+ * 保存技能的表单（编辑器提交）
+ * @typedef {Object} SkillDraft
+ * @property {string} name
+ * @property {string} description
+ * @property {string} [version]
+ * @property {string} [license]
+ * @property {string} [author]
+ * @property {string[]} [allowedTools]
+ * @property {boolean} [disableModelInvocation]
+ * @property {boolean} userInvocable
+ * @property {string} body
+ */
+
+/**
+ * 安装结果
+ * @typedef {Object} SkillInstallResult
+ * @property {string} id
+ * @property {string} name
+ * @property {string} dir
+ * @property {'installed'|'updated'} action
+ * @property {string[]} [warnings]
  */
 
 /**

@@ -218,7 +218,7 @@ func toAnthropicTools(tools []LLMTool) []anthropicTool {
 		out = append(out, anthropicTool{
 			Name:        name,
 			Description: t.Function.Description,
-			InputSchema: toAnthropicInputSchema(t.Function.Parameters),
+			InputSchema: inputSchemaFor(t.Function.Parameters),
 		})
 	}
 	if len(out) == 0 {
@@ -227,28 +227,20 @@ func toAnthropicTools(tools []LLMTool) []anthropicTool {
 	return out
 }
 
-// toAnthropicInputSchema 手工构造 input_schema，避免 required/properties 为 null
-// 被严格网关拒绝。
-func toAnthropicInputSchema(p *LLMToolParams) map[string]interface{} {
-	schema := map[string]interface{}{"type": "object"}
-	if p == nil {
-		return schema
+// inputSchemaFor 把工具的 JSON Schema 直通给 Anthropic（它本身就吃标准 JSON Schema，
+// 与 OpenAI 的形状一致），因此不再做任何裁剪——enum/items/嵌套/required 都保留。
+// 只兜底两件事：必须是对象、必须有 type（部分 server 会省略）。
+func inputSchemaFor(raw json.RawMessage) map[string]interface{} {
+	schema := map[string]interface{}{}
+	if len(raw) > 0 {
+		_ = json.Unmarshal(raw, &schema)
 	}
-	if p.Type != "" {
-		schema["type"] = p.Type
+	if len(schema) == 0 {
+		return map[string]interface{}{"type": "object", "properties": map[string]interface{}{}}
 	}
-	if len(p.Required) > 0 {
-		schema["required"] = p.Required
+	if _, ok := schema["type"]; !ok {
+		schema["type"] = "object"
 	}
-	props := make(map[string]interface{}, len(p.Properties))
-	for k, v := range p.Properties {
-		prop := map[string]interface{}{"type": v.Type}
-		if v.Description != "" {
-			prop["description"] = v.Description
-		}
-		props[k] = prop
-	}
-	schema["properties"] = props
 	return schema
 }
 

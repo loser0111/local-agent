@@ -258,7 +258,7 @@ func TestAskUserAssembledAndAllowed(t *testing.T) {
 	if !names[toolAskUser] {
 		t.Fatalf("ask_user 应直出给模型，实际: %v", names)
 	}
-	if askDef == nil || askDef.Function.Parameters == nil || len(askDef.Function.Parameters.Required) == 0 {
+	if askDef == nil || len(schemaRequired(t, askDef.Function.Parameters)) == 0 {
 		t.Fatalf("ask_user 的必填参数缺失: %+v", askDef)
 	}
 

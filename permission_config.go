@@ -113,28 +113,28 @@ func LoadRuleSet(userDir, projectDir string) (*RuleSet, []RuleSource, []string) 
 			continue
 		}
 
-		src := RuleSource{Scope: scope, Path: path}
+		layer := RuleSource{Scope: scope, Path: path}
 		cfg, err := loadPermissionConfig(path)
 		if err != nil {
 			warnings = append(warnings, fmt.Sprintf("%s 层权限配置被跳过：%v", scopeLabel(scope), err))
-			sources = append(sources, src)
+			sources = append(sources, layer)
 			continue
 		}
 		if cfg == nil {
-			sources = append(sources, src)
+			sources = append(sources, layer)
 			continue
 		}
 
-		src.Exist = true
-		src.Mode = cfg.Mode
+		layer.Exist = true
+		layer.Mode = cfg.Mode
 		if strings.TrimSpace(cfg.Mode) != "" {
 			mode = cfg.Mode // 标量覆盖：后层覆盖前层
 		}
 
-		src.Deny, warnings = appendRules(&set.Deny, cfg.Deny, path, warnings)
-		src.Ask, warnings = appendRules(&set.Ask, cfg.Ask, path, warnings)
-		src.Allow, warnings = appendRules(&set.Allow, cfg.Allow, path, warnings)
-		sources = append(sources, src)
+		layer.Deny, warnings = appendRules(&set.Deny, cfg.Deny, path, warnings)
+		layer.Ask, warnings = appendRules(&set.Ask, cfg.Ask, path, warnings)
+		layer.Allow, warnings = appendRules(&set.Allow, cfg.Allow, path, warnings)
+		sources = append(sources, layer)
 	}
 
 	if mode != "" {

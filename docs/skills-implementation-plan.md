@@ -1,5 +1,9 @@
 # Claude Code 式 Skills（技能）能力实现方案（开发依据）
 
+> **[已归档]** 本文档描述的是第一版实现方案，已被 `docs/skills-refactor.md` 中的标准对齐重构取代。
+> 与本文件冲突之处（尤其是「强制注入正文」`alwaysInject`、手写 frontmatter 解析、单一技能根目录）一律以新文档为准。
+> 保留本文件仅作为设计历史参考。
+
 > - 项目：`E:\learn\local-agent`（Wails v2 + Go 后端 + Vue 3 前端）
 > - 状态：待实施
 > - 用途：为 local-agent 引入对标 Claude Code 的 **Skills（技能）** 能力。本文档为后续开发的唯一依据，包含机制解析、数据契约、完整代码、边界与验收标准。

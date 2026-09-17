@@ -70,6 +70,10 @@ export function ExecutePlan(arg1, arg2) {
   return window['go']['main']['App']['ExecutePlan'](arg1, arg2);
 }
 
+export function ExportMCPServers(arg1) {
+  return window['go']['main']['App']['ExportMCPServers'](arg1);
+}
+
 export function GetDiff(arg1) {
   return window['go']['main']['App']['GetDiff'](arg1);
 }
@@ -130,12 +134,32 @@ export function Greet(arg1) {
   return window['go']['main']['App']['Greet'](arg1);
 }
 
+export function ImportMCPServers(arg1) {
+  return window['go']['main']['App']['ImportMCPServers'](arg1);
+}
+
+export function InstallSkillFromFolder(arg1) {
+  return window['go']['main']['App']['InstallSkillFromFolder'](arg1);
+}
+
+export function InstallSkillFromGit(arg1, arg2, arg3) {
+  return window['go']['main']['App']['InstallSkillFromGit'](arg1, arg2, arg3);
+}
+
+export function InstallSkillFromZip(arg1) {
+  return window['go']['main']['App']['InstallSkillFromZip'](arg1);
+}
+
 export function ListPlans(arg1) {
   return window['go']['main']['App']['ListPlans'](arg1);
 }
 
 export function ListSessions() {
   return window['go']['main']['App']['ListSessions']();
+}
+
+export function ListSkillResources(arg1) {
+  return window['go']['main']['App']['ListSkillResources'](arg1);
 }
 
 export function ListSkills() {
@@ -148,6 +172,14 @@ export function ListTools() {
 
 export function PickDirectory() {
   return window['go']['main']['App']['PickDirectory']();
+}
+
+export function PickSkillFolder() {
+  return window['go']['main']['App']['PickSkillFolder']();
+}
+
+export function PickSkillZip() {
+  return window['go']['main']['App']['PickSkillZip']();
 }
 
 export function RefreshSkills() {
@@ -174,20 +206,24 @@ export function SavePlan(arg1) {
   return window['go']['main']['App']['SavePlan'](arg1);
 }
 
-export function SaveSkill(arg1, arg2, arg3, arg4) {
-  return window['go']['main']['App']['SaveSkill'](arg1, arg2, arg3, arg4);
+export function SaveSkill(arg1, arg2) {
+  return window['go']['main']['App']['SaveSkill'](arg1, arg2);
 }
 
 export function SaveTool(arg1) {
   return window['go']['main']['App']['SaveTool'](arg1);
 }
 
+export function SetExposure(arg1, arg2) {
+  return window['go']['main']['App']['SetExposure'](arg1, arg2);
+}
+
 export function SetSessionPermissionMode(arg1, arg2) {
   return window['go']['main']['App']['SetSessionPermissionMode'](arg1, arg2);
 }
 
-export function SetSkillAlwaysInject(arg1, arg2) {
-  return window['go']['main']['App']['SetSkillAlwaysInject'](arg1, arg2);
+export function SetSubToolEnabled(arg1, arg2, arg3) {
+  return window['go']['main']['App']['SetSubToolEnabled'](arg1, arg2, arg3);
 }
 
 export function SkillsDir() {
@@ -216,4 +252,8 @@ export function UpdateModel(arg1, arg2) {
 
 export function UpdateSession(arg1, arg2) {
   return window['go']['main']['App']['UpdateSession'](arg1, arg2);
+}
+
+export function UpdateSkill(arg1) {
+  return window['go']['main']['App']['UpdateSkill'](arg1);
 }

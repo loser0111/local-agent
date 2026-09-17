@@ -171,6 +171,20 @@ export namespace main {
 	        this.source = source["source"];
 	    }
 	}
+	export class CLIConfig {
+	    command: string;
+	    timeout?: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new CLIConfig(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.command = source["command"];
+	        this.timeout = source["timeout"];
+	    }
+	}
 	export class PlanStep {
 	    index: number;
 	    title: string;
@@ -516,6 +530,95 @@ export namespace main {
 	        this.createdAt = source["createdAt"];
 	    }
 	}
+	export class HTTPConfig {
+	    method?: string;
+	    url: string;
+	    headers?: Record<string, string>;
+	    body?: string;
+	    timeout?: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new HTTPConfig(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.method = source["method"];
+	        this.url = source["url"];
+	        this.headers = source["headers"];
+	        this.body = source["body"];
+	        this.timeout = source["timeout"];
+	    }
+	}
+	export class MCPConfig {
+	    type?: string;
+	    url?: string;
+	    headers?: Record<string, string>;
+	    command?: string;
+	    args?: string[];
+	    env?: Record<string, string>;
+	
+	    static createFrom(source: any = {}) {
+	        return new MCPConfig(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.type = source["type"];
+	        this.url = source["url"];
+	        this.headers = source["headers"];
+	        this.command = source["command"];
+	        this.args = source["args"];
+	        this.env = source["env"];
+	    }
+	}
+	export class MCPImportSkip {
+	    name: string;
+	    reason: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new MCPImportSkip(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.name = source["name"];
+	        this.reason = source["reason"];
+	    }
+	}
+	export class MCPImportResult {
+	    imported: string[];
+	    skipped: MCPImportSkip[];
+	
+	    static createFrom(source: any = {}) {
+	        return new MCPImportResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.imported = source["imported"];
+	        this.skipped = this.convertValues(source["skipped"], MCPImportSkip);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	
 	export class MCPToolMeta {
 	    name: string;
 	    description: string;
@@ -810,17 +913,94 @@ export namespace main {
 	        this.project = source["project"];
 	    }
 	}
+	export class SkillFrontmatter {
+	    name: string;
+	    description: string;
+	    version?: string;
+	    license?: string;
+	    author?: string;
+	    allowedTools?: string[];
+	    disableModelInvocation: boolean;
+	    userInvocable: boolean;
+	    metadata?: Record<string, any>;
+	    extra?: Record<string, any>;
+	
+	    static createFrom(source: any = {}) {
+	        return new SkillFrontmatter(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.name = source["name"];
+	        this.description = source["description"];
+	        this.version = source["version"];
+	        this.license = source["license"];
+	        this.author = source["author"];
+	        this.allowedTools = source["allowedTools"];
+	        this.disableModelInvocation = source["disableModelInvocation"];
+	        this.userInvocable = source["userInvocable"];
+	        this.metadata = source["metadata"];
+	        this.extra = source["extra"];
+	    }
+	}
+	export class SkillInstallInfo {
+	    sourceType: string;
+	    source?: string;
+	    ref?: string;
+	    subdir?: string;
+	    installedAt?: number;
+	    canUpdate: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new SkillInstallInfo(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.sourceType = source["sourceType"];
+	        this.source = source["source"];
+	        this.ref = source["ref"];
+	        this.subdir = source["subdir"];
+	        this.installedAt = source["installedAt"];
+	        this.canUpdate = source["canUpdate"];
+	    }
+	}
+	export class SkillResource {
+	    path: string;
+	    size: number;
+	    kind: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new SkillResource(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.path = source["path"];
+	        this.size = source["size"];
+	        this.kind = source["kind"];
+	    }
+	}
 	export class SkillDetail {
 	    id: string;
 	    name: string;
 	    description: string;
 	    dir: string;
 	    enabled: boolean;
-	    alwaysInject: boolean;
 	    builtin: boolean;
+	    version?: string;
+	    license?: string;
+	    author?: string;
+	    allowedTools?: string[];
+	    disableModelInvocation: boolean;
+	    userInvocable: boolean;
 	    hasScripts: boolean;
-	    error: string;
+	    resources?: SkillResource[];
+	    errors?: string[];
+	    warnings?: string[];
+	    install?: SkillInstallInfo;
 	    body: string;
+	    frontmatter?: SkillFrontmatter;
 	
 	    static createFrom(source: any = {}) {
 	        return new SkillDetail(source);
@@ -833,90 +1013,20 @@ export namespace main {
 	        this.description = source["description"];
 	        this.dir = source["dir"];
 	        this.enabled = source["enabled"];
-	        this.alwaysInject = source["alwaysInject"];
 	        this.builtin = source["builtin"];
+	        this.version = source["version"];
+	        this.license = source["license"];
+	        this.author = source["author"];
+	        this.allowedTools = source["allowedTools"];
+	        this.disableModelInvocation = source["disableModelInvocation"];
+	        this.userInvocable = source["userInvocable"];
 	        this.hasScripts = source["hasScripts"];
-	        this.error = source["error"];
+	        this.resources = this.convertValues(source["resources"], SkillResource);
+	        this.errors = source["errors"];
+	        this.warnings = source["warnings"];
+	        this.install = this.convertValues(source["install"], SkillInstallInfo);
 	        this.body = source["body"];
-	    }
-	}
-	export class SkillMeta {
-	    id: string;
-	    name: string;
-	    description: string;
-	    dir: string;
-	    enabled: boolean;
-	    alwaysInject: boolean;
-	    builtin: boolean;
-	    hasScripts: boolean;
-	    error: string;
-	
-	    static createFrom(source: any = {}) {
-	        return new SkillMeta(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.id = source["id"];
-	        this.name = source["name"];
-	        this.description = source["description"];
-	        this.dir = source["dir"];
-	        this.enabled = source["enabled"];
-	        this.alwaysInject = source["alwaysInject"];
-	        this.builtin = source["builtin"];
-	        this.hasScripts = source["hasScripts"];
-	        this.error = source["error"];
-	    }
-	}
-	
-	export class ToolParamConfig {
-	    name: string;
-	    description: string;
-	    required: boolean;
-	
-	    static createFrom(source: any = {}) {
-	        return new ToolParamConfig(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.name = source["name"];
-	        this.description = source["description"];
-	        this.required = source["required"];
-	    }
-	}
-	export class ToolConfig {
-	    id: string;
-	    name: string;
-	    label: string;
-	    description: string;
-	    type: string;
-	    icon: string;
-	    enabled: boolean;
-	    builtin: boolean;
-	    parameters: ToolParamConfig[];
-	    config: number[];
-	    disabledTools: string[];
-	    discovered: MCPToolMeta[];
-	
-	    static createFrom(source: any = {}) {
-	        return new ToolConfig(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.id = source["id"];
-	        this.name = source["name"];
-	        this.label = source["label"];
-	        this.description = source["description"];
-	        this.type = source["type"];
-	        this.icon = source["icon"];
-	        this.enabled = source["enabled"];
-	        this.builtin = source["builtin"];
-	        this.parameters = this.convertValues(source["parameters"], ToolParamConfig);
-	        this.config = source["config"];
-	        this.disabledTools = source["disabledTools"];
-	        this.discovered = this.convertValues(source["discovered"], MCPToolMeta);
+	        this.frontmatter = this.convertValues(source["frontmatter"], SkillFrontmatter);
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -937,6 +1047,120 @@ export namespace main {
 		    return a;
 		}
 	}
+	export class SkillDraft {
+	    name: string;
+	    description: string;
+	    version?: string;
+	    license?: string;
+	    author?: string;
+	    allowedTools?: string[];
+	    disableModelInvocation?: boolean;
+	    userInvocable: boolean;
+	    body: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new SkillDraft(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.name = source["name"];
+	        this.description = source["description"];
+	        this.version = source["version"];
+	        this.license = source["license"];
+	        this.author = source["author"];
+	        this.allowedTools = source["allowedTools"];
+	        this.disableModelInvocation = source["disableModelInvocation"];
+	        this.userInvocable = source["userInvocable"];
+	        this.body = source["body"];
+	    }
+	}
+	
+	
+	export class SkillInstallResult {
+	    id: string;
+	    name: string;
+	    dir: string;
+	    action: string;
+	    warnings?: string[];
+	
+	    static createFrom(source: any = {}) {
+	        return new SkillInstallResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.name = source["name"];
+	        this.dir = source["dir"];
+	        this.action = source["action"];
+	        this.warnings = source["warnings"];
+	    }
+	}
+	export class SkillMeta {
+	    id: string;
+	    name: string;
+	    description: string;
+	    dir: string;
+	    enabled: boolean;
+	    builtin: boolean;
+	    version?: string;
+	    license?: string;
+	    author?: string;
+	    allowedTools?: string[];
+	    disableModelInvocation: boolean;
+	    userInvocable: boolean;
+	    hasScripts: boolean;
+	    resources?: SkillResource[];
+	    errors?: string[];
+	    warnings?: string[];
+	    install?: SkillInstallInfo;
+	
+	    static createFrom(source: any = {}) {
+	        return new SkillMeta(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.name = source["name"];
+	        this.description = source["description"];
+	        this.dir = source["dir"];
+	        this.enabled = source["enabled"];
+	        this.builtin = source["builtin"];
+	        this.version = source["version"];
+	        this.license = source["license"];
+	        this.author = source["author"];
+	        this.allowedTools = source["allowedTools"];
+	        this.disableModelInvocation = source["disableModelInvocation"];
+	        this.userInvocable = source["userInvocable"];
+	        this.hasScripts = source["hasScripts"];
+	        this.resources = this.convertValues(source["resources"], SkillResource);
+	        this.errors = source["errors"];
+	        this.warnings = source["warnings"];
+	        this.install = this.convertValues(source["install"], SkillInstallInfo);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	
+	
 	export class ToolFileChange {
 	    time: number;
 	    tool: string;
@@ -997,19 +1221,38 @@ export namespace main {
 	        this.error = source["error"];
 	    }
 	}
+	export class ToolParamConfig {
+	    name: string;
+	    description: string;
+	    required: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new ToolParamConfig(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.name = source["name"];
+	        this.description = source["description"];
+	        this.required = source["required"];
+	    }
+	}
 	export class ToolInfo {
 	    id: string;
 	    name: string;
-	    label: string;
-	    description: string;
-	    type: string;
-	    icon: string;
+	    label?: string;
+	    description?: string;
+	    kind: string;
+	    icon?: string;
 	    enabled: boolean;
-	    builtin: boolean;
-	    parameters: ToolParamConfig[];
-	    config: number[];
-	    disabledTools: string[];
-	    discovered: MCPToolMeta[];
+	    builtin?: boolean;
+	    exposure?: string;
+	    parameters?: ToolParamConfig[];
+	    cli?: CLIConfig;
+	    http?: HTTPConfig;
+	    mcp?: MCPConfig;
+	    disabledTools?: string[];
+	    discovered?: MCPToolMeta[];
 	    status: ToolRuntimeStatus;
 	
 	    static createFrom(source: any = {}) {
@@ -1022,12 +1265,15 @@ export namespace main {
 	        this.name = source["name"];
 	        this.label = source["label"];
 	        this.description = source["description"];
-	        this.type = source["type"];
+	        this.kind = source["kind"];
 	        this.icon = source["icon"];
 	        this.enabled = source["enabled"];
 	        this.builtin = source["builtin"];
+	        this.exposure = source["exposure"];
 	        this.parameters = this.convertValues(source["parameters"], ToolParamConfig);
-	        this.config = source["config"];
+	        this.cli = this.convertValues(source["cli"], CLIConfig);
+	        this.http = this.convertValues(source["http"], HTTPConfig);
+	        this.mcp = this.convertValues(source["mcp"], MCPConfig);
 	        this.disabledTools = source["disabledTools"];
 	        this.discovered = this.convertValues(source["discovered"], MCPToolMeta);
 	        this.status = this.convertValues(source["status"], ToolRuntimeStatus);
@@ -1052,6 +1298,65 @@ export namespace main {
 		}
 	}
 	
+	
+	export class ToolSource {
+	    id: string;
+	    name: string;
+	    label?: string;
+	    description?: string;
+	    kind: string;
+	    icon?: string;
+	    enabled: boolean;
+	    builtin?: boolean;
+	    exposure?: string;
+	    parameters?: ToolParamConfig[];
+	    cli?: CLIConfig;
+	    http?: HTTPConfig;
+	    mcp?: MCPConfig;
+	    disabledTools?: string[];
+	    discovered?: MCPToolMeta[];
+	
+	    static createFrom(source: any = {}) {
+	        return new ToolSource(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.name = source["name"];
+	        this.label = source["label"];
+	        this.description = source["description"];
+	        this.kind = source["kind"];
+	        this.icon = source["icon"];
+	        this.enabled = source["enabled"];
+	        this.builtin = source["builtin"];
+	        this.exposure = source["exposure"];
+	        this.parameters = this.convertValues(source["parameters"], ToolParamConfig);
+	        this.cli = this.convertValues(source["cli"], CLIConfig);
+	        this.http = this.convertValues(source["http"], HTTPConfig);
+	        this.mcp = this.convertValues(source["mcp"], MCPConfig);
+	        this.disabledTools = source["disabledTools"];
+	        this.discovered = this.convertValues(source["discovered"], MCPToolMeta);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
 
 }
 

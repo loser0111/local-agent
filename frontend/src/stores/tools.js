@@ -1,6 +1,16 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
-import { fetchTools, saveTool, deleteTool, toggleTool, testToolConnection } from '@/api/tool'
+import {
+  fetchTools,
+  saveTool,
+  deleteTool,
+  toggleTool,
+  testToolConnection,
+  importMCPServers,
+  exportMCPServers,
+  setSubToolEnabled as apiSetSubToolEnabled,
+  setExposure as apiSetExposure,
+} from '@/api/tool'
 
 /**
  * 工具配置 Store
@@ -37,7 +47,7 @@ export const useToolsStore = defineStore('tools', () => {
     if (idx > -1) {
       tools.value[idx] = { ...tools.value[idx], ...saved }
     } else {
-      tools.value.push({ ...saved, status: saved.status || { connected: saved.type !== 'mcp', toolCount: 0, error: '' } })
+      tools.value.push({ ...saved, status: saved.status || { connected: saved.kind !== 'mcp', toolCount: 0, error: '' } })
     }
     return saved
   }
@@ -74,6 +84,47 @@ export const useToolsStore = defineStore('tools', () => {
     loaded.value = false
   }
 
+  /**
+   * 启用/停用某个 MCP 子工具；成功后刷新列表（状态以服务端为准，不做乐观更新）
+   * @param {string} id 来源 ID
+   * @param {string} tool 服务器上的原始工具名
+   * @param {boolean} enabled
+   */
+  async function setSubTool(id, tool, enabled) {
+    await apiSetSubToolEnabled(id, tool, enabled)
+    await load(true)
+  }
+
+  /**
+   * 设置来源的暴露策略
+   * @param {string} id
+   * @param {string} exposure direct | router | internal
+   */
+  async function setExposure(id, exposure) {
+    await apiSetExposure(id, exposure)
+    await load(true)
+  }
+
+  /**
+   * 导入官方 mcpServers 片段；导入后刷新列表（新条目要立刻出现在界面上）
+   * @param {string} raw
+   */
+  async function importMCP(raw) {
+    const result = await importMCPServers(raw)
+    if (result?.imported?.length) {
+      await load(true)
+    }
+    return result
+  }
+
+  /**
+   * 导出 MCP 配置为官方片段
+   * @param {string[]} names
+   */
+  function exportMCP(names = []) {
+    return exportMCPServers(names)
+  }
+
   return {
     tools,
     loading,
@@ -84,6 +135,10 @@ export const useToolsStore = defineStore('tools', () => {
     remove,
     toggle,
     testConnection,
+    importMCP,
+    exportMCP,
+    setSubTool,
+    setExposure,
     clear,
   }
 })

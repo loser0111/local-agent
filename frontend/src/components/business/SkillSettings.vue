@@ -9,24 +9,33 @@ import {
   ChevronDown,
   ChevronRight,
   BookOpen,
-  Pin,
   FileCode2,
   FolderOpen,
   AlertTriangle,
+  Download,
+  GitBranch,
+  EyeOff,
+  ArrowUpCircle,
 } from 'lucide-vue-next'
 import SkillEditDialog from './SkillEditDialog.vue'
+import SkillInstallDialog from './SkillInstallDialog.vue'
 import { useSkillsStore } from '@/stores/skills'
+import { useUiStore } from '@/stores/ui'
 import { skillsDir } from '@/api/skill'
 
 const store = useSkillsStore()
+const ui = useUiStore()
 
 const keyword = ref('')
 const dialogVisible = ref(false)
+const installVisible = ref(false)
 const editingSkill = ref(null)
 const dir = ref('')
 const expanded = ref({})
 const previewBody = ref({})
+const previewResources = ref({})
 const previewLoading = ref({})
+const updatingId = ref('')
 
 const filtered = computed(() => {
   const kw = keyword.value.trim().toLowerCase()
@@ -62,24 +71,41 @@ async function handleToggle(s) {
   try {
     await store.toggle(s.id, !s.enabled)
   } catch (e) {
-    alert(`切换失败：${e.message || e}`)
+    ui.notify(`切换失败：${e.message || e}`, 'error')
   }
 }
 
-async function handleAlwaysInject(s) {
+async function handleUpdate(s) {
+  const ok = await ui.ask({
+    title: '更新技能',
+    message: `将从 ${s.install?.source || '原仓库'} 重新拉取技能「${s.name}」。\n失败时旧版本会保留。`,
+    confirmText: '更新',
+  })
+  if (!ok) return
+  updatingId.value = s.id
   try {
-    await store.setAlwaysInject(s.id, !s.alwaysInject)
+    const r = await store.update(s.id)
+    const warns = (r?.warnings || []).length
+    ui.notify(`技能 ${r?.id || s.id} 已更新到最新版本${warns ? `（${warns} 项告警，展开可见）` : ''}`, 'success')
   } catch (e) {
-    alert(`设置失败：${e.message || e}`)
+    ui.notify(`更新失败：${e.message || e}`, 'error')
+  } finally {
+    updatingId.value = ''
   }
 }
 
 async function handleDelete(s) {
-  if (!confirm(`确定删除技能「${s.name}」吗？将删除整个目录：\n${s.dir || s.id}`)) return
+  const fromGit = s.install?.sourceType === 'git'
+  const ok = await ui.ask({
+    title: fromGit ? '卸载技能' : '删除技能',
+    message: `确定${fromGit ? '卸载' : '删除'}技能「${s.name}」吗？将删除整个目录：\n${s.dir || s.id}`,
+    confirmText: fromGit ? '卸载' : '删除',
+  })
+  if (!ok) return
   try {
     await store.remove(s.id)
   } catch (e) {
-    alert(`删除失败：${e.message || e}`)
+    ui.notify(`删除失败：${e.message || e}`, 'error')
   }
 }
 
@@ -95,12 +121,21 @@ async function toggleExpand(s) {
     try {
       const detail = await store.detail(s.id)
       previewBody.value[s.id] = detail.body || '（空正文）'
+      previewResources.value[s.id] = detail.resources || []
     } catch (e) {
       previewBody.value[s.id] = `读取失败：${e.message || e}`
     } finally {
       previewLoading.value[s.id] = false
     }
   }
+}
+
+function sourceLabel(s) {
+  const t = s.install?.sourceType
+  if (t === 'git') return 'Git'
+  if (t === 'zip') return 'Zip'
+  if (t === 'folder') return '文件夹'
+  return ''
 }
 </script>
 
@@ -113,8 +148,11 @@ async function toggleExpand(s) {
         <RefreshCw v-else :size="13" />
         刷新
       </button>
+      <button class="btn btn-ghost btn-sm" @click="installVisible = true">
+        <Download :size="13" /> 安装
+      </button>
       <button class="btn btn-primary btn-sm" @click="openAdd">
-        <Plus :size="14" /> 添加技能
+        <Plus :size="14" /> 新建技能
       </button>
     </div>
 
@@ -124,15 +162,20 @@ async function toggleExpand(s) {
       <span class="dir-hint">（也可直接往该目录放入技能文件夹后点刷新）</span>
     </div>
 
+    <div v-if="store.invalidCount > 0" class="notice">
+      <AlertTriangle :size="12" />
+      有 {{ store.invalidCount }} 个技能未通过校验，不会参与模型的技能路由。
+    </div>
+
     <div v-if="store.loading && filtered.length === 0" class="list-tip">加载中...</div>
     <div v-else-if="filtered.length === 0" class="list-tip">
-      {{ keyword ? '没有匹配的技能' : '暂无技能，点击右上角「添加技能」创建' }}
+      {{ keyword ? '没有匹配的技能' : '暂无技能，点击右上角「新建技能」或「安装」' }}
     </div>
 
     <div v-else class="skill-list">
-      <div v-for="s in filtered" :key="s.id" class="skill-card" :class="{ disabled: !s.enabled, invalid: !!s.error }">
+      <div v-for="s in filtered" :key="s.id" class="skill-card" :class="{ disabled: !s.enabled, invalid: (s.errors || []).length > 0 }">
         <div class="skill-main">
-          <div class="skill-icon-wrap" :class="{ error: !!s.error }">
+          <div class="skill-icon-wrap" :class="{ error: (s.errors || []).length > 0 }">
             <BookOpen :size="18" />
           </div>
 
@@ -141,45 +184,95 @@ async function toggleExpand(s) {
               <span class="skill-name">{{ s.name }}</span>
               <span class="skill-id mono">{{ s.id }}</span>
               <span v-if="s.builtin" class="tag tag-builtin">内置</span>
+              <span v-if="s.version" class="tag tag-version">v{{ s.version }}</span>
+              <span v-if="sourceLabel(s)" class="tag tag-source">
+                <GitBranch v-if="s.install?.sourceType === 'git'" :size="10" />
+                {{ sourceLabel(s) }}
+              </span>
               <span v-if="s.hasScripts" class="tag tag-scripts">
                 <FileCode2 :size="10" /> 脚本
               </span>
-              <span v-if="s.alwaysInject" class="tag tag-inject">
-                <Pin :size="10" /> 强制注入
+              <span
+                v-if="s.disableModelInvocation"
+                class="tag tag-manual"
+                title="disable-model-invocation：模型不会自动触发，只能由用户 /技能名 调用"
+              >
+                <EyeOff :size="10" /> 仅手动
               </span>
-              <span v-if="s.error" class="tag tag-error" :title="s.error">
-                <AlertTriangle :size="10" /> {{ s.error }}
+              <span
+                v-if="s.userInvocable === false"
+                class="tag tag-nouser"
+                title="user-invocable: false：不允许用户显式调用"
+              >
+                禁手动
+              </span>
+              <span v-if="(s.errors || []).length > 0" class="tag tag-error" :title="(s.errors || []).join('\n')">
+                <AlertTriangle :size="10" /> {{ (s.errors || []).length }} 项错误
+              </span>
+              <span
+                v-else-if="(s.warnings || []).length > 0"
+                class="tag tag-warn"
+                :title="(s.warnings || []).join('\n')"
+              >
+                {{ (s.warnings || []).length }} 项告警
               </span>
               <ChevronDown v-if="expanded[s.id]" :size="13" class="expand-icon" />
               <ChevronRight v-else :size="13" class="expand-icon" />
             </div>
-            <div class="skill-desc">{{ s.description || '（无描述）' }}</div>
+            <div class="skill-desc">{{ s.description || '（无描述 —— 缺少 description 时技能不会被模型触发）' }}</div>
           </div>
 
           <div class="skill-actions">
             <button
+              v-if="s.install?.canUpdate"
               class="icon-btn"
-              :class="{ active: s.alwaysInject }"
-              :title="s.alwaysInject ? '取消强制注入（改为模型按需 read_skill 加载）' : '强制注入：正文直接进入每次对话的 system prompt'"
-              @click="handleAlwaysInject(s)"
+              title="从原仓库重新拉取更新"
+              :disabled="updatingId === s.id"
+              @click="handleUpdate(s)"
             >
-              <Pin :size="14" />
+              <Loader2 v-if="updatingId === s.id" :size="14" class="spin" />
+              <ArrowUpCircle v-else :size="14" />
             </button>
             <label class="switch" :title="s.enabled ? '点击停用' : '点击启用'">
               <input type="checkbox" :checked="s.enabled" @change="handleToggle(s)" />
               <span class="slider"></span>
             </label>
             <button class="icon-btn" title="编辑" @click="openEdit(s)"><Pencil :size="14" /></button>
-            <button v-if="!s.builtin" class="icon-btn danger" title="删除" @click="handleDelete(s)">
+            <button v-if="!s.builtin" class="icon-btn danger" title="删除 / 卸载" @click="handleDelete(s)">
               <Trash2 :size="14" />
             </button>
           </div>
         </div>
 
-        <!-- 正文预览 -->
+        <!-- 正文与资源预览（L2 / L3） -->
         <div v-if="expanded[s.id]" class="skill-preview">
           <Loader2 v-if="previewLoading[s.id]" :size="13" class="spin" />
-          <pre v-else>{{ previewBody[s.id] }}</pre>
+          <template v-else>
+            <div v-if="(s.errors || []).length > 0" class="issue-list error">
+              <div v-for="(e, i) in s.errors" :key="i">{{ e }}</div>
+            </div>
+            <div v-if="(s.warnings || []).length > 0" class="issue-list warn">
+              <div v-for="(w, i) in s.warnings" :key="i">{{ w }}</div>
+            </div>
+            <div v-if="s.install" class="meta-row">
+              安装来源：{{ s.install.sourceType }}
+              <span v-if="s.install.source" class="mono"> · {{ s.install.source }}</span>
+              <span v-if="s.install.ref" class="mono"> · {{ s.install.ref }}</span>
+              <span v-if="s.install.subdir" class="mono"> · {{ s.install.subdir }}</span>
+            </div>
+            <div v-if="(s.allowedTools || []).length > 0" class="meta-row">
+              allowed-tools：{{ (s.allowedTools || []).join(', ') }}
+            </div>
+            <div v-if="(previewResources[s.id] || []).length > 0" class="resource-block">
+              <div class="resource-title">技能自带资源（L3，用 read_skill_file 读取）</div>
+              <div v-for="r in previewResources[s.id]" :key="r.path" class="resource-row">
+                <span class="mono">{{ r.path }}</span>
+                <span class="resource-kind">{{ r.kind }}</span>
+                <span class="resource-size">{{ r.size }} B</span>
+              </div>
+            </div>
+            <pre>{{ previewBody[s.id] }}</pre>
+          </template>
         </div>
       </div>
     </div>
@@ -190,12 +283,17 @@ async function toggleExpand(s) {
       @close="dialogVisible = false"
       @saved="() => {}"
     />
+    <SkillInstallDialog
+      :visible="installVisible"
+      @close="installVisible = false"
+      @installed="() => {}"
+    />
   </div>
 </template>
 
 <style scoped lang="scss">
 .skill-settings {
-  max-width: 760px;
+  max-width: 780px;
 }
 
 .toolbar {
@@ -223,7 +321,7 @@ async function toggleExpand(s) {
   gap: 6px;
   font-size: $font-size-xs;
   color: $color-text-muted;
-  margin-bottom: $space-lg;
+  margin-bottom: $space-sm;
 
   .mono {
     font-family: monospace;
@@ -234,6 +332,19 @@ async function toggleExpand(s) {
     color: $color-text-muted;
     opacity: 0.75;
   }
+}
+
+.notice {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: $font-size-xs;
+  color: #facc15;
+  background: rgba(250, 204, 21, 0.08);
+  border: 1px solid rgba(250, 204, 21, 0.3);
+  border-radius: $radius-sm;
+  padding: 6px 10px;
+  margin-bottom: $space-lg;
 }
 
 .list-tip {
@@ -301,7 +412,8 @@ async function toggleExpand(s) {
 .skill-title-row {
   display: flex;
   align-items: center;
-  gap: $space-sm;
+  gap: 6px;
+  flex-wrap: wrap;
 }
 
 .expand-icon {
@@ -334,18 +446,34 @@ async function toggleExpand(s) {
     background: rgba(250, 204, 21, 0.15);
     color: #facc15;
   }
+  &.tag-version {
+    background: rgba(148, 163, 184, 0.15);
+    color: #94a3b8;
+  }
+  &.tag-source {
+    background: rgba(56, 189, 248, 0.15);
+    color: #38bdf8;
+  }
   &.tag-scripts {
     background: rgba(34, 197, 94, 0.15);
     color: #22c55e;
   }
-  &.tag-inject {
+  &.tag-manual {
     background: rgba(124, 58, 237, 0.18);
     color: #c084fc;
+  }
+  &.tag-nouser {
+    background: rgba(148, 163, 184, 0.18);
+    color: #94a3b8;
+  }
+  &.tag-warn {
+    background: rgba(250, 204, 21, 0.15);
+    color: #facc15;
   }
   &.tag-error {
     background: rgba(255, 85, 85, 0.15);
     color: $color-error;
-    max-width: 280px;
+    max-width: 200px;
     overflow: hidden;
     white-space: nowrap;
     text-overflow: ellipsis;
@@ -357,7 +485,7 @@ async function toggleExpand(s) {
   color: $color-text-secondary;
   margin-top: 4px;
   display: -webkit-box;
-  -webkit-line-clamp: 1;
+  -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
@@ -386,8 +514,9 @@ async function toggleExpand(s) {
     color: $color-text-primary;
   }
 
-  &.active {
-    color: #c084fc;
+  &:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
   }
 
   &.danger:hover {
@@ -446,7 +575,7 @@ async function toggleExpand(s) {
 .skill-preview {
   border-top: 1px solid $color-border;
   padding: $space-sm $space-md;
-  max-height: 280px;
+  max-height: 360px;
   overflow-y: auto;
 
   pre {
@@ -458,6 +587,59 @@ async function toggleExpand(s) {
     white-space: pre-wrap;
     word-break: break-word;
   }
+}
+
+.issue-list {
+  font-size: $font-size-xs;
+  line-height: 1.7;
+  margin-bottom: 6px;
+
+  &.error {
+    color: $color-error;
+  }
+
+  &.warn {
+    color: #facc15;
+  }
+}
+
+.meta-row {
+  font-size: $font-size-xs;
+  color: $color-text-muted;
+  margin-bottom: 4px;
+  word-break: break-all;
+}
+
+.resource-block {
+  margin: 6px 0 8px;
+}
+
+.resource-title {
+  font-size: $font-size-xs;
+  color: $color-text-secondary;
+  margin-bottom: 3px;
+}
+
+.resource-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: $font-size-xs;
+  color: $color-text-muted;
+  padding: 1px 0;
+
+  .mono {
+    font-family: monospace;
+    color: $color-text-secondary;
+  }
+}
+
+.resource-kind {
+  color: #38bdf8;
+}
+
+.resource-size {
+  margin-left: auto;
 }
 
 .spin {

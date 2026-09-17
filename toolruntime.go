@@ -33,34 +33,32 @@ func renderTemplate(tpl string, args map[string]interface{}) string {
 // DynamicCLITool 用户自定义命令行工具（命令模板 + 自定义参数）
 type DynamicCLITool struct {
 	*BaseTool
-	cfg *ToolConfig
+	src *ToolSource
 	// Dir 工作目录（会话项目目录），为空时继承进程工作目录
 	Dir string
 }
 
-func NewDynamicCLITool(cfg *ToolConfig) *DynamicCLITool {
-	var cliCfg CLIToolConfig
-	_ = json.Unmarshal(cfg.Config, &cliCfg)
-	t := &DynamicCLITool{cfg: cfg}
+func NewDynamicCLITool(src *ToolSource) *DynamicCLITool {
+	t := &DynamicCLITool{src: src}
 	t.BaseTool = &BaseTool{
-		Name:        cfg.Name,
-		Description: cfg.Description,
-		Parameters:  paramsFromConfig(cfg.Parameters),
+		Name:        src.Name,
+		Description: src.Description,
+		Parameters:  paramsFromConfig(src.Parameters),
 	}
 	return t
 }
 
 func (t *DynamicCLITool) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
-	var cliCfg CLIToolConfig
-	if err := json.Unmarshal(t.cfg.Config, &cliCfg); err != nil {
-		return "", fmt.Errorf("CLI 配置解析失败: %w", err)
+	// 配置已是类型化字段，不再需要每次 Unmarshal
+	if t.src == nil || t.src.CLI == nil {
+		return "", fmt.Errorf("CLI 配置缺失")
 	}
-	if strings.TrimSpace(cliCfg.Command) == "" {
+	if strings.TrimSpace(t.src.CLI.Command) == "" {
 		return "", fmt.Errorf("命令模板为空")
 	}
-	cmdLine := renderTemplate(cliCfg.Command, args)
+	cmdLine := renderTemplate(t.src.CLI.Command, args)
 
-	timeout := cliCfg.Timeout
+	timeout := t.src.CLI.Timeout
 	if timeout <= 0 {
 		timeout = 60
 	}
@@ -86,13 +84,12 @@ func (t *DynamicCLITool) Execute(ctx context.Context, args map[string]interface{
 // PermissionSubject 声明判定主体：把参数模板展开成真正要执行的命令后再判定。
 // 若配置无法解析，返回不可信主体（trusted=false），判定会落到"询问"。
 func (t *DynamicCLITool) PermissionSubject(args map[string]interface{}) Subject {
-	rawSubject := newRawSubject(t.GetName(), "CLI 工具配置解析失败")
-	var cliCfg CLIToolConfig
-	if err := json.Unmarshal(t.cfg.Config, &cliCfg); err != nil {
-		rawSubject.Trusted = false
-		return rawSubject
+	if t.src == nil || t.src.CLI == nil || strings.TrimSpace(t.src.CLI.Command) == "" {
+		s := newRawSubject(t.GetName(), "CLI 工具配置缺失")
+		s.Trusted = false
+		return s
 	}
-	return newCommandSubject(t.GetName(), renderTemplate(cliCfg.Command, args))
+	return newCommandSubject(t.GetName(), renderTemplate(t.src.CLI.Command, args))
 }
 
 // ===== 动态 HTTP API 工具 =====
@@ -113,24 +110,24 @@ func (t *headerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 // DynamicAPITool 用户自定义 HTTP API 工具
 type DynamicAPITool struct {
 	*BaseTool
-	cfg *ToolConfig
+	src *ToolSource
 }
 
-func NewDynamicAPITool(cfg *ToolConfig) *DynamicAPITool {
-	t := &DynamicAPITool{cfg: cfg}
+func NewDynamicAPITool(src *ToolSource) *DynamicAPITool {
+	t := &DynamicAPITool{src: src}
 	t.BaseTool = &BaseTool{
-		Name:        cfg.Name,
-		Description: cfg.Description,
-		Parameters:  paramsFromConfig(cfg.Parameters),
+		Name:        src.Name,
+		Description: src.Description,
+		Parameters:  paramsFromConfig(src.Parameters),
 	}
 	return t
 }
 
 func (t *DynamicAPITool) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
-	var apiCfg APIToolConfig
-	if err := json.Unmarshal(t.cfg.Config, &apiCfg); err != nil {
-		return "", fmt.Errorf("API 配置解析失败: %w", err)
+	if t.src == nil || t.src.HTTP == nil {
+		return "", fmt.Errorf("HTTP 配置缺失")
 	}
+	apiCfg := t.src.HTTP
 	if strings.TrimSpace(apiCfg.URL) == "" {
 		return "", fmt.Errorf("请求 URL 为空")
 	}
@@ -181,12 +178,12 @@ func (t *DynamicAPITool) Execute(ctx context.Context, args map[string]interface{
 // PermissionSubject 声明判定主体：HTTP API 工具的副作用不可知，主体取「方法 + 展开后的 URL」，
 // 便于用户按目标地址授权。
 func (t *DynamicAPITool) PermissionSubject(args map[string]interface{}) Subject {
-	var apiCfg APIToolConfig
-	if err := json.Unmarshal(t.cfg.Config, &apiCfg); err != nil {
-		s := newRawSubject(t.GetName(), "API 工具配置解析失败")
+	if t.src == nil || t.src.HTTP == nil {
+		s := newRawSubject(t.GetName(), "HTTP 工具配置缺失")
 		s.Trusted = false
 		return s
 	}
+	apiCfg := t.src.HTTP
 	method := strings.ToUpper(strings.TrimSpace(apiCfg.Method))
 	if method == "" {
 		method = http.MethodGet
@@ -223,27 +220,15 @@ func (p *MCPPool) Status(id string) (connected bool, errMsg string) {
 	return false, p.lastErr[id]
 }
 
-// buildTransport 根据配置构造 MCP 传输层
-func buildTransport(cfg *MCPToolConfig) (mcp.Transport, error) {
-	switch cfg.Transport {
-	case "http":
-		return &mcp.StreamableClientTransport{
-			Endpoint: cfg.URL,
-			HTTPClient: &http.Client{
-				Transport: &headerTransport{base: http.DefaultTransport, headers: cfg.Headers},
-			},
-			DisableStandaloneSSE: true, // 工具调用场景无需服务端推送，减少常驻连接
-		}, nil
-	case "sse":
-		return &mcp.SSEClientTransport{
-			Endpoint: cfg.URL,
-			HTTPClient: &http.Client{
-				Transport: &headerTransport{base: http.DefaultTransport, headers: cfg.Headers},
-			},
-		}, nil
-	default: // stdio
+// buildTransport 根据 MCP 配置构造传输层。
+// 配置用的是官方 type 取值（streamable-http / sse / stdio），不再有内部 transport 字段。
+func buildTransport(cfg *MCPConfig) (mcp.Transport, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("缺少 MCP 配置")
+	}
+	if cfg.IsStdio() {
 		if strings.TrimSpace(cfg.Command) == "" {
-			return nil, fmt.Errorf("stdio 传输缺少 command")
+			return nil, fmt.Errorf("stdio 接入缺少 command")
 		}
 		cmd := exec.Command(cfg.Command, cfg.Args...)
 		env := os.Environ()
@@ -253,26 +238,39 @@ func buildTransport(cfg *MCPToolConfig) (mcp.Transport, error) {
 		cmd.Env = env
 		return &mcp.CommandTransport{Command: cmd}, nil
 	}
+	if strings.TrimSpace(cfg.URL) == "" {
+		return nil, fmt.Errorf("%s 接入缺少 url", cfg.Type)
+	}
+	httpClient := &http.Client{
+		Transport: &headerTransport{base: http.DefaultTransport, headers: cfg.Headers},
+	}
+	if strings.EqualFold(strings.TrimSpace(cfg.Type), "sse") {
+		return &mcp.SSEClientTransport{Endpoint: cfg.URL, HTTPClient: httpClient}, nil
+	}
+	return &mcp.StreamableClientTransport{
+		Endpoint:             cfg.URL,
+		HTTPClient:           httpClient,
+		DisableStandaloneSSE: true, // 工具调用场景无需服务端推送，减少常驻连接
+	}, nil
 }
 
 // Connect 连接（或复用缓存的）MCP server 并返回连接条目
-func (p *MCPPool) Connect(parent context.Context, cfg *ToolConfig) (*mcpConnEntry, error) {
+func (p *MCPPool) Connect(parent context.Context, src *ToolSource) (*mcpConnEntry, error) {
+	if src == nil {
+		return nil, fmt.Errorf("来源为空")
+	}
 	p.mu.Lock()
-	if entry, ok := p.conns[cfg.ID]; ok {
+	if entry, ok := p.conns[src.ID]; ok {
 		p.mu.Unlock()
 		return entry, nil
 	}
 	p.mu.Unlock()
 
-	var mcpCfg MCPToolConfig
-	if err := json.Unmarshal(cfg.Config, &mcpCfg); err != nil {
-		return nil, fmt.Errorf("MCP 配置解析失败: %w", err)
+	// 配置已是类型化字段：校验后直接建传输层，不再有中间解析
+	if reason := src.MCP.Validate(); reason != "" {
+		return nil, fmt.Errorf("MCP 配置无效: %s", reason)
 	}
-	if mcpCfg.Transport != "stdio" && strings.TrimSpace(mcpCfg.URL) == "" {
-		return nil, fmt.Errorf("%s 传输缺少 url", mcpCfg.Transport)
-	}
-
-	transport, err := buildTransport(&mcpCfg)
+	transport, err := buildTransport(src.MCP)
 	if err != nil {
 		return nil, err
 	}
@@ -282,7 +280,7 @@ func (p *MCPPool) Connect(parent context.Context, cfg *ToolConfig) (*mcpConnEntr
 	defer cancel()
 	session, err := client.Connect(ctx, transport, nil)
 	if err != nil {
-		p.recordErr(cfg.ID, fmt.Sprintf("MCP 连接失败: %v", err))
+		p.recordErr(src.ID, fmt.Sprintf("MCP 连接失败: %v", err))
 		return nil, fmt.Errorf("MCP 连接失败: %w", err)
 	}
 
@@ -291,20 +289,20 @@ func (p *MCPPool) Connect(parent context.Context, cfg *ToolConfig) (*mcpConnEntr
 	listResult, err := session.ListTools(listCtx, nil)
 	if err != nil {
 		_ = session.Close()
-		p.recordErr(cfg.ID, fmt.Sprintf("列出 MCP 工具失败: %v", err))
+		p.recordErr(src.ID, fmt.Sprintf("列出 MCP 工具失败: %v", err))
 		return nil, fmt.Errorf("列出 MCP 工具失败: %w", err)
 	}
 
 	entry := &mcpConnEntry{session: session, tools: listResult.Tools}
 	p.mu.Lock()
 	// 并发场景下若已有连接，关闭后到的
-	if old, ok := p.conns[cfg.ID]; ok {
+	if old, ok := p.conns[src.ID]; ok {
 		p.mu.Unlock()
 		_ = session.Close()
 		return old, nil
 	}
-	p.conns[cfg.ID] = entry
-	delete(p.lastErr, cfg.ID)
+	p.conns[src.ID] = entry
+	delete(p.lastErr, src.ID)
 	p.mu.Unlock()
 	return entry, nil
 }
@@ -342,11 +340,14 @@ func (p *MCPPool) CloseAll() {
 type MCPTool struct {
 	*BaseTool
 	pool      *MCPPool
-	serverCfg *ToolConfig
+	serverCfg *ToolSource
 	toolName  string // server 上的原始工具名
+	// schema 服务器给的原始 inputSchema（规范化后）。直通给模型，
+	// 保留 required / enum / items / 嵌套结构——压平会让模型只能猜参数形状。
+	schema json.RawMessage
 }
 
-func NewMCPTool(pool *MCPPool, serverCfg *ToolConfig, tool *mcp.Tool) *MCPTool {
+func NewMCPTool(pool *MCPPool, serverCfg *ToolSource, tool *mcp.Tool) *MCPTool {
 	fullName := mcpToolName(serverCfg.Name, tool.Name)
 	t := &MCPTool{
 		pool:      pool,
@@ -356,9 +357,49 @@ func NewMCPTool(pool *MCPPool, serverCfg *ToolConfig, tool *mcp.Tool) *MCPTool {
 	t.BaseTool = &BaseTool{
 		Name:        fullName,
 		Description: tool.Description,
-		Parameters:  paramsFromJSONSchema(tool.InputSchema),
+		Parameters:  paramsFromJSONSchema(tool.InputSchema), // 简化表：作为直通失败时的兜底
 	}
+	t.schema = normalizeInputSchema(fullName, tool.InputSchema)
 	return t
+}
+
+// JSONSchema 实现 SchemaProvider：把服务器给的 inputSchema 原样交给模型
+func (t *MCPTool) JSONSchema() json.RawMessage { return t.schema }
+
+// PermissionSubject 实现 SubjectProvider：MCP 工具用结构化的参数对做判定主体，
+// 使规则可以精确表达「只允许带 appid=100049128 的调用」。
+func (t *MCPTool) PermissionSubject(args map[string]interface{}) Subject {
+	return newMCPSubject(t.GetName(), args)
+}
+
+// normalizeInputSchema 把 MCP 的 inputSchema 规整成可直接传给模型的 JSON Schema：
+// 必须是 JSON 对象、必须带 type（部分 server 省略），其余**原样保留**。
+// 返回 nil 表示无法直通（非对象、或体积超限），调用方回退到简化参数表。
+func normalizeInputSchema(toolName string, raw any) json.RawMessage {
+	if raw == nil {
+		return nil
+	}
+	b, err := json.Marshal(raw)
+	if err != nil || len(b) == 0 {
+		return nil
+	}
+	var schema map[string]interface{}
+	if err := json.Unmarshal(b, &schema); err != nil || len(schema) == 0 {
+		return nil
+	}
+	if _, ok := schema["type"]; !ok {
+		schema["type"] = "object"
+	}
+	out, err := json.Marshal(schema)
+	if err != nil {
+		return nil
+	}
+	if len(out) > maxToolSchemaBytes {
+		fmt.Printf("[ToolManager] MCP 工具 %s 的 inputSchema 过大（%d 字节，上限 %d），降级为简化参数表\n",
+			toolName, len(out), maxToolSchemaBytes)
+		return nil
+	}
+	return out
 }
 
 // mcpToolName MCP 子工具的注册名（Cline 风格前缀，避免重名）

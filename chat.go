@@ -44,23 +44,15 @@ type LLMTool struct {
 }
 
 // LLMToolDef 工具定义
+//
+// Parameters 直接用 **原始 JSON Schema**（json.RawMessage）而不是结构体：
+// MCP 工具的 inputSchema 里可能有 enum、items、嵌套 properties 与 required，
+// 任何中间结构体都会把它们压平（曾经就是这样，模型只能猜参数形状）。
+// 两条协议都吃标准 JSON Schema，所以这里原样直通即可。
 type LLMToolDef struct {
-	Name        string         `json:"name"`
-	Description string         `json:"description"`
-	Parameters  *LLMToolParams `json:"parameters"`
-}
-
-// LLMToolParams 工具参数定义
-type LLMToolParams struct {
-	Type       string                 `json:"type"`
-	Required   []string               `json:"required"`
-	Properties map[string]LLMToolProp `json:"properties"`
-}
-
-// LLMToolProp 工具参数属性
-type LLMToolProp struct {
-	Type        string `json:"type"`
-	Description string `json:"description"`
+	Name        string          `json:"name"`
+	Description string          `json:"description"`
+	Parameters  json.RawMessage `json:"parameters"`
 }
 
 // LLMReq LLM 请求
@@ -502,7 +494,11 @@ func (a *App) executeChat(sessionID, query string, useStream bool) *ChatResult {
 		return &ChatResult{Error: fmt.Sprintf("获取模型配置失败: %v", err)}
 	}
 	dir, _ := a.resolveProjectDir(sessionID)
-	return a.runToolLoop(sessionID, a.buildBasePrompt(session, dir), &model, useStream, false, nil)
+	prompt, err := a.buildBasePromptWithSkill(session, dir, query)
+	if err != nil {
+		return &ChatResult{Error: err.Error()}
+	}
+	return a.runToolLoop(sessionID, prompt, &model, useStream, false, nil)
 }
 
 // buildBasePrompt 组装基础系统提示词：基础人设 + 工作区说明 + 技能上下文（L1 清单 / 强制注入正文）
@@ -525,13 +521,51 @@ func (a *App) buildBasePrompt(session *Session, dir string) string {
 		enabled := a.enabledSkillsForSession(session)
 		if idx := BuildSkillIndex(enabled); idx != "" {
 			prompt += "\n\n## 可用技能（Skills）\n" +
-				"需要时先调用 read_skill 工具获取技能完整说明，再按说明执行：\n" + idx
-		}
-		if block := BuildAlwaysInjectBlock(enabled); block != "" {
-			prompt += "\n\n## 已直接加载的技能正文" + block
+				"当请求与下列技能的描述匹配时，先调用 read_skill 取回该技能的完整说明，再按说明执行；" +
+				"技能自带的 references/ 文档用 read_skill_file 读取，scripts/ 下的脚本用 exec_shell 执行：\n" + idx
 		}
 	}
 	return prompt
+}
+
+// buildBasePromptWithSkill 在基础提示词上叠加「显式调用技能」段。
+// 用户在消息开头写 /技能名 时，该技能正文直接进入本轮 system prompt：
+// 是否使用该技能由用户决定，不再经模型路由（这正是 disable-model-invocation 的语义）。
+// 未命中技能时按普通消息处理（例如消息其实是一条以 / 开头的路径）。
+func (a *App) buildBasePromptWithSkill(session *Session, dir, query string) (string, error) {
+	prompt := a.buildBasePrompt(session, dir)
+	if a.skillStore == nil {
+		return prompt, nil
+	}
+	res := a.skillStore.ResolveSkillCommand(query)
+	if res.Reason != "" {
+		return "", fmt.Errorf("%s", res.Reason)
+	}
+	if !res.Ok || res.Skill == nil {
+		return prompt, nil
+	}
+	// 会话白名单同样约束显式调用：本会话没开放的技能不该被 /名称 绕过
+	if !a.skillAllowedInSession(session, res.Skill.ID) {
+		return "", fmt.Errorf("技能 %s 未在本会话的可用技能中", res.Skill.ID)
+	}
+	body, err := a.skillStore.LoadBody(res.Skill.ID)
+	if err != nil {
+		return "", err
+	}
+	return prompt + BuildExplicitSkillBlock(res.Skill, body), nil
+}
+
+// skillAllowedInSession 会话技能白名单是否放行该技能（白名单为空=全部放行）
+func (a *App) skillAllowedInSession(session *Session, id string) bool {
+	if len(session.EnabledSkills) == 0 {
+		return true
+	}
+	for _, s := range session.EnabledSkills {
+		if s == id {
+			return true
+		}
+	}
+	return false
 }
 
 // runToolLoop 执行一次「构建请求→LLM→工具循环」的完整运行。
@@ -884,7 +918,11 @@ func (a *App) ChatPlan(sessionID, query string, useStream bool) *ChatResult {
 
 	// 4. 平凡请求免计划（G8）：走普通工具循环直答
 	if !d.NeedPlan {
-		return a.runToolLoop(sessionID, a.buildBasePrompt(session, dir), &model, useStream, false, nil)
+		prompt, err := a.buildBasePromptWithSkill(session, dir, query)
+		if err != nil {
+			return &ChatResult{Error: err.Error()}
+		}
+		return a.runToolLoop(sessionID, prompt, &model, useStream, false, nil)
 	}
 
 	// 5. 组装计划并落盘（待审核状态）

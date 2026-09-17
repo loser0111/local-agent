@@ -2,11 +2,25 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+// schemaRequired 从工具定义的原始 JSON Schema 里取 required。
+// 参数 schema 现在是 json.RawMessage 直通（不再是有 Required 字段的结构体）。
+func schemaRequired(t *testing.T, params json.RawMessage) []string {
+	t.Helper()
+	var s struct {
+		Required []string `json:"required"`
+	}
+	if err := json.Unmarshal(params, &s); err != nil {
+		t.Fatalf("解析参数 schema 失败: %v（raw=%s）", err, string(params))
+	}
+	return s.Required
+}
 
 // newFileToolCtx 构造临时工作区上的文件工具上下文
 func newFileToolCtx(t *testing.T) (fileToolContext, string) {
@@ -486,11 +500,11 @@ func TestFileToolsAssembledAndDirectExposed(t *testing.T) {
 	for _, d := range defs {
 		if d.Function.Name == toolWriteFile {
 			req := map[string]bool{}
-			for _, r := range d.Function.Parameters.Required {
+			for _, r := range schemaRequired(t, d.Function.Parameters) {
 				req[r] = true
 			}
 			if !req["path"] || !req["content"] {
-				t.Errorf("write_file 的必填参数应包含 path 与 content，实际 %v", d.Function.Parameters.Required)
+				t.Errorf("write_file 的必填参数应包含 path 与 content，实际 %v", schemaRequired(t, d.Function.Parameters))
 			}
 		}
 	}

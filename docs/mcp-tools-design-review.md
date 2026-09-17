@@ -1,6 +1,6 @@
 # MCP 与「工具」的概念分层设计（方案 · 待评审）
 
-> 状态：**设计方案**，未改动任何代码。目标是先把"工具"和"MCP"这两个被压平的概念分开，再决定实施范围。
+> 状态：**P0 – P3 全部实现**（2026-09-17）。详见文末「实施状态」。
 > 起因：用户提问「当前设计中 MCP 和 tools 的概念是否设计得不清楚」——结论是**是**，且已有可观测代价（见第三节）。
 
 ---
@@ -225,3 +225,95 @@ P0/P1 是低风险高收益（不动存储结构即可做，P1 只加一个导�
 ### 9.3 本次评审建议的默认路径
 
 先做 **P0（schema 直通）+ P1（官方格式导入导出）**，两周内可验收且不动存储结构；P2/P3 视 P0/P1 的实际收益再决定。理由：问题 5、6 是**已经在产生返工**的（今天各发生一次），而问题 1–4 属于"结构性不清"，改动面大、需要更多验证时间。
+
+---
+
+## 十、实施状态（2026-09-17）
+
+### 已实现
+
+**P0 参数 schema 直通**
+
+- `LLMToolDef.Parameters` 从 `*LLMToolParams`（只有 type/description 的结构体）改为 `json.RawMessage`：**完整 JSON Schema 原样直通**，两条协议都不再裁剪。
+- 新增 `SchemaProvider` 接口（`tools.go`）；`MCPTool` 实现它，保存服务器给的原始 `inputSchema`（`toolruntime.go` 的 `normalizeInputSchema`：确保是对象、确保有 `type`，其余原样保留；非对象或超过 16KB 时返回 nil 并降级为简化表，同时打日志）。
+- `tool_router` 的 `describe` 也优先回传完整 schema —— MCP 子工具只能经路由器发现，`describe` 是模型了解其参数结构的唯一入口，这里压平等于让模型猜。
+- Anthropic 侧改为 `inputSchemaFor`：直接吃标准 JSON Schema（Anthropic 与 OpenAI 形状一致），只兜底「必须是对象、必须有 type」。
+- 内置/CLI/API 工具仍由简化参数表合成 schema（`buildJSONSchema`），`required` 不再丢失，无必填时不再输出 `"required": null`。
+
+**P1 官方 mcpServers 导入导出**（新增 `mcpimport.go`）
+
+- `ImportMCPServers(raw)`：接受官方片段，兼容三种形态——`{"mcpServers": {...}}`、去掉外层包装的名字字典、单个服务器对象（名字取 `name` 字段，或从 url host / command 推断）；容忍被 json 代码块包裹的内容；`streamable-http|http|sse|stdio` 映射到内部 `transport`；识别 Cline 的 `disabled` 字段；同名重复导入 = 更新（幂等）。
+- `ExportMCPServers(names)`：反向导出为官方片段（`http → streamable-http`），支持传服务器名或 `mcp__server__tool` 工具名。
+- 逐条报告结果：`MCPImportResult{imported[], skipped[{name, reason}]}` —— 跳过的原因如实展示，不静默吞掉。
+- 前端：设置页工具栏新增「导入 MCP」「导出 MCP」，弹窗支持粘贴+结果反馈、导出+一键复制（剪贴板被 webview 限制时降级为手动复制）。
+
+### 刻意未动（属 P2/P3）
+
+- **存储结构**：`tools.json` 仍是 `[{"type":"mcp","config":{"transport":...}}]`，导入是"官方形状 → 现有结构"的单向转换。P1 只让用户不必理解两套格式，不改变落盘形状（迁移方案见第六节）。
+- **白名单语义**：`Session.EnabledTools` 仍按 `cfg.ID` 过滤，对 MCP 是服务器级。
+- **权限主体**：`MCPTool` 仍未实现 `SubjectProvider`，规则里没有 MCP specifier 语义。
+- **命名**：UI 里 MCP 子工具仍显示原始名，与模型/规则用的 `mcp__server__tool` 不一致。
+
+### 验收要点
+
+- 参数形状：用带嵌套/枚举参数的 MCP 工具（如 `changeqconfig`）实测，模型应一次给出正确形状；`schema_test.go` 断言 enum/items/嵌套/required 均不被裁剪。
+- 格式互操作：把官方片段粘进设置页即可连通；`export → import` 往返一致（`mcpimport_test.go`）。
+- 待本地执行：`go build ./... && go test ./...`（新增 `schema_test.go`、`mcpimport_test.go`，以及两处既有测试从 `Parameters.Required` 改为解析 raw schema）。
+
+---
+
+## 十一、P2 / P3 实施状态（2026-09-17，接第十节）
+
+### 落盘升级到 v2（新增 `toolmodel.go`）
+
+- 类型换成 **`ToolSource`（来源）**：`kind`（builtin/cli/http/mcp）替代原 `type`（原 `api` 迁移为 `http`）；**类型化配置字段** `cli` / `http` / `mcp` 取代弱类型 `config json.RawMessage`，编译期即可约束「kind=mcp 就必须有 mcp 配置」。
+- **MCP 配置改成官方形状**（`type: streamable-http|sse|stdio` + url/headers/command/args/env），与 Claude Desktop / Cline / MCP 文档一致 —— 导入导出因此几乎不需翻译（`mcpimport.go` 只剩搬字段与校验）。
+- 落盘结构：`{"version":2,"sources":[...]}`；加载时识别 v1 裸数组并**就地迁移**，迁移前写一份 `tools.json.bak`（已存在则不覆盖），迁移后落 v2。
+- 新增 `Exposure`（暴露策略）：`direct` 直出 / `router` 经路由器（默认）/ `internal` 模型完全不可见（连 `list`/`describe` 都不出现）。原意是"内置的既有行为由 `DefaultExposure` 复现"，改为可在编辑弹窗里调整——**但这条当时没做到**，`DefaultExposure` 与运行期的取值都不对，见下节「曝光策略的两处推导缺陷与修复」。
+
+### 白名单改为工具粒度
+
+`Session.EnabledTools` 现在按**工具名**过滤（内置/CLI/HTTP 是工具名本身，MCP 子工具用完整名 `mcp__server__tool`）。兼容：老会话里存的是来源名（MCP 当时按服务器过滤），若命中某台 MCP 来源则视为放行其全部子工具，旧会话无需迁移。
+
+### MCP 权限主体结构化
+
+新增 `SubjectKind = mcp`：主体是**结构化的参数对**（每个参数一项 `k=v`，键名排序），而不是拼接后的摘要字符串。规则可以精确表达 `mcp__qconfig__changeqconfig(appid=100049128)`：
+- 收紧方向（deny/ask）：**任一参数对命中**即成立。
+- 放宽方向（allow/授权）：走 `coversMCPUnits` —— **规则侧每一条都必须被调用的参数满足**（与命令段相反；命令段是"主体每段都要被覆盖"）。
+- MCP **不支持前缀规则**：`k=v` 这种短串上前缀极易误伤（`appid=1` 会命中 `appid=100049128`），需要精确授权就写完整参数对。写前缀则永不匹配 → 方向安全（询问）。
+
+### UI：工具配置按来源分组，MCP 独立成区
+
+- 列表分三组：**内置工具 / MCP 服务器 / 自定义工具（CLI·HTTP）**，组头带说明。粒度差异在界面上直接可见。
+- MCP 卡片显示接入方式与地址（`streamable-http · https://…`）、连接状态与子工具数、暴露策略徽标、整台服务器的启停开关。
+- 展开后**每个子工具带独立开关**（写入 `DisabledTools`；此前只有读展示，根本没有 setter —— 这是 P3 补上的能力），右侧显示完整名 `mcp__server__tool` 并**可一键复制**（此前 UI 显示原始名，写权限规则要自己拼前缀）。
+- 编辑弹窗按 kind 给字段（MCP 用官方三取值 + 官方字段名），并新增暴露策略选择；导入/导出按钮保留在工具栏。
+
+### 决策记录（原 §8 的开放问题）
+
+1. **`tools.json` 迁移**：采用"兼容读取 + 保存即升级 + 备份"，不做双格式并存。
+2. **MCP 不独立成文件**：仍在一个 `tools.json` 里，但 MCP 条目已是官方形状 —— 生态互导由导入/导出通道承担，不必再拆文件。
+3. **Exposure 开放给用户**：可改（编辑弹窗），默认值复现既有行为。
+4. **权限语法兼容**：MCP 从"参数摘要字符串"改为结构化参数对，此前"意外可用"的前缀规则会失效（方向安全，落到询问）；非 MCP 工具规则语义不变。
+5. **UI 命名**：子工具行同时显示原始名与完整名，并提供复制按钮。
+
+### 曝光策略的两处推导缺陷与修复（2026-09-17，exec_shell 消失事故）
+
+跑起来后出现「模型报找不到 exec_shell」。根因不在技能机制，而在曝光策略的**推导**，两处缺陷叠加：
+
+1. **默认值本身是错的。** `DefaultExposure` 写成「内置但不在 `directToolOrder` 里 → `ExposureInternal`」，而 `exec_shell` 恰好是 `defaultSources()` 里唯一不在该名录的内置工具。于是它被判成"模型完全不可见"：`listTools` 跳过、`describe`/`execute` 当"未找到"。**`internal` 不能由"没配置"推断出来**——否则以后任何新增内置工具，只要忘了加进 `directToolOrder`，就会对模型凭空消失。
+2. **运行期不查默认值。** `markExposure` 对空/非法 exposure 一律降级成 `ExposureRouter`，而 `defaultSources()` 根本不设 `exposure` 字段（`omitempty` 落盘时被省略）、`load()` 也不做 normalize。结果是**全新安装下连文件六件套都不是直出的**，`directToolOrder` 那套"直出省一轮往返"的设计只在配置被 normalize 或 migrate 过之后才生效。这个回归其实已被既有测试 `TestFileToolsAssembledAndDirectExposed` 抓到（它断言 `tool_router` + 全部 `directToolOrder` 都直出），只是还没跑。
+
+**为什么会被持久化：** `migrateLegacySource` 对每个 v1 条目执行 `src.Exposure = DefaultExposure(...)`，`load()` 迁移完又立刻 `save()`，于是 `"exposure": "internal"` 被写进 `tools.json`；在设置页保存任意工具走 `normalizeSource` 也会算出同一个值。**所以只改默认值不够，磁盘上已有的错值必须一并修。**
+
+修复分三层：`DefaultExposure` 兜底改为 `ExposureRouter`，`internal` 只能由配置显式指定；`markExposure` 对空/非法值改为调用 `DefaultExposure(kind, name)` 而非硬编码 router（该闭包因此多收一个 `SourceKind` 参数，6 个调用点同步更新）；`ToolFileVersion` 2 → 3 并新增 `repairBuiltinExposure`，加载低版本文件时把「内置 且 `internal`」的条目恢复成默认曝光并落盘——只碰这一类，用户显式配的 direct/router 与非内置来源的 internal 一律不动。
+
+新增回归测试（`tool_runtime_test.go`）：`DefaultExposure` 不得把任何内置工具判成 internal；全新安装下 `read_file` 直出、`exec_shell` 可经 `tool_router` 发现（`list` 与 `describe`）；`repairBuiltinExposure` 的作用域；以及加载 v2 文件后错值被修、版本落为 3、模型能重新发现 `exec_shell`。
+
+**一个连带教训（技能侧）**：这次还有个放大因素——skills 重构把默认示例技能改成自带 `scripts/greet.sh`，并在 L1 清单、`read_skill` 返回值、显式调用注入段里都写了"脚本用 exec_shell 执行"。于是装上一个全新技能，模型立刻照着做、立刻撞上不可见的工具。**在提示词里点名某个工具前，先确认它在当前装配下真的可见**；跨子系统的名字引用不是自己能保证的。
+
+### 验证边界（重要）
+
+- 前端：30 个 SFC 全部编译通过、27 个 JS 文件语法通过（沙箱内可执行）。
+- Go：**沙箱无 Go 工具链，未编译、未跑测试**。已做的是静态核对（括号平衡用项目既有 `/tmp/go_lex_check.py`、未使用 import、重复声明、字段/方法解析、`ToolSource`/`MCPConfig` 成员访问按变量名核对）。**必须本地 `go build ./... && go test ./...` 验收**。
+- 新增/更新的测试：`mcpimport_test.go`（导入三形态、跳过原因、幂等、导出往返、v1→v2 迁移含备份校验、子工具开关与暴露策略）、`schema_test.go`（schema 直通）、`tool_runtime_test.go`（来源模型下的装配与白名单）。

@@ -36,6 +36,8 @@ export function DeleteTool(arg1:string):Promise<void>;
 
 export function ExecutePlan(arg1:string,arg2:boolean):Promise<main.ChatResult>;
 
+export function ExportMCPServers(arg1:Array<string>):Promise<string>;
+
 export function GetDiff(arg1:string):Promise<Array<main.DiffFile>>;
 
 export function GetDiffTurns(arg1:string):Promise<Array<main.DiffTurn>>;
@@ -66,15 +68,29 @@ export function GetToolFileChanges(arg1:string):Promise<Array<main.ToolFileChang
 
 export function Greet(arg1:string):Promise<string>;
 
+export function ImportMCPServers(arg1:string):Promise<main.MCPImportResult>;
+
+export function InstallSkillFromFolder(arg1:string):Promise<Array<main.SkillInstallResult>>;
+
+export function InstallSkillFromGit(arg1:string,arg2:string,arg3:string):Promise<Array<main.SkillInstallResult>>;
+
+export function InstallSkillFromZip(arg1:string):Promise<Array<main.SkillInstallResult>>;
+
 export function ListPlans(arg1:string):Promise<Array<main.Plan>>;
 
 export function ListSessions():Promise<Array<main.Session>>;
+
+export function ListSkillResources(arg1:string):Promise<Array<main.SkillResource>>;
 
 export function ListSkills():Promise<Array<main.SkillMeta>>;
 
 export function ListTools():Promise<Array<main.ToolInfo>>;
 
 export function PickDirectory():Promise<string>;
+
+export function PickSkillFolder():Promise<string>;
+
+export function PickSkillZip():Promise<string>;
 
 export function RefreshSkills():Promise<Array<main.SkillMeta>>;
 
@@ -88,19 +104,21 @@ export function ResolvePermission(arg1:string,arg2:string,arg3:string,arg4:strin
 
 export function SavePlan(arg1:main.Plan):Promise<void>;
 
-export function SaveSkill(arg1:string,arg2:string,arg3:string,arg4:string):Promise<void>;
+export function SaveSkill(arg1:string,arg2:main.SkillDraft):Promise<void>;
 
-export function SaveTool(arg1:main.ToolConfig):Promise<main.ToolConfig>;
+export function SaveTool(arg1:main.ToolSource):Promise<main.ToolSource>;
+
+export function SetExposure(arg1:string,arg2:string):Promise<void>;
 
 export function SetSessionPermissionMode(arg1:string,arg2:string):Promise<main.Session>;
 
-export function SetSkillAlwaysInject(arg1:string,arg2:boolean):Promise<void>;
+export function SetSubToolEnabled(arg1:string,arg2:string,arg3:boolean):Promise<void>;
 
 export function SkillsDir():Promise<string>;
 
 export function TestModelConnection(arg1:main.Model):Promise<void>;
 
-export function TestToolConnection(arg1:main.ToolConfig):Promise<Array<main.MCPToolMeta>>;
+export function TestToolConnection(arg1:main.ToolSource):Promise<Array<main.MCPToolMeta>>;
 
 export function ToggleSkill(arg1:string,arg2:boolean):Promise<void>;
 
@@ -109,3 +127,5 @@ export function ToggleTool(arg1:string,arg2:boolean):Promise<void>;
 export function UpdateModel(arg1:string,arg2:main.Model):Promise<void>;
 
 export function UpdateSession(arg1:string,arg2:main.SessionPatch):Promise<main.Session>;
+
+export function UpdateSkill(arg1:string):Promise<main.SkillInstallResult>;

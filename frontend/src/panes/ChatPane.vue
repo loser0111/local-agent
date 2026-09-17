@@ -11,6 +11,7 @@ import { fetchPendingInteraction } from '@/api/interaction'
 import { DEFAULT_VIEW_MODE } from '@/types'
 import { usePermissionStore } from '@/stores/permissions'
 import { useAskStore } from '@/stores/asks'
+import { useSkillsStore } from '@/stores/skills'
 import PermissionDialog from '@/components/business/PermissionDialog.vue'
 import AskUserDialog from '@/components/business/AskUserDialog.vue'
 import PaneHeader from '@/components/layout/PaneHeader.vue'
@@ -25,6 +26,7 @@ const settingStore = useSettingStore()
 const planStore = usePlanStore()
 const permissionStore = usePermissionStore()
 const askStore = useAskStore()
+const skillsStore = useSkillsStore()
 
 // 计划模式（单次意图，非全局偏好）：开启后下一条消息走规划流程
 const planMode = ref(false)
@@ -34,6 +36,8 @@ const plan = computed(() => planStore.plan)
 let offDiff = null
 onMounted(() => {
   offDiff = onDiffUpdate((payload) => diffStore.applyUpdate(payload))
+  // 「/技能名」补全需要技能清单；加载失败不影响正常聊天
+  skillsStore.load().catch(() => {})
 })
 onUnmounted(() => {
   if (offDiff) offDiff()
@@ -396,7 +400,67 @@ watch(
   }
 )
 
+// ===== 「/技能名」显式调用补全 =====
+//
+// 只在「整段输入恰好是一个 /命令」时启用：一旦出现空格就认为用户已经在写正文，
+// 不再弹菜单——否则正文里的斜杠或路径都会触发误补全。
+const skillMenuIndex = ref(0)
+const skillMenuDismissed = ref(false)
+
+const skillQuery = computed(() => {
+  const m = /^\s*\/([A-Za-z0-9_-]*)$/.exec(input.value || '')
+  return m ? m[1].toLowerCase() : null
+})
+
+const skillMenu = computed(() => {
+  const kw = skillQuery.value
+  if (kw === null) return []
+  const list = skillsStore.invocableSkills
+  const matched = kw
+    ? list.filter(
+        (s) => s.id.toLowerCase().includes(kw) || (s.name || '').toLowerCase().includes(kw)
+      )
+    : list
+  return matched.slice(0, 8)
+})
+
+const skillMenuOpen = computed(() => skillMenu.value.length > 0 && !skillMenuDismissed.value)
+
+// 输入一变就复位，避免上一次的选中项与「已关闭」状态残留
+watch(input, () => {
+  skillMenuDismissed.value = false
+  skillMenuIndex.value = 0
+})
+
+function applySkillCommand(s) {
+  if (!s) return
+  input.value = `/${s.id} `
+}
+
 function handleKeydown(e) {
+  if (skillMenuOpen.value) {
+    if (e.key === 'ArrowDown') {
+      e.preventDefault()
+      skillMenuIndex.value = (skillMenuIndex.value + 1) % skillMenu.value.length
+      return
+    }
+    if (e.key === 'ArrowUp') {
+      e.preventDefault()
+      skillMenuIndex.value =
+        (skillMenuIndex.value - 1 + skillMenu.value.length) % skillMenu.value.length
+      return
+    }
+    if (e.key === 'Escape') {
+      e.preventDefault()
+      skillMenuDismissed.value = true
+      return
+    }
+    if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey)) {
+      e.preventDefault()
+      applySkillCommand(skillMenu.value[skillMenuIndex.value] || skillMenu.value[0])
+      return
+    }
+  }
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault()
     sendMessage()
@@ -516,13 +580,29 @@ function openDiff() {
         </button>
       </div>
 
-      <textarea
-        v-model="input"
-        class="prompt-input"
-        placeholder="输入消息... (Enter 发送，Shift+Enter 换行)"
-        rows="1"
-        @keydown="handleKeydown"
-      />
+      <div class="prompt-input-wrap">
+        <!-- 「/技能名」补全：向上弹出，避免遮住下方的发送按钮 -->
+        <div v-if="skillMenuOpen" class="skill-menu">
+          <div class="skill-menu-head">调用技能 · Enter 选中 / Esc 关闭</div>
+          <div
+            v-for="(s, i) in skillMenu"
+            :key="s.id"
+            class="skill-menu-item"
+            :class="{ active: i === skillMenuIndex }"
+            @mousedown.prevent="applySkillCommand(s)"
+          >
+            <span class="skill-menu-id">/{{ s.id }}</span>
+            <span class="skill-menu-desc">{{ s.description }}</span>
+          </div>
+        </div>
+        <textarea
+          v-model="input"
+          class="prompt-input"
+          placeholder="输入消息... (Enter 发送，Shift+Enter 换行；输入 / 调用技能)"
+          rows="1"
+          @keydown="handleKeydown"
+        />
+      </div>
 
       <div class="prompt-footer">
         <button
@@ -711,6 +791,60 @@ function openDiff() {
   &::placeholder {
     color: $color-text-muted;
   }
+}
+
+// 「/技能名」补全下拉：向上弹出
+.prompt-input-wrap {
+  position: relative;
+}
+
+.skill-menu {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(100% + 4px);
+  background-color: $color-bg-secondary;
+  border: 1px solid $color-border;
+  border-radius: $radius-md;
+  box-shadow: 0 -6px 24px rgba(0, 0, 0, 0.35);
+  overflow: hidden;
+  z-index: 20;
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.skill-menu-head {
+  padding: 5px $space-md;
+  font-size: $font-size-xs;
+  color: $color-text-muted;
+  border-bottom: 1px solid $color-border;
+}
+
+.skill-menu-item {
+  display: flex;
+  align-items: baseline;
+  gap: $space-sm;
+  padding: 6px $space-md;
+  cursor: pointer;
+
+  &.active {
+    background-color: $color-bg-tertiary;
+  }
+}
+
+.skill-menu-id {
+  font-family: monospace;
+  font-size: $font-size-xs;
+  color: #a78bfa;
+  flex-shrink: 0;
+}
+
+.skill-menu-desc {
+  font-size: $font-size-xs;
+  color: $color-text-secondary;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .prompt-footer {

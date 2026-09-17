@@ -2,6 +2,7 @@
 import { ref, reactive, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useSettingStore } from '@/stores/setting'
+import { useUiStore } from '@/stores/ui'
 import { fetchModels, addModel, deleteModel, updateModel, getModelFull, testModelConnection } from '@/api/model'
 import { fetchModelNames } from '@/api/model'
 import ToolSettings from '@/components/business/ToolSettings.vue'
@@ -10,6 +11,7 @@ import PermissionSettings from '@/components/business/PermissionSettings.vue'
 
 const router = useRouter()
 const settingStore = useSettingStore()
+const ui = useUiStore()
 
 const activeTab = ref('general')
 
@@ -98,7 +100,12 @@ async function handleAdd() {
 }
 
 async function handleDelete(name) {
-  if (!confirm(`确定删除模型 "${name}" 吗？`)) return
+  const ok = await ui.ask({
+    title: '删除模型',
+    message: `确定删除模型 "${name}" 吗？`,
+    confirmText: '删除',
+  })
+  if (!ok) return
   errorMsg.value = ''
   try {
     await deleteModel(name)

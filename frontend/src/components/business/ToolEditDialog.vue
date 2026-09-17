@@ -13,10 +13,18 @@ const emit = defineEmits(['close', 'saved'])
 
 const toolsStore = useToolsStore()
 
+// 来源类型（与 Go 侧 SourceKind 一致：builtin 由程序内置，这里只能新增后三种）
 const TYPE_OPTIONS = [
   { value: 'cli', label: 'CLI 工具', desc: '执行本地命令行', icon: 'terminal' },
-  { value: 'mcp', label: 'MCP 工具', desc: '接入 MCP Server', icon: 'blocks' },
-  { value: 'api', label: 'API 工具', desc: '调用 HTTP 接口', icon: 'webhook' },
+  { value: 'mcp', label: 'MCP 服务器', desc: '接入一个 MCP Server', icon: 'blocks' },
+  { value: 'http', label: 'HTTP API', desc: '调用 HTTP 接口', icon: 'webhook' },
+]
+
+// 暴露策略：决定该来源的工具怎么给模型看
+const EXPOSURE_OPTIONS = [
+  { value: 'router', label: '经工具路由器发现（默认）', desc: '不占 prompt，模型需要时先 list/describe' },
+  { value: 'direct', label: '直接暴露给模型', desc: '少一轮往返，但工具多时 prompt 会变大' },
+  { value: 'internal', label: '不暴露给模型', desc: '仅保留配置，模型看不到也用不了' },
 ]
 
 const emptyForm = () => ({
@@ -24,7 +32,8 @@ const emptyForm = () => ({
   name: '',
   label: '',
   description: '',
-  type: 'cli',
+  kind: 'cli',
+  exposure: 'router',
   icon: 'terminal',
   enabled: true,
   builtin: false,
@@ -36,8 +45,8 @@ const emptyForm = () => ({
   body: '',
   apiTimeout: 15,
   cliTimeout: 60,
-  // mcp
-  transport: 'stdio',
+  // mcp（用官方 type 取值：streamable-http / sse / stdio）
+  mcpType: 'streamable-http',
   mcpCommand: '',
   mcpArgs: '',
   mcpURL: '',
@@ -61,7 +70,7 @@ const errorMsg = ref('')
 
 const isEdit = computed(() => !!form.id)
 const isBuiltin = computed(() => form.builtin)
-const isMCP = computed(() => form.type === 'mcp')
+const isMCP = computed(() => form.kind === 'mcp')
 
 // 图标选择器过滤
 const iconChoices = computed(() => {
@@ -85,7 +94,8 @@ watch(
         name: t.name || '',
         label: t.label || '',
         description: t.description || '',
-        type: t.type || 'cli',
+        kind: t.kind || 'cli',
+        exposure: t.exposure || 'router',
         icon: t.icon || 'zap',
         enabled: t.enabled !== false,
         builtin: !!t.builtin,
@@ -93,23 +103,23 @@ watch(
         discovered: t.discovered || [],
         disabledTools: [...(t.disabledTools || [])],
       })
-      const cfg = t.config || {}
-      if (t.type === 'cli') {
-        form.command = cfg.command || ''
-        form.cliTimeout = cfg.timeout || 60
-      } else if (t.type === 'api') {
-        form.method = cfg.method || 'GET'
-        form.url = cfg.url || ''
-        form.body = cfg.body || ''
-        form.apiTimeout = cfg.timeout || 15
-        form.apiHeaders = kvFromObject(cfg.headers)
-      } else if (t.type === 'mcp') {
-        form.transport = cfg.transport || 'stdio'
-        form.mcpCommand = cfg.command || ''
-        form.mcpArgs = (cfg.args || []).join('\n')
-        form.mcpURL = cfg.url || ''
-        form.mcpEnv = kvFromObject(cfg.env)
-        form.mcpHeaders = kvFromObject(cfg.headers)
+      // 配置已是类型化字段（cli / http / mcp），不再从弱类型 config 里解析
+      if (t.kind === 'cli' && t.cli) {
+        form.command = t.cli.command || ''
+        form.cliTimeout = t.cli.timeout || 60
+      } else if (t.kind === 'http' && t.http) {
+        form.method = t.http.method || 'GET'
+        form.url = t.http.url || ''
+        form.body = t.http.body || ''
+        form.apiTimeout = t.http.timeout || 15
+        form.apiHeaders = kvFromObject(t.http.headers)
+      } else if (t.kind === 'mcp' && t.mcp) {
+        form.mcpType = t.mcp.type || 'streamable-http'
+        form.mcpCommand = t.mcp.command || ''
+        form.mcpArgs = (t.mcp.args || []).join('\n')
+        form.mcpURL = t.mcp.url || ''
+        form.mcpEnv = kvFromObject(t.mcp.env)
+        form.mcpHeaders = kvFromObject(t.mcp.headers)
       }
     }
   }
@@ -131,8 +141,8 @@ function kvToObject(rows) {
 
 function selectType(type) {
   if (isEdit.value) return
-  form.type = type
-  form.icon = { cli: 'terminal', mcp: 'blocks', api: 'webhook' }[type]
+  form.kind = type
+  form.icon = { cli: 'terminal', mcp: 'blocks', http: 'webhook' }[type]
 }
 
 // ===== 参数行编辑 =====
@@ -158,7 +168,8 @@ function buildPayload() {
     name: form.name.trim(),
     label: form.label.trim() || form.name.trim(),
     description: form.description.trim(),
-    type: form.type,
+    kind: form.kind,
+    exposure: form.exposure,
     icon: form.icon,
     enabled: form.enabled,
     parameters: form.parameters
@@ -166,24 +177,25 @@ function buildPayload() {
       .map((p) => ({ name: p.name.trim(), description: p.description.trim(), required: !!p.required })),
     disabledTools: form.disabledTools,
   }
-  if (form.type === 'cli') {
-    payload.config = { command: form.command, timeout: Number(form.cliTimeout) || 60 }
-  } else if (form.type === 'api') {
-    payload.config = {
+  // 各来源类型写到各自的类型化字段（MCP 用官方形状，导入导出与生态一致）
+  if (form.kind === 'cli') {
+    payload.cli = { command: form.command, timeout: Number(form.cliTimeout) || 60 }
+  } else if (form.kind === 'http') {
+    payload.http = {
       method: form.method,
       url: form.url,
       headers: kvToObject(form.apiHeaders),
       body: form.body,
       timeout: Number(form.apiTimeout) || 15,
     }
-  } else if (form.type === 'mcp') {
-    payload.config = {
-      transport: form.transport,
+  } else if (form.kind === 'mcp') {
+    payload.mcp = {
+      type: form.mcpType,
+      url: form.mcpURL,
+      headers: kvToObject(form.mcpHeaders),
       command: form.mcpCommand,
       args: form.mcpArgs.split('\n').map((s) => s.trim()).filter(Boolean),
       env: kvToObject(form.mcpEnv),
-      url: form.mcpURL,
-      headers: kvToObject(form.mcpHeaders),
     }
   }
   return payload
@@ -199,12 +211,20 @@ async function handleSave() {
     errorMsg.value = '工具描述不能为空（大模型依靠描述判断何时使用该工具）'
     return
   }
-  if (form.type === 'cli' && !form.command.trim()) {
+  if (form.kind === 'cli' && !form.command.trim()) {
     errorMsg.value = 'CLI 工具需要填写命令模板'
     return
   }
-  if (form.type === 'api' && !form.url.trim()) {
-    errorMsg.value = 'API 工具需要填写请求 URL'
+  if (form.kind === 'http' && !form.url.trim()) {
+    errorMsg.value = 'HTTP API 需要填写请求 URL'
+    return
+  }
+  if (form.kind === 'mcp' && form.mcpType === 'stdio' && !form.mcpCommand.trim()) {
+    errorMsg.value = 'stdio 接入需要填写启动命令'
+    return
+  }
+  if (form.kind === 'mcp' && form.mcpType !== 'stdio' && !form.mcpURL.trim()) {
+    errorMsg.value = 'HTTP/SSE 接入需要填写 Server URL'
     return
   }
   saving.value = true
@@ -221,11 +241,11 @@ async function handleSave() {
 
 async function handleTest() {
   testError.value = ''
-  if (form.transport === 'stdio' && !form.mcpCommand.trim()) {
+  if (form.mcpType === 'stdio' && !form.mcpCommand.trim()) {
     testError.value = '请先填写启动命令'
     return
   }
-  if (form.transport !== 'stdio' && !form.mcpURL.trim()) {
+  if (form.mcpType !== 'stdio' && !form.mcpURL.trim()) {
     testError.value = '请先填写 Server URL'
     return
   }
@@ -267,7 +287,7 @@ function toggleDiscoveredTool(name) {
               v-for="t in TYPE_OPTIONS"
               :key="t.value"
               class="type-card"
-              :class="{ active: form.type === t.value }"
+              :class="{ active: form.kind === t.value }"
               @click="selectType(t.value)"
             >
               <ToolIcon :name="t.icon" :size="22" />
@@ -330,8 +350,21 @@ function toggleDiscoveredTool(name) {
           ></textarea>
         </div>
 
+        <!-- 暴露策略：决定该来源的工具怎么给模型看 -->
+        <div class="form-group">
+          <label>
+            暴露策略
+            <span class="checkbox-hint">（决定模型是"直接用得上"还是"要先发现"）</span>
+          </label>
+          <select v-model="form.exposure" class="input" style="max-width: 420px">
+            <option v-for="e in EXPOSURE_OPTIONS" :key="e.value" :value="e.value">
+              {{ e.label }} —— {{ e.desc }}
+            </option>
+          </select>
+        </div>
+
         <!-- ===== CLI 配置 ===== -->
-        <template v-if="form.type === 'cli' && !isBuiltin">
+        <template v-if="form.kind === 'cli' && !isBuiltin">
           <div class="form-group">
             <label>命令模板 <span class="required">*</span></label>
             <input v-model="form.command" class="input code" placeholder="ffmpeg {{input}} 或 git log --oneline -20" />
@@ -344,7 +377,7 @@ function toggleDiscoveredTool(name) {
         </template>
 
         <!-- ===== API 配置 ===== -->
-        <template v-if="form.type === 'api'">
+        <template v-if="form.kind === 'http'">
           <div class="form-row">
             <div class="form-group compact method-group">
               <label>方法</label>
@@ -385,12 +418,13 @@ function toggleDiscoveredTool(name) {
           <div class="form-group">
             <label>传输方式</label>
             <div class="seg">
-              <button :class="{ active: form.transport === 'stdio' }" @click="form.transport = 'stdio'">stdio（本地进程）</button>
-              <button :class="{ active: form.transport === 'http' }" @click="form.transport = 'http'">Streamable HTTP</button>
-              <button :class="{ active: form.transport === 'sse' }" @click="form.transport = 'sse'">SSE（旧版）</button>
+              <button :class="{ active: form.mcpType === 'streamable-http' }" @click="form.mcpType = 'streamable-http'">Streamable HTTP</button>
+              <button :class="{ active: form.mcpType === 'sse' }" @click="form.mcpType = 'sse'">SSE（旧版）</button>
+              <button :class="{ active: form.mcpType === 'stdio' }" @click="form.mcpType = 'stdio'">stdio（本地进程）</button>
             </div>
+            <div class="hint">与官方 mcpServers 片段一致（type 字段取值），可直接与其它客户端互导</div>
           </div>
-          <template v-if="form.transport === 'stdio'">
+          <template v-if="form.mcpType === 'stdio'">
             <div class="form-group">
               <label>启动命令 <span class="required">*</span></label>
               <input v-model="form.mcpCommand" class="input code" placeholder="npx" />
@@ -448,7 +482,7 @@ function toggleDiscoveredTool(name) {
         </template>
 
         <!-- ===== 自定义参数（CLI/API） ===== -->
-        <div v-if="(form.type === 'cli' || form.type === 'api') && !isBuiltin" class="form-group">
+        <div v-if="(form.kind === 'cli' || form.kind === 'http') && !isBuiltin" class="form-group">
           <label>工具参数（大模型调用时填写）</label>
           <div v-for="(p, i) in form.parameters" :key="i" class="param-row">
             <input v-model="p.name" class="input small" placeholder="参数名，如 city" />

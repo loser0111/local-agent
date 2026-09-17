@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"strings"
@@ -61,6 +62,9 @@ func ParseDecision(s string) (Decision, bool) {
 	}
 }
 
+// maxMCPSubjectUnits MCP 主体最多保留多少个参数对（超出部分不参与规则匹配，方向安全）
+const maxMCPSubjectUnits = 32
+
 // ===== 判定主体 =====
 
 // SubjectKind 判定主体的类别
@@ -70,6 +74,7 @@ const (
 	SubjectTool    SubjectKind = "tool"    // 普通工具（MCP / HTTP API 等）：主体是工具名 + 参数摘要
 	SubjectCommand SubjectKind = "command" // 命令类工具（exec_shell / 动态 CLI）：主体是展开后的命令，逐段判定
 	SubjectPath    SubjectKind = "path"    // 路径类操作（read_file / write_file / edit_file 等）：主体是目标路径
+	SubjectMCP     SubjectKind = "mcp"     // MCP 工具：主体是**结构化的参数对**（每个参数一项 k=v），支持精确授权
 	SubjectMeta    SubjectKind = "meta"    // 只读元数据操作（tool_router 的 list / describe）：不判定
 )
 
@@ -115,6 +120,49 @@ func newCommandSubject(tool, cmd string) Subject {
 		Units:   units,
 		Raw:     cmd,
 		Trusted: trusted,
+	}
+}
+
+// newMCPSubject 构造 MCP 工具主体：每个参数作为独立的 k=v 单元（键名排序）。
+//
+// 这样规则才能精确表达"只允许带 appid=100049128 的调用"，而不再依赖参数摘要拼接后的
+// 字符串形状（旧做法下 `mcp__x__y(appid=1)` 是否命中取决于键名排序，属于意外可用）。
+// 参数数量超过 maxMCPSubjectUnits 时截断（只影响规则能匹配到的参数个数，方向安全）。
+func newMCPSubject(tool string, args map[string]interface{}) Subject {
+	units := make([]string, 0, len(args))
+	keys := make([]string, 0, len(args))
+	for k := range args {
+		keys = append(keys, k)
+	}
+	sortStrings(keys)
+	for _, k := range keys {
+		units = append(units, formatMCPPair(k, args[k]))
+		if len(units) >= maxMCPSubjectUnits {
+			break
+		}
+	}
+	raw := compactArgs(args)
+	return Subject{
+		Tool:    tool,
+		Kind:    SubjectMCP,
+		Units:   units,
+		Raw:     raw,
+		Trusted: true,
+	}
+}
+
+// formatMCPPair 把一个参数格式化成 k=v；复杂值（对象/数组）压成紧凑 JSON
+func formatMCPPair(key string, value interface{}) string {
+	switch v := value.(type) {
+	case string:
+		return key + "=" + v
+	case nil:
+		return key + "="
+	default:
+		if b, err := json.Marshal(v); err == nil {
+			return key + "=" + string(b)
+		}
+		return fmt.Sprintf("%s=%v", key, v)
 	}
 }
 
@@ -462,17 +510,91 @@ func (rs *RuleSet) AllRules() []Rule {
 	return out
 }
 
+// matchesUnitOf 按主体类别选匹配方式。
+// MCP 参数对只做**精确匹配**：前缀规则作用在 `k=v` 这种短串上极易误伤
+// （`appid=1` 会前缀命中 `appid=100049128`），所以 MCP 不支持前缀规则——
+// 需要精确授权就写完整的参数对。
+func (r Rule) matchesUnitOf(kind SubjectKind, tool, unit string) bool {
+	if kind != SubjectMCP {
+		return r.matchesUnit(tool, unit)
+	}
+	if r.Tool != "*" && r.Tool != tool {
+		return false
+	}
+	if r.IsToolLevel() {
+		return true
+	}
+	return unit == r.Spec
+}
+
+// ruleTargetsTool 规则是否点名了该工具（含通配）
+func ruleTargetsTool(r Rule, tool string) bool {
+	return r.Tool == "*" || r.Tool == tool
+}
+
+// coversMCPUnits 放宽方向（MCP 专用）：要求**规则侧**每一条都被调用的参数满足。
+//
+// 与命令段恰好相反：命令段是"主体每一段都要被规则覆盖"，而 MCP 的参数对表达的是
+// "一次调用的形状"——allow 规则 `mcp__x__y(appid=100049128)` 的语义应当是
+// "只放行带这个参数的调用"，而不是"要求覆盖全部参数"（后者会让任何带附加参数的调用无法授权）。
+// 只要有一条点名了该工具的规则未被满足，就不放行（宁严勿松）。
+func coversMCPUnits(rules []Rule, s Subject) (Rule, bool) {
+	if len(rules) == 0 || len(s.Units) == 0 {
+		return Rule{}, false
+	}
+	var (
+		first      Rule
+		set        bool
+		considered int
+	)
+	for _, r := range rules {
+		if !ruleTargetsTool(r, s.Tool) {
+			continue
+		}
+		considered++
+		if r.IsToolLevel() {
+			return r, true // 工具级规则：整工具放行
+		}
+		ok := false
+		for _, u := range s.Units {
+			if r.matchesUnitOf(SubjectMCP, s.Tool, u) {
+				ok = true
+				break
+			}
+		}
+		if !ok {
+			return Rule{}, false
+		}
+		if !set {
+			first, set = r, true
+		}
+	}
+	if considered == 0 || !set {
+		return Rule{}, false
+	}
+	return first, true
+}
+
 // matchAnyUnit 收紧方向（deny / ask）：**存在**一段命中即成立。
 // 这个方向保守，可用于判定"整条命令里有没有危险的一段"。
 func matchAnyUnit(rules []Rule, s Subject) (Rule, bool) {
 	for _, r := range rules {
 		for _, u := range s.Units {
-			if r.matchesUnit(s.Tool, u) {
+			if r.matchesUnitOf(s.Kind, s.Tool, u) {
 				return r, true
 			}
 		}
 	}
 	return Rule{}, false
+}
+
+// coversLoosen 放宽方向统一入口：MCP 主体走"规则侧全覆盖"，其余走"主体段全覆盖"。
+// 两者的量词方向不同（见 coversMCPUnits 的说明），入口只此一处，避免调用点各写各的。
+func coversLoosen(rules []Rule, s Subject) (Rule, bool) {
+	if s.Kind == SubjectMCP {
+		return coversMCPUnits(rules, s)
+	}
+	return coversAllUnits(rules, s)
 }
 
 // coversAllUnits 放宽方向（allow / 会话授权）：**每一段**都必须被覆盖才成立。
@@ -490,7 +612,7 @@ func coversAllUnits(rules []Rule, s Subject) (Rule, bool) {
 	for _, u := range s.Units {
 		covered := false
 		for _, r := range rules {
-			if r.matchesUnit(s.Tool, u) {
+			if r.matchesUnitOf(s.Kind, s.Tool, u) {
 				if !set {
 					first = r
 					set = true
@@ -747,6 +869,8 @@ func isReadOnlyCommand(units []string) bool {
 // readOnlyTools 内置无副作用工具：直接放行（不弹窗）
 var readOnlyTools = map[string]bool{
 	"read_skill": true,
+	// read_skill_file 只能在技能目录内读文件，比 read_file 更受限
+	"read_skill_file": true,
 	// ask_user 只与用户交互，不碰文件系统也不执行命令；它本身就是"问用户"，
 	// 再叠一层权限弹窗只会变成连续两个弹窗，且没有任何安全收益。
 	toolAskUser: true,
@@ -910,9 +1034,9 @@ func Authorize(in AuthorizeInput) Verdict {
 		return Verdict{Decision: DecisionAllow, Stage: StageGrant, Reason: "本会话已授权", Rule: r}
 	}
 
-	// 10. 用户 allow 规则（放宽方向：每一段都被覆盖）
+	// 10. 用户 allow 规则（放宽方向：MCP 按参数对，其余逐段）
 	if in.Rules != nil {
-		if r, hit := coversAllUnits(in.Rules.Allow, s); hit {
+		if r, hit := coversLoosen(in.Rules.Allow, s); hit {
 			return Verdict{Decision: DecisionAllow, Stage: StageAllowRule, Reason: "命中 allow 规则", Rule: r}
 		}
 	}
@@ -1075,7 +1199,7 @@ func (g Grant) Rule() Rule {
 	return Rule{Tool: g.Tool, Spec: g.Spec, IsPrefix: g.IsPrefix, Source: "会话授权"}
 }
 
-// grantsCoverAll 会话授权走**放宽方向**：每一段都必须被某条授权覆盖。
+// grantsCoverAll 会话授权走**放宽方向**（MCP 主体按参数对判定，其余逐段判定）
 func grantsCoverAll(grants []Grant, s Subject) (Rule, bool) {
 	if len(grants) == 0 {
 		return Rule{}, false
@@ -1084,7 +1208,7 @@ func grantsCoverAll(grants []Grant, s Subject) (Rule, bool) {
 	for _, g := range grants {
 		rules = append(rules, g.Rule())
 	}
-	return coversAllUnits(rules, s)
+	return coversLoosen(rules, s)
 }
 
 // GrantStore 会话授权存储（内存，进程退出即失效）
