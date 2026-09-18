@@ -1,0 +1,48 @@
+{
+  "id": "desktop-plugin",
+  "name": "Windows 桌面插件（定时任务提示）",
+  "version": "0.1.0",
+  "hostAPIVersion": "1.0",
+  "kind": "builtin",
+  "entry": "wails-tmp/plugin",
+  "capabilities": [
+    "schedule.once",
+    "schedule.interval",
+    "schedule.recurring",
+    "schedule.cron",
+    "task.reminder",
+    "task.exec",
+    "notify.toast",
+    "notify.fallback",
+    "policy.dnd",
+    "policy.pause",
+    "tray.resident"
+  ],
+  "docs": [
+    "docs/desktop-plugin-design.md",
+    "docs/desktop-plugin-requirements.md",
+    "docs/desktop-plugin-implementation-plan.md"
+  ],
+  "dataFiles": [
+    "tasks.json",
+    "tasks.json.bak",
+    "task-runs/<taskId>/<runId>.json"
+  ],
+  "emits": [
+    "task:event"
+  ],
+  "hostMethods": [
+    "NotifyAvailable",
+    "Notify",
+    "RegisterCategories",
+    "OnNotifyResponse",
+    "RevealWindow",
+    "RunAgent",
+    "CancelRun",
+    "SubscribeRuns",
+    "Emit",
+    "BaseDir",
+    "AppVersion"
+  ],
+  "notes": "编译期内置插件（ADR-4）：与主程序同版本编译，仅通过 Host 接口依赖主程序；插件自身零网络请求。"
+}

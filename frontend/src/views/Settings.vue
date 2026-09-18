@@ -7,6 +7,7 @@ import { fetchModels, addModel, deleteModel, updateModel, getModelFull, testMode
 import { fetchModelNames } from '@/api/model'
 import ToolSettings from '@/components/business/ToolSettings.vue'
 import SkillSettings from '@/components/business/SkillSettings.vue'
+import TaskSettings from '@/components/business/TaskSettings.vue'
 import PermissionSettings from '@/components/business/PermissionSettings.vue'
 
 const router = useRouter()
@@ -20,6 +21,7 @@ const tabs = [
   { key: 'model', label: '模型配置' },
   { key: 'tool', label: '工具配置' },
   { key: 'skill', label: '技能配置' },
+  { key: 'task', label: '定时任务' },
   { key: 'permission', label: '权限配置' },
   { key: 'about', label: '关于' },
 ]
@@ -523,6 +525,9 @@ onMounted(() => {
 
         <!-- 技能配置 -->
         <SkillSettings v-if="activeTab === 'skill'" />
+
+        <!-- 定时任务（桌面插件） -->
+        <TaskSettings v-if="activeTab === 'task'" />
 
         <!-- 权限配置 -->
         <div v-if="activeTab === 'permission'" class="settings-panel">
