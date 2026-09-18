@@ -40,6 +40,10 @@ type App struct {
 	// 运行取消注册表：普通聊天与计划执行共用，支持软/硬两级取消
 	runs *runRegistry
 
+	// subagents 运行中的子代理（内存态）。跑完的写回它自己的会话文件，
+	// 列表接口把两者合起来（见 subagentregistry.go）。
+	subagents *subagentTracker
+
 	// reqLog 各会话最近一次真实发出的 LLM 请求快照（仅供界面查看/排障，内存态）
 	reqLog *llmRequestLog
 }
@@ -86,6 +90,7 @@ func (a *App) startup(ctx context.Context) {
 	a.baseDir = baseDir
 	a.runs = &runRegistry{}
 	a.reqLog = &llmRequestLog{}
+	a.subagents = newSubagentTracker()
 	a.ensurePermissionState()
 	a.fileChanges = NewFileChangeLog(500)
 }
@@ -237,6 +242,25 @@ func (a *App) GetSession(id string) (*Session, error) {
 
 // DeleteSession 删除指定会话
 func (a *App) DeleteSession(id string) error {
+	// 先连子代理会话一起清掉。子代理刻意不出现在会话列表里，主会话删掉之后再没有
+	// 任何入口能发现它们——留下的不只是孤儿文件，还有它们的 checkpoint ref
+	// （refs/local-agent/checkpoints/<子代理会话ID>）会永久残留在用户的 .git 里。
+	children, err := a.sessionStore.ListSubagentSessions(id)
+	if err != nil {
+		// 列不出来不阻断主会话的删除，只记一笔——用户要点删除，就该删掉
+		fmt.Printf("[App] 列出子代理会话失败: %v\n", err)
+	}
+	for _, child := range children {
+		if dir, derr := a.resolveProjectDir(child.ID); derr == nil && dir != "" {
+			_ = DropSessionCheckpoints(dir, child.ID)
+		}
+		a.diffService.ForgetBaseline(child.ID)
+		a.reqLog.forget(child.ID)
+		if derr := a.sessionStore.DeleteSession(child.ID); derr != nil {
+			fmt.Printf("[App] 删除子代理会话 %s 失败: %v\n", child.ID, derr)
+		}
+	}
+
 	// 清掉该会话的 checkpoint ref。这是本项目唯一会写入用户仓库 refs/ 的地方，
 	// 必须在会话生命周期结束时清理干净，否则会在用户的 .git 里永久残留。
 	if dir, err := a.resolveProjectDir(id); err == nil && dir != "" {

@@ -537,7 +537,7 @@ func (a *App) executeChat(sessionID, query string, useStream bool) *ChatResult {
 	// 登记为可取消的运行：前端「停止」经 StopChat 命中它（软取消 / 硬取消）
 	run := a.runs.begin(sessionID, "")
 	defer a.runs.end(run)
-	return a.runToolLoop(run, prompt, &model, useStream, false)
+	return runToolLoop(a.newMainAgentRun(run, session, dir, prompt, &model, useStream, false))
 }
 
 // buildBasePrompt 组装基础系统提示词：基础人设 + 工作区说明 + 技能上下文（L1 清单 / 强制注入正文）
@@ -554,7 +554,10 @@ func (a *App) buildBasePrompt(session *Session, dir string) string {
 		"读写文件请用 read_file / write_file / edit_file（相对路径相对于工作区目录）；" +
 		"查找文件用 glob、搜索内容用 grep、查看目录用 list_dir。这些工具要么只读、要么按路径精确操作，" +
 		"比 shell 命令更安全，也不会被 shell 语法（引号、重定向、命令替换）影响。\n" +
-		"exec_shell 留给构建、测试、git 等真正的命令；不要用它做 cat / sed -i / echo > 这类文件读写。"
+		"exec_shell 留给构建、测试、git 等真正的命令；不要用它做 cat / sed -i / echo > 这类文件读写。\n" +
+		"遇到会产生大量中间过程、且与当前主线关系不大的任务（把一个模块摸清楚、独立调研一个问题），" +
+		"可以用 spawn_agent 派一个子代理去做：它有自己独立的上下文，你只收到一份结论，" +
+		"那些中间过程不会占用你的上下文。一两步就能做完的事不必派。"
 
 	if a.skillStore != nil {
 		enabled := a.enabledSkillsForSession(session)
@@ -608,22 +611,37 @@ func (a *App) skillAllowedInSession(session *Session, id string) bool {
 }
 
 // runToolLoop 执行一次「构建请求→LLM→工具循环」的完整运行。
-// 普通聊天（executeChat）与计划步骤执行（ExecutePlan）共用的唯一执行引擎。
-// systemPrompt 由调用方组装（buildBasePrompt，可再叠加计划上下文）；
-// 当前用户消息（普通聊天为用户输入、计划执行为合成的步骤消息）已由调用方持久化进会话历史；
-// compact=true 时对历史消息做确定性压缩（计划执行专用，普通聊天不受影响）；
-// run 承载本次运行的取消控制与运行 ctx：软取消在每轮开始前生效；
-// 硬取消还会 cancel run.Ctx()，从而断开在途 LLM 请求、杀掉在跑的子进程、
-// 结束等待中的提问。run 为 nil 时自造一个不可取消的，保证函数可被单独调用。
-func (a *App) runToolLoop(run *runControl, systemPrompt string, model *Model,
-	useStream, compact bool) *ChatResult {
-	if run == nil {
-		run = (&runRegistry{}).begin("", "")
+//
+// 普通聊天、计划步骤执行、以及将来的子代理共用的**唯一**执行引擎。
+// 它只依赖 agentRun 携带的依赖、不直接引用 *App，所以是自由函数而不是方法——
+// 编译通过本身就是这层解耦的证明（见 agentrun.go）。
+//
+// 调用方负责：组装 systemPrompt、装配工具视图与权限网关、把当前用户消息持久化进会话历史。
+// ar.Compact=true 时对历史消息做确定性截断（降级路径与调试开关）。
+// 软取消在每轮工具循环开始前检查；硬取消由 ar.Control 的 ctx 贯穿到在途请求与子进程。
+func runToolLoop(ar *agentRun) *ChatResult {
+	if ar == nil || ar.Store == nil {
+		return &ChatResult{Error: "运行上下文缺失"}
 	}
-	sessionID := run.sessionID
+	// 把运行参数取成局部变量：循环主体因此几乎不用改，
+	// diff 里只剩「依赖从哪里来」这一件事变了，便于逐行复核。
+	run := ar.Control
+	if run == nil {
+		run = (&runRegistry{}).begin(ar.SessionID, ar.PlanID)
+	}
+	sessionID := ar.SessionID
+	systemPrompt := ar.SystemPrompt
+	model := ar.Model
+	useStream, compact := ar.Stream, ar.Compact
+	dir := ar.Dir
+	isRepo := ar.IsRepo
+	maxTurns := ar.MaxTurns
+	if maxTurns <= 0 {
+		maxTurns = MaxChatTurns
+	}
 
 	// 1. 重新加载会话：确保包含调用方刚持久化的用户消息以及此前全部消息（跨步骤上下文连续）
-	session, err := a.sessionStore.GetSession(sessionID)
+	session, err := ar.Store.GetSession(sessionID)
 	if err != nil {
 		return &ChatResult{Error: fmt.Sprintf("加载会话失败: %v", err)}
 	}
@@ -635,8 +653,7 @@ func (a *App) runToolLoop(run *runControl, systemPrompt string, model *Model,
 	}
 
 	// ★ 记录本轮工作区基线（对话开始前的快照，用于轮末计算本轮 diff）
-	dir, _ := a.resolveProjectDir(sessionID)
-	isRepo := dir != "" && a.diffService.IsRepo(dir)
+	// dir 与 isRepo 由调用方给出（见 agentRun），这里不再自行解析
 	turnBase := ""
 	// turnCheckpoint 撤销用的完整快照。与 turnBase 刻意分开、各取一份：
 	// turnBase（stash create）不含未跟踪文件、用于算 diff；这份含未跟踪文件、用于回退。
@@ -644,10 +661,10 @@ func (a *App) runToolLoop(run *runControl, systemPrompt string, model *Model,
 	turnCheckpoint := ""
 	if isRepo {
 		// 先恢复会话里持久化的 diff 状态（基线与已归因的路径），重启后仍能算会话级 diff
-		a.diffService.RestoreSession(sessionID, session.DiffBaseline, session.DiffTouched)
-		a.diffService.EnsureBaseline(sessionID, dir)
-		a.diffService.BeginTurn(sessionID)
-		turnBase = a.diffService.TurnSnapshot(dir)
+		ar.Diff.RestoreSession(sessionID, session.DiffBaseline, session.DiffTouched)
+		ar.Diff.EnsureBaseline(sessionID, dir)
+		ar.Diff.BeginTurn(sessionID)
+		turnBase = ar.Diff.TurnSnapshot(dir)
 
 		// 取不到不算错误：本轮只是不可回退，对话照常进行
 		if cp, cpErr := Checkpoint(dir, sessionID, nextDiffTurn(session)); cpErr == nil {
@@ -662,19 +679,10 @@ func (a *App) runToolLoop(run *runControl, systemPrompt string, model *Model,
 	//    compact=true 是降级/调试开关，强制走确定性截断，不是常规路径。
 	messages := buildRunMessages(session, systemPrompt, compact)
 
-	// 4. 按会话白名单装配工具视图（装配期统一包一层权限网关），获取暴露给 LLM 的工具定义（仅 tool_router）
-	toolView := a.toolManager.BuildView(context.Background(), BuildOptions{
-		EnabledTools:  session.EnabledTools,
-		EnabledSkills: session.EnabledSkills,
-		ProjectDir:    dir,
-		SessionID:     sessionID,
-		Changes:       a.fileChanges,
-		Enforcer:      a.newPermissionEnforcer(session, dir),
-		// ask_user 的回路：绑定当前会话（阻塞等待用户作答后把结果回填给模型）
-		Ask: func(ctx context.Context, req AskRequest) (AskAnswer, error) {
-			return a.askUser(ctx, sessionID, req)
-		},
-	})
+	// 4. 工具视图由调用方装配（见 newMainAgentRun）。
+	// 这里是子代理唯一需要与主会话不同的地方——它要用自己的权限网关与工具子集，
+	// 所以装配点必须留在调用方，循环只管拿来用。
+	toolView := ar.ToolView
 	tools := toolView.GetToolsForLLM()
 
 	// 5. 上下文用量的基准量：窗口大小、工具定义的固定开销、用量锚点。
@@ -692,7 +700,7 @@ func (a *App) runToolLoop(run *runControl, systemPrompt string, model *Model,
 	var toolCallRecords []ToolCall
 	var persistedMsgs []Message // 本次运行持久化的所有消息
 
-	for turn := 0; turn < MaxChatTurns; turn++ {
+	for turn := 0; turn < maxTurns; turn++ {
 		// 软取消：当前 LLM 调用与工具执行跑完，下一轮循环不再开始。
 		//
 		// 刻意**不在循环中途掐断**：本轮所有工具都会走完（硬取消时它们会因 ctx 已取消
@@ -700,7 +708,7 @@ func (a *App) runToolLoop(run *runControl, systemPrompt string, model *Model,
 		// tool_calls 与 tool 消息一一配对。若在工具执行到一半直接返回，
 		// 会留下断裂的消息序列——它不会当次报错，而是在下一次构建请求时被 API 拒绝。
 		if run.SoftRequested() {
-			a.emitChatEvent(ChatEvent{Type: ChatEventCancelled, Error: "执行已取消"})
+			ar.Recorder.Emit(ChatEvent{Type: ChatEventCancelled, Error: "执行已取消"})
 			return &ChatResult{
 				Error:      "执行已取消",
 				ToolCalls:  toolCallRecords,
@@ -715,8 +723,8 @@ func (a *App) runToolLoop(run *runControl, systemPrompt string, model *Model,
 		// 压缩失败不阻断本轮：compactSession 内部已降级，这里只记一笔日志。
 		ctxStat = contextStatOf(session, messages, window, anchor, toolTokens)
 		compactedThisTurn := false
-		if needCompact(ctxStat.UsedTokens, window) && !summaryBroken && !compact {
-			out, cerr := a.compactSession(run.Ctx(), session, model)
+		if ar.Compactor != nil && needCompact(ctxStat.UsedTokens, window) && !summaryBroken && !compact {
+			out, cerr := ar.Compactor(run.Ctx(), session, model)
 			switch {
 			case cerr != nil:
 				fmt.Printf("[context] 压缩出错（本轮继续，不阻断对话）: %v\n", cerr)
@@ -729,7 +737,7 @@ func (a *App) runToolLoop(run *runControl, systemPrompt string, model *Model,
 			case !out.Compressed:
 				fmt.Printf("[context] 未压缩: %s\n", out.Reason)
 			default:
-				if s2, e2 := a.sessionStore.GetSession(sessionID); e2 == nil {
+				if s2, e2 := ar.Store.GetSession(sessionID); e2 == nil {
 					session = s2
 					messages = buildRunMessages(session, systemPrompt, compact)
 					anchor = nil
@@ -741,7 +749,7 @@ func (a *App) runToolLoop(run *runControl, systemPrompt string, model *Model,
 
 		// 记录**真实发出的那一份**（摘要替换 + 工具结果预算之后），供界面排障查看。
 		// 快照内部做浅拷贝；这里不阻断任何逻辑，失败了也不影响对话。
-		a.reqLog.record(snapshotLLMRequest(run, session, turn, modelID, systemPrompt, messages, tools, ctxStat, compactedThisTurn))
+		ar.ReqLog.record(snapshotLLMRequest(run, session, turn, modelID, systemPrompt, messages, tools, ctxStat, compactedThisTurn))
 
 		req := &LLMReq{
 			Model:       modelID,
@@ -758,7 +766,7 @@ func (a *App) runToolLoop(run *runControl, systemPrompt string, model *Model,
 			flushShutdown func()
 		)
 		if useStream {
-			flusher, flushShutdown = a.startDeltaFlusher()
+			flusher, flushShutdown = ar.Recorder.FlushStream()
 			resp, err = callLLMStreamForModel(run.Ctx(), model, req, flusher)
 			flushShutdown() // 确保残余分片在进入工具执行/done 前全部发出
 		} else {
@@ -768,7 +776,7 @@ func (a *App) runToolLoop(run *runControl, systemPrompt string, model *Model,
 			// 硬取消会让在途请求以 "context canceled" 失败：按"已取消"返回，
 			// 而不是当成一次真实失败——前端对这两者的处理不同（取消不该提示重试）。
 			if run.Kind() == cancelKindHard {
-				a.emitChatEvent(ChatEvent{Type: ChatEventCancelled, Error: "执行已取消"})
+				ar.Recorder.Emit(ChatEvent{Type: ChatEventCancelled, Error: "执行已取消"})
 				return &ChatResult{
 					Error:      "执行已取消",
 					ToolCalls:  toolCallRecords,
@@ -783,9 +791,9 @@ func (a *App) runToolLoop(run *runControl, systemPrompt string, model *Model,
 			if !overflowRetried && isContextOverflowError(err) {
 				overflowRetried = true
 				if !summaryBroken && !compact {
-					out, cerr := a.compactSession(run.Ctx(), session, model)
+					out, cerr := ar.Compactor(run.Ctx(), session, model)
 					if cerr == nil && out.Compressed {
-						if s2, e2 := a.sessionStore.GetSession(sessionID); e2 == nil {
+						if s2, e2 := ar.Store.GetSession(sessionID); e2 == nil {
 							session = s2
 							messages = buildRunMessages(session, systemPrompt, compact)
 							anchor = nil
@@ -846,20 +854,26 @@ func (a *App) runToolLoop(run *runControl, systemPrompt string, model *Model,
 					Args:   args,
 					Status: "running",
 				}
-				a.emitChatEvent(ChatEvent{
+				ar.Recorder.Emit(ChatEvent{
 					Type:     ChatEventToolCallStart,
 					ToolCall: &toolCallRecord,
 				})
 
 				// 执行工具（记录改动游标，执行后取本次调用改了哪些文件）
-				mark := a.fileChanges.Mark(sessionID)
+				mark := ar.Changes.Mark(sessionID)
 				// 前后各扫一次工作区：执行窗口内的改动归因给本会话（含 exec_shell 改的文件）
-				a.diffService.NoteActivity(sessionID, dir, false)
+				ar.Diff.NoteActivity(sessionID, dir, false)
 				// 执行工具：必须传运行 ctx —— 硬取消靠它切断权限等待、子进程与在途请求
 				result, execErr := toolView.ExecuteToolCtx(run.Ctx(), tc.Function.Name, args)
-				a.diffService.NoteActivity(sessionID, dir, true)
+				ar.Diff.NoteActivity(sessionID, dir, true)
+				// 子代理在本次调用期间改的文件不该算作本会话的改动（见 runSubagent 与
+				// runControl.noteExcludedPaths）。剔除必须放在这里——归因是上面这一句
+				// 按时间窗口扫全工作区写进去的，早一步剔除就会被重新记上。
+				if excluded := run.takeExcludedPaths(sessionID); len(excluded) > 0 {
+					ar.Diff.DropTouched(sessionID, excluded)
+				}
 				duration := time.Since(startTime).Seconds()
-				if changed := a.fileChanges.Since(sessionID, mark); len(changed) > 0 {
+				if changed := ar.Changes.Since(sessionID, mark); len(changed) > 0 {
 					files := make([]string, 0, len(changed))
 					for _, c := range changed {
 						files = append(files, c.Rel)
@@ -886,7 +900,7 @@ func (a *App) runToolLoop(run *runControl, systemPrompt string, model *Model,
 				executedToolCalls = append(executedToolCalls, toolCallRecord)
 
 				// 推送工具调用完成事件
-				a.emitChatEvent(ChatEvent{
+				ar.Recorder.Emit(ChatEvent{
 					Type:     ChatEventToolCallEnd,
 					ToolCall: &toolCallRecord,
 				})
@@ -898,7 +912,7 @@ func (a *App) runToolLoop(run *runControl, systemPrompt string, model *Model,
 				Content:   choice.Message.Content, // LLM 可能返回空内容
 				ToolCalls: executedToolCalls,
 			}
-			savedAssistant, err := a.sessionStore.AppendMessage(sessionID, assistantMsg)
+			savedAssistant, err := ar.Store.AppendMessage(sessionID, assistantMsg)
 			if err != nil {
 				return &ChatResult{
 					Error:     fmt.Sprintf("持久化 assistant 消息失败: %v", err),
@@ -930,7 +944,7 @@ func (a *App) runToolLoop(run *runControl, systemPrompt string, model *Model,
 					Content:    toolContent,
 					ToolCallID: tc.ID,
 				}
-				savedTool, err := a.sessionStore.AppendMessage(sessionID, toolMsg)
+				savedTool, err := ar.Store.AppendMessage(sessionID, toolMsg)
 				if err != nil {
 					return &ChatResult{
 						Error:     fmt.Sprintf("持久化 tool 消息失败: %v", err),
@@ -956,7 +970,7 @@ func (a *App) runToolLoop(run *runControl, systemPrompt string, model *Model,
 			Role:    RoleAssistant,
 			Content: choice.Message.Content,
 		}
-		savedFinal, err := a.sessionStore.AppendMessage(sessionID, finalMsg)
+		savedFinal, err := ar.Store.AppendMessage(sessionID, finalMsg)
 		if err != nil {
 			return &ChatResult{
 				Error:     fmt.Sprintf("持久化最终回复失败: %v", err),
@@ -969,11 +983,11 @@ func (a *App) runToolLoop(run *runControl, systemPrompt string, model *Model,
 		// ★ 计算本轮 diff：只统计本会话在本轮触碰过的路径（会话级隔离）
 		var diffFiles []DiffFile
 		if isRepo {
-			turnPaths := a.diffService.TurnTouched(sessionID)
-			if files, err := a.diffService.DiffScoped(dir, turnBase, turnPaths); err == nil && len(files) > 0 {
+			turnPaths := ar.Diff.TurnTouched(sessionID)
+			if files, err := ar.Diff.DiffScoped(dir, turnBase, turnPaths); err == nil && len(files) > 0 {
 				diffFiles = files
-				base, touched := a.diffService.SnapshotState(sessionID)
-				turnNo, appendErr := a.sessionStore.AppendDiff(sessionID, DiffTurn{
+				base, touched := ar.Diff.SnapshotState(sessionID)
+				turnNo, appendErr := ar.Store.AppendDiff(sessionID, DiffTurn{
 					Files:     files,
 					Additions: sumAdd(files),
 					Deletions: sumDel(files),
@@ -982,12 +996,8 @@ func (a *App) runToolLoop(run *runControl, systemPrompt string, model *Model,
 					Base:     turnCheckpoint,
 					EndState: endStateOf(dir, files),
 				}, base, touched)
-				if appendErr == nil && a.ctx != nil {
-					wailsRuntime.EventsEmit(a.ctx, "diff:update", ChatEvent{
-						Type: "diff_update",
-						Diff: files,
-						Turn: turnNo,
-					})
+				if appendErr == nil {
+					ar.Recorder.EmitDiff(files, turnNo)
 				}
 			}
 		}
@@ -1001,12 +1011,10 @@ func (a *App) runToolLoop(run *runControl, systemPrompt string, model *Model,
 		}
 
 		// 推送完成事件
-		if a.ctx != nil {
-			wailsRuntime.EventsEmit(a.ctx, "chat:event", ChatEvent{
-				Type:  "done",
-				Reply: result.Reply,
-			})
-		}
+		ar.Recorder.Emit(ChatEvent{
+			Type:  "done",
+			Reply: result.Reply,
+		})
 
 		return result
 	}
@@ -1093,7 +1101,7 @@ func (a *App) ChatPlan(sessionID, query string, useStream bool) *ChatResult {
 		if err != nil {
 			return &ChatResult{Error: err.Error()}
 		}
-		return a.runToolLoop(run, prompt, &model, useStream, false)
+		return runToolLoop(a.newMainAgentRun(run, session, dir, prompt, &model, useStream, false))
 	}
 
 	// 5. 组装计划并落盘（待审核状态）
@@ -1229,7 +1237,7 @@ func (a *App) executePlan(planID string, useStream bool) (result *ChatResult) {
 		}
 
 		sys := buildPlanSystemPrompt(basePrompt, plan, step)
-		res := a.runToolLoop(run, sys, &model, useStream, true /*compact*/)
+		res := runToolLoop(a.newMainAgentRun(run, session, dir, sys, &model, useStream, true /*compact*/))
 
 		// 步骤中途取消：按本步实际结果落状态，计划置 cancelled
 		if checkCancel() {

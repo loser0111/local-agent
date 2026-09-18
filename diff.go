@@ -186,6 +186,21 @@ func (s *DiffService) BeginTurn(sessionID string) {
 	s.state(sessionID).turn = map[string]bool{}
 }
 
+// TurnTouchedSnapshot 只读地取出本轮触碰过的路径（**不清空**）。
+//
+// TurnTouched 是"取出并清空"的语义，只应由轮末算 diff 的那一处调用；
+// 子代理在派生之前要看一眼父会话本轮已经碰过哪些路径（用来判断哪些改动是父会话
+// 自己的、不该被剔除），这个读取不能把累积状态清掉，否则父会话这一轮的 diff 会空掉。
+func (s *DiffService) TurnTouchedSnapshot(sessionID string) []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st, ok := s.sessions[sessionID]
+	if !ok {
+		return nil
+	}
+	return sortedKeys(st.turn)
+}
+
 // TurnTouched 取出本轮触碰过的路径并清空
 func (s *DiffService) TurnTouched(sessionID string) []string {
 	s.mu.Lock()

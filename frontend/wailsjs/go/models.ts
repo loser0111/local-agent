@@ -185,30 +185,6 @@ export namespace main {
 	        this.timeout = source["timeout"];
 	    }
 	}
-	export class CheckpointInfo {
-	    turn: number;
-	    label: string;
-	    available: boolean;
-	    reason?: string;
-	    files: string[];
-	    conflicts: string[];
-	    undone?: boolean;
-	
-	    static createFrom(source: any = {}) {
-	        return new CheckpointInfo(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.turn = source["turn"];
-	        this.label = source["label"];
-	        this.available = source["available"];
-	        this.reason = source["reason"];
-	        this.files = source["files"];
-	        this.conflicts = source["conflicts"];
-	        this.undone = source["undone"];
-	    }
-	}
 	export class ContextStat {
 	    sessionId: string;
 	    usedTokens: number;
@@ -503,6 +479,30 @@ export namespace main {
 		    return a;
 		}
 	}
+	export class CheckpointInfo {
+	    turn: number;
+	    label: string;
+	    available: boolean;
+	    reason?: string;
+	    files: string[];
+	    conflicts: string[];
+	    undone?: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new CheckpointInfo(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.turn = source["turn"];
+	        this.label = source["label"];
+	        this.available = source["available"];
+	        this.reason = source["reason"];
+	        this.files = source["files"];
+	        this.conflicts = source["conflicts"];
+	        this.undone = source["undone"];
+	    }
+	}
 	
 	export class Conversation {
 	    index: number;
@@ -536,6 +536,9 @@ export namespace main {
 	    additions: number;
 	    deletions: number;
 	    createdAt: number;
+	    base?: string;
+	    endState?: Record<string, string>;
+	    undone?: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new DiffTurn(source);
@@ -549,6 +552,9 @@ export namespace main {
 	        this.additions = source["additions"];
 	        this.deletions = source["deletions"];
 	        this.createdAt = source["createdAt"];
+	        this.base = source["base"];
+	        this.endState = source["endState"];
+	        this.undone = source["undone"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -1004,6 +1010,44 @@ export namespace main {
 	
 	
 	
+	export class SubagentInfo {
+	    runId: string;
+	    parentId: string;
+	    title: string;
+	    task: string;
+	    status: string;
+	    model?: string;
+	    step: number;
+	    currentTool?: string;
+	    startedAt: number;
+	    endedAt?: number;
+	    summary?: string;
+	    files?: string[];
+	    declined?: string[];
+	    error?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new SubagentInfo(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.runId = source["runId"];
+	        this.parentId = source["parentId"];
+	        this.title = source["title"];
+	        this.task = source["task"];
+	        this.status = source["status"];
+	        this.model = source["model"];
+	        this.step = source["step"];
+	        this.currentTool = source["currentTool"];
+	        this.startedAt = source["startedAt"];
+	        this.endedAt = source["endedAt"];
+	        this.summary = source["summary"];
+	        this.files = source["files"];
+	        this.declined = source["declined"];
+	        this.error = source["error"];
+	    }
+	}
 	export class Session {
 	    id: string;
 	    title: string;
@@ -1025,6 +1069,8 @@ export namespace main {
 	    contextSummary?: string;
 	    contextCoveredUpTo?: number;
 	    contextSummaryAt?: number;
+	    parentId?: string;
+	    subagent?: SubagentInfo;
 	
 	    static createFrom(source: any = {}) {
 	        return new Session(source);
@@ -1052,6 +1098,8 @@ export namespace main {
 	        this.contextSummary = source["contextSummary"];
 	        this.contextCoveredUpTo = source["contextCoveredUpTo"];
 	        this.contextSummaryAt = source["contextSummaryAt"];
+	        this.parentId = source["parentId"];
+	        this.subagent = this.convertValues(source["subagent"], SubagentInfo);
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -1081,6 +1129,7 @@ export namespace main {
 	    environment: string;
 	    enabledTools: string[];
 	    enabledSkills: string[];
+	    parentId?: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new SessionConfig(source);
@@ -1096,6 +1145,7 @@ export namespace main {
 	        this.environment = source["environment"];
 	        this.enabledTools = source["enabledTools"];
 	        this.enabledSkills = source["enabledSkills"];
+	        this.parentId = source["parentId"];
 	    }
 	}
 	export class SessionPatch {
@@ -1368,6 +1418,7 @@ export namespace main {
 	}
 	
 	
+	
 	export class ToolFileChange {
 	    time: number;
 	    tool: string;
@@ -1564,7 +1615,6 @@ export namespace main {
 		    return a;
 		}
 	}
-
 	export class UndoFileResult {
 	    path: string;
 	    action: string;
@@ -1598,6 +1648,7 @@ export namespace main {
 	        this.failed = source["failed"];
 	        this.skipped = source["skipped"];
 	    }
+	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
 		    if (!a) {
 		        return a;
@@ -1616,5 +1667,6 @@ export namespace main {
 		    return a;
 		}
 	}
+
 }
 

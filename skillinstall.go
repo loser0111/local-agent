@@ -115,6 +115,7 @@ func (i *SkillInstaller) InstallFromGit(url, ref, subdir string) ([]*SkillInstal
 	ctx, cancel := context.WithTimeout(context.Background(), skillDefaultGitTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", args...)
+	hideConsoleWindow(cmd)                                  // Windows 上不弹控制台窗口（见该函数说明）
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0") // 需要交互认证时直接失败，不要挂住界面
 	out, err := cmd.CombinedOutput()
 	if err != nil {

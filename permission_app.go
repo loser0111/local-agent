@@ -264,15 +264,26 @@ type permissionEnforcer struct {
 }
 
 // Enforce 判定一次工具调用。
-func (e *permissionEnforcer) Enforce(ctx context.Context, tool ToolInterface, args map[string]interface{}) error {
+// Decide 只判定、不等待：把「需要询问」也原样返回给调用方，由它决定怎么办。
+//
+// Enforce = Decide + 审计 + 分派。把它拆出来的原因是子代理：它没有 UI 通道，
+// 走 Enforce 的 ask 分支只会干等 5 分钟——而且表现为"子代理偶尔卡住"，间歇且难复现。
+// 子代理用 Decide 拿到结论后，把 ask 降级成带理由的拒绝（见 subagent.go）。
+//
+// 刻意**不在这里审计**：调用方拿到结论后自己决定怎么记——
+// 子代理要把"被挡下"记成另一种 stage，不能与用户的真实拒绝混在一起。
+//
+// 返回的 error 表示**这次调用本身有问题**（如命令为空），不是权限结论；
+// 有权限结论时 error 为 nil，结论在 Verdict 里。
+func (e *permissionEnforcer) Decide(tool ToolInterface, args map[string]interface{}) (Subject, Verdict, error) {
 	subject := e.subjectFor(tool, args)
 
 	// 命令为空属于**调用错误**（常见于模型把参数写成 command 而不是 cmd），
 	// 直接报错让模型改正即可——不该让用户为一条根本不存在的命令等授权弹窗。
 	// 注意：只有"空"走这条；"有内容但解析不可信"仍然询问（fail closed），别混为一谈。
 	if subject.Kind == SubjectCommand && strings.TrimSpace(subject.Raw) == "" {
-		e.audit(subject, Verdict{Decision: DecisionDeny, Stage: StageInvalid, Reason: "命令为空（参数缺失）"})
-		return fmt.Errorf("命令为空：请检查是否把参数名写成了 cmd")
+		return subject, Verdict{Decision: DecisionDeny, Stage: StageInvalid, Reason: "命令为空（参数缺失）"},
+			fmt.Errorf("命令为空：请检查是否把参数名写成了 cmd")
 	}
 
 	verdict := Authorize(AuthorizeInput{
@@ -282,8 +293,16 @@ func (e *permissionEnforcer) Enforce(ctx context.Context, tool ToolInterface, ar
 		Grants:     e.app.permissionGrants.List(e.sessionID),
 		ProjectDir: e.projectDir,
 	})
-	e.audit(subject, verdict)
+	return subject, verdict, nil
+}
 
+// Enforce 判定并执行：allow 放行、deny 报错、需要询问时阻塞等用户答复。
+func (e *permissionEnforcer) Enforce(ctx context.Context, tool ToolInterface, args map[string]interface{}) error {
+	subject, verdict, callErr := e.Decide(tool, args)
+	e.audit(subject, verdict)
+	if callErr != nil {
+		return callErr
+	}
 	switch verdict.Decision {
 	case DecisionAllow:
 		return nil

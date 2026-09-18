@@ -323,6 +323,9 @@ async function sendMessage() {
       },
       onToolCallStart: (tc) => {
         chatStore.addToolCall(localMsg.id, tc)
+        // 派生子代理时自动打开子代理面板：子代理的中间过程不在聊天流里（它跑在自己
+        // 独立的上下文里，只有结论会回到聊天），不打开面板用户就完全看不到它在做什么
+        if (tc?.name === 'spawn_agent') paneStore.openPane(sid, 'subagent')
       },
       onToolCallEnd: (tc) => {
         chatStore.updateToolCall(localMsg.id, tc.id, {

@@ -134,6 +134,10 @@ export function GetSkill(arg1) {
   return window['go']['main']['App']['GetSkill'](arg1);
 }
 
+export function GetSubagentMessages(arg1) {
+  return window['go']['main']['App']['GetSubagentMessages'](arg1);
+}
+
 export function GetToolFileChanges(arg1) {
   return window['go']['main']['App']['GetToolFileChanges'](arg1);
 }
@@ -176,6 +180,10 @@ export function ListSkillResources(arg1) {
 
 export function ListSkills() {
   return window['go']['main']['App']['ListSkills']();
+}
+
+export function ListSubagents(arg1) {
+  return window['go']['main']['App']['ListSubagents'](arg1);
 }
 
 export function ListTools() {

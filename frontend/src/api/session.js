@@ -14,6 +14,8 @@ import {
   UndoDiffTurn,
   GetDiff,
   GetDiffTurns,
+  ListSubagents,
+  GetSubagentMessages,
 } from '@/../wailsjs/go/main/App'
 import { EventsOn, EventsOff } from '@/../wailsjs/runtime/runtime'
 import { putMockPlan } from '@/api/plan'
@@ -500,4 +502,49 @@ export async function listCheckpoints(sessionId) {
 export async function undoDiffTurn(sessionId, turn, force = false) {
   if (!isWails()) throw new Error('mock 模式不支持回退')
   return await UndoDiffTurn(sessionId, turn, !!force)
+}
+
+// ===== 子代理（P3）=====
+
+/**
+ * 列出某主会话派生过的子代理：正在跑的 + 历史上跑完的。
+ *
+ * 注意入参是**主会话 ID**，返回项里的 runId 才是子代理自己的会话 ID
+ * （看它的消息、回退它改的文件都要用 runId）。
+ *
+ * @param {string} sessionId 主会话 ID
+ * @returns {Promise<Array<import('@/types').SubagentInfo>>}
+ */
+export async function listSubagents(sessionId) {
+  if (!isWails()) return []
+  try {
+    return (await ListSubagents(sessionId)) || []
+  } catch {
+    return [] // 只是展示用，取不到就不显示，不打扰用户
+  }
+}
+
+/**
+ * 取某个子代理的完整消息流（点开某一条时才拉）。
+ * @param {string} runId 子代理会话 ID
+ * @returns {Promise<Array>} Message[]
+ */
+export async function getSubagentMessages(runId) {
+  if (!isWails()) return []
+  return (await GetSubagentMessages(runId)) || []
+}
+
+/**
+ * 订阅子代理进度事件（工具调用开始/结束、跑完）。
+ *
+ * 与 chat:event 分开走一条通道：子代理的工具调用**不该**混进主会话的聊天流，
+ * 否则看起来像主会话自己在跑那些工具。
+ *
+ * @param {Function} cb 回调，参数为 SubagentInfo
+ * @returns {Function} 取消订阅函数
+ */
+export function onSubagentEvent(cb) {
+  if (!isWails()) return () => {}
+  EventsOn('subagent:event', cb)
+  return () => EventsOff('subagent:event')
 }

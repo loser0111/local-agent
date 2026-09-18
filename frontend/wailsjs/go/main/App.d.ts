@@ -68,6 +68,8 @@ export function GetSessionPlan(arg1:string):Promise<main.Plan>;
 
 export function GetSkill(arg1:string):Promise<main.SkillDetail>;
 
+export function GetSubagentMessages(arg1:string):Promise<Array<main.Message>>;
+
 export function GetToolFileChanges(arg1:string):Promise<Array<main.ToolFileChange>>;
 
 export function Greet(arg1:string):Promise<string>;
@@ -89,6 +91,8 @@ export function ListSessions():Promise<Array<main.Session>>;
 export function ListSkillResources(arg1:string):Promise<Array<main.SkillResource>>;
 
 export function ListSkills():Promise<Array<main.SkillMeta>>;
+
+export function ListSubagents(arg1:string):Promise<Array<main.SubagentInfo>>;
 
 export function ListTools():Promise<Array<main.ToolInfo>>;
 

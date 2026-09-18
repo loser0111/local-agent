@@ -295,6 +295,7 @@ func runGitEnv(dir string, extraEnv []string, args ...string) (string, error) {
 
 	full := append([]string{"-C", dir, "-c", "core.quotepath=false", "--no-pager"}, args...)
 	cmd := exec.CommandContext(ctx, "git", full...)
+	hideConsoleWindow(cmd) // checkpoint 每轮都要起 git，Windows 上会连着闪黑框
 	if len(extraEnv) > 0 {
 		cmd.Env = append(os.Environ(), extraEnv...)
 	}
