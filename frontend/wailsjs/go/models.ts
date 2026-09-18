@@ -21,7 +21,7 @@ export namespace main {
 	    sessionId?: string;
 	    answers: AskItem[];
 	    cancelled?: boolean;
-	
+
 	    static createFrom(source: any = {}) {
 	        return new AskAnswer(source);
 	    }
