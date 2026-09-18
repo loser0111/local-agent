@@ -310,12 +310,12 @@ async function undoFiles(sa) {
   margin-bottom: $space-md;
 
   &.running {
-    border-color: rgba(245, 158, 11, 0.3);
+    border-color: rgb(var(--color-warning-rgb) / 0.3);
   }
 
   &.failed,
   &.interrupted {
-    border-color: rgba(239, 68, 68, 0.3);
+    border-color: rgb(var(--color-error-rgb) / 0.3);
   }
 }
 
@@ -388,7 +388,7 @@ async function undoFiles(sa) {
   margin-top: $space-sm;
   padding: $space-sm;
   border-radius: $radius-sm;
-  background-color: rgba(239, 68, 68, 0.08);
+  background-color: rgb(var(--color-error-rgb) / 0.08);
   color: $color-error;
   font-size: $font-size-xs;
   line-height: $line-height-sm;

@@ -1,3 +1,5 @@
+// 主题 token（CSS 自定义属性）由 main.js 在 global.scss **之前** 引入。
+// 本文件通过 variables.scss 的映射层使用它们。
 @use './variables.scss' as *;
 
 // ===== Reset =====
@@ -67,10 +69,10 @@ ol {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: $color-border;
+  background: $color-border-light;
   border-radius: 4px;
   &:hover {
-    background: $color-border-light;
+    background: $color-text-muted;
   }
 }
 
@@ -188,7 +190,8 @@ ol {
 
   &:focus {
     border-color: $color-primary;
-    box-shadow: 0 0 0 2px rgba(124, 58, 237, 0.2);
+    // 用主题主色自身做焦点环，避免与主色色相不一致
+    box-shadow: 0 0 0 2px rgb(var(--color-primary-rgb) / 0.25);
   }
 
   &::placeholder {
@@ -248,4 +251,24 @@ body.is-resizing * {
 .scroll-container {
   overflow-y: auto;
   overflow-x: hidden;
+}
+
+// ===== 键盘可达性 =====
+// 只在键盘操作时显示焦点环：鼠标点击不出现，避免视觉噪声。
+// 原先全局 button 都是 outline: none 且没有补偿，纯键盘用户看不出焦点在哪。
+:focus-visible {
+  outline: 2px solid $color-primary;
+  outline-offset: 1px;
+  border-radius: $radius-sm;
+}
+
+// 尊重系统的「减少动态效果」偏好
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }

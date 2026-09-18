@@ -197,17 +197,17 @@ const hiddenLabelCount = computed(() => {
 .tool-process {
   border: 1px solid $color-border;
   border-radius: $radius-md;
-  background-color: rgba(68, 71, 90, 0.25);
+  background-color: rgb(var(--color-bg-tertiary-rgb) / 0.25);
   overflow: hidden;
   transition: border-color $transition-fast, background-color $transition-fast;
 
   &.running {
-    border-color: rgba(189, 147, 249, 0.45);
-    background-color: rgba(189, 147, 249, 0.06);
+    border-color: rgb(var(--color-primary-rgb) / 0.45);
+    background-color: rgb(var(--color-primary-rgb) / 0.06);
   }
 
   &.error {
-    border-color: rgba(255, 85, 85, 0.4);
+    border-color: rgb(var(--color-error-rgb) / 0.4);
   }
 }
 
@@ -229,7 +229,7 @@ const hiddenLabelCount = computed(() => {
   color: $color-text-secondary;
 
   &:hover:not(:disabled) {
-    background-color: rgba(255, 255, 255, 0.03);
+    background-color: $color-surface-tint;
     color: $color-text-primary;
   }
 
@@ -239,7 +239,7 @@ const hiddenLabelCount = computed(() => {
   }
 
   &:focus-visible {
-    outline: 2px solid rgba(189, 147, 249, 0.6);
+    outline: 2px solid rgb(var(--color-primary-rgb) / 0.6);
     outline-offset: -2px;
   }
 }
@@ -269,7 +269,7 @@ const hiddenLabelCount = computed(() => {
 .spinner {
   width: 12px;
   height: 12px;
-  border: 1.5px solid rgba(189, 147, 249, 0.25);
+  border: 1.5px solid rgb(var(--color-primary-rgb) / 0.25);
   border-top-color: $color-primary;
   border-radius: 50%;
   animation: spin 0.7s linear infinite;
@@ -300,7 +300,7 @@ const hiddenLabelCount = computed(() => {
   min-width: 0;
   padding: 1px 8px;
   border-radius: 10px;
-  background-color: rgba(68, 71, 90, 0.8);
+  background-color: rgb(var(--color-bg-tertiary-rgb) / 0.8);
   color: $color-text-secondary;
   font-size: 11px;
   white-space: nowrap;
@@ -363,7 +363,7 @@ const hiddenLabelCount = computed(() => {
   height: 18px;
   margin-top: 5px;
   border-radius: 50%;
-  background-color: #44475a;
+  background-color: $color-bg-tertiary;
   color: $color-text-secondary;
   font-size: 10px;
   font-weight: $font-weight-semibold;

@@ -1,0 +1,163 @@
+/*
+ * 主题 Token 层（唯一的颜色/字号事实来源）
+ *
+ * 为什么单独放一个纯 CSS 文件：
+ *  - 主题必须在**运行时**可切换，因此这里用 CSS 自定义属性（CSS 变量），
+ *    而不是编译期就被内联成字面量的 SCSS 变量；
+ *  - 不交给 Sass 处理，避免 Sass 对颜色函数/新语法（rgb(r g b / a)）做改写。
+ *
+ * 组件里**不要**直接写 var(--xxx)，统一用 assets/styles/variables.scss 暴露的
+ * $color-xxx / $font-size-xxx（它是这一层的映射壳），这样后续换实现只改一处。
+ *
+ * 切换方式：<html data-theme="dark|light">，由 utils/theme.js 负责写入。
+ * 新增颜色 token 时，两套主题都要补，并同步 variables.scss 的映射。
+ */
+
+:root {
+  /* 基础字号：设置页的「字体大小」滑块会覆盖它；
+     $font-size-* / $line-height-* 均由它派生，因此改一处全局生效 */
+  --font-size-base: 14px;
+}
+
+/* ===== 深色主题（默认；Dracula 配色） ===== */
+:root,
+:root[data-theme='dark'] {
+  color-scheme: dark;
+
+  --color-bg-primary: #282a36;
+  --color-bg-secondary: #21222c;
+  --color-bg-tertiary: #44475a;
+
+  --color-text-primary: #f8f8f2;
+  --color-text-secondary: #bcc2cd;
+  --color-text-muted: #6272a4;
+
+  --color-primary: #bd93f9;
+  --color-primary-hover: #caa7ff;
+  --color-primary-active: #a77bff;
+  --color-primary-rgb: 189 147 249;
+
+  --color-success: #50fa7b;
+  --color-warning: #ffb86c;
+  --color-error: #ff5555;
+  --color-info: #8be9fd;
+  --color-pink: #ff79c6;
+  --color-yellow: #f1fa8c;
+
+  /* 语义色的 RGB 分量：供 `rgb(var(--color-x-rgb) / 0.2)` 拼任意透明度用
+     （CSS 变量不能参与 Sass 颜色函数，这是 rgba() 的替代写法） */
+  --color-success-rgb: 80 250 123;
+  --color-warning-rgb: 255 184 108;
+  --color-error-rgb: 255 85 85;
+  --color-info-rgb: 139 233 253;
+  --color-bg-tertiary-rgb: 68 71 90;
+  --color-text-secondary-rgb: 188 194 205;
+  --color-text-muted-rgb: 98 114 164;
+
+  /* 语义色的低透明度底色（徽章、提示条、差异高亮） */
+  --color-primary-soft: rgb(189 147 249 / 0.12);
+  --color-success-soft: rgb(80 250 123 / 0.15);
+  --color-warning-soft: rgb(255 184 108 / 0.15);
+  --color-error-soft: rgb(255 85 85 / 0.15);
+  --color-info-soft: rgb(139 233 253 / 0.15);
+
+  --color-diff-add-bg: rgb(80 250 123 / 0.15);
+  --color-diff-add-text: #50fa7b;
+  --color-diff-del-bg: rgb(255 85 85 / 0.15);
+  --color-diff-del-text: #ff6e6e;
+
+  --color-border: #44475a;
+  --color-border-light: #565a78;
+
+  /* 叠在背景上的极轻微提亮（交替行、助手消息底） */
+  --color-surface-tint: rgb(255 255 255 / 0.02);
+
+  /* 代码块与语法高亮 */
+  --color-code-bg: #21222c;
+  --color-code-text: #f8f8f2;
+  --color-code-inline-bg: #44475a;
+  --color-code-inline-text: #ff79c6;
+  --color-code-comment: #6272a4;
+  --color-code-keyword: #ff79c6;
+  --color-code-function: #50fa7b;
+  --color-code-string: #f1fa8c;
+  --color-code-number: #bd93f9;
+  --color-code-type: #8be9fd;
+  --color-code-deletion: #ff5555;
+
+  --shadow-sm: 0 1px 2px rgb(0 0 0 / 0.3);
+  --shadow-md: 0 4px 12px rgb(0 0 0 / 0.4);
+  --shadow-lg: 0 8px 24px rgb(0 0 0 / 0.5);
+
+  /* 弹窗遮罩 */
+  --color-overlay: rgb(0 0 0 / 0.55);
+}
+
+/* ===== 浅色主题 =====
+ * 注意：不是把深色简单反相。Dracula 的荧光色（#ffb86c / #f1fa8c / #50fa7b）
+ * 在白底上对比度不足，这里换成同色相的深色调，正文对比度均 ≥ 4.5:1。 */
+:root[data-theme='light'] {
+  color-scheme: light;
+
+  --color-bg-primary: #ffffff;
+  --color-bg-secondary: #f4f4f8;
+  --color-bg-tertiary: #e6e6ef;
+
+  --color-text-primary: #1e1f29;
+  --color-text-secondary: #4b5063;
+  --color-text-muted: #7c8296;
+
+  --color-primary: #7c3aed;
+  --color-primary-hover: #6d28d9;
+  --color-primary-active: #5b21b6;
+  --color-primary-rgb: 124 58 237;
+
+  --color-success: #15803d;
+  --color-warning: #b45309;
+  --color-error: #dc2626;
+  --color-info: #0369a1;
+  --color-pink: #be185d;
+  --color-yellow: #a16207;
+
+  --color-success-rgb: 21 128 61;
+  --color-warning-rgb: 180 83 9;
+  --color-error-rgb: 220 38 38;
+  --color-info-rgb: 3 105 161;
+  --color-bg-tertiary-rgb: 230 230 239;
+  --color-text-secondary-rgb: 75 80 99;
+  --color-text-muted-rgb: 124 130 150;
+
+  --color-primary-soft: rgb(124 58 237 / 0.10);
+  --color-success-soft: rgb(21 128 61 / 0.12);
+  --color-warning-soft: rgb(180 83 9 / 0.12);
+  --color-error-soft: rgb(220 38 38 / 0.12);
+  --color-info-soft: rgb(3 105 161 / 0.12);
+
+  --color-diff-add-bg: rgb(21 128 61 / 0.10);
+  --color-diff-add-text: #15803d;
+  --color-diff-del-bg: rgb(220 38 38 / 0.10);
+  --color-diff-del-text: #b91c1c;
+
+  --color-border: #e3e3ec;
+  --color-border-light: #c7c8d6;
+
+  --color-surface-tint: rgb(16 18 32 / 0.025);
+
+  --color-code-bg: #f6f7fb;
+  --color-code-text: #1e1f29;
+  --color-code-inline-bg: #ececf3;
+  --color-code-inline-text: #be185d;
+  --color-code-comment: #7c8296;
+  --color-code-keyword: #be185d;
+  --color-code-function: #15803d;
+  --color-code-string: #a16207;
+  --color-code-number: #7c3aed;
+  --color-code-type: #0369a1;
+  --color-code-deletion: #b91c1c;
+
+  --shadow-sm: 0 1px 2px rgb(16 18 32 / 0.06);
+  --shadow-md: 0 4px 12px rgb(16 18 32 / 0.10);
+  --shadow-lg: 0 8px 24px rgb(16 18 32 / 0.14);
+
+  --color-overlay: rgb(16 18 32 / 0.35);
+}

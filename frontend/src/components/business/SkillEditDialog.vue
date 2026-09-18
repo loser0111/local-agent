@@ -231,7 +231,7 @@ async function handleSave() {
 .dialog-mask {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.55);
+  background: $color-overlay;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -248,7 +248,7 @@ async function handleSave() {
   max-height: 86vh;
   display: flex;
   flex-direction: column;
-  box-shadow: 0 12px 48px rgba(0, 0, 0, 0.5);
+  box-shadow: $shadow-lg;
 }
 
 .dialog-header {
@@ -371,8 +371,8 @@ async function handleSave() {
 .error-banner {
   padding: $space-sm $space-md;
   margin-bottom: $space-md;
-  background-color: rgba(255, 85, 85, 0.12);
-  border: 1px solid rgba(255, 85, 85, 0.4);
+  background-color: rgb(var(--color-error-rgb) / 0.12);
+  border: 1px solid rgb(var(--color-error-rgb) / 0.4);
   border-radius: $radius-sm;
   color: $color-error;
   font-size: $font-size-sm;
@@ -381,10 +381,10 @@ async function handleSave() {
 .warn-banner {
   padding: $space-sm $space-md;
   margin-bottom: $space-sm;
-  background-color: rgba(250, 204, 21, 0.1);
-  border: 1px solid rgba(250, 204, 21, 0.35);
+  background-color: rgb(var(--color-warning-rgb) / 0.1);
+  border: 1px solid rgb(var(--color-warning-rgb) / 0.35);
   border-radius: $radius-sm;
-  color: #facc15;
+  color: $color-yellow;
   font-size: $font-size-xs;
 }
 

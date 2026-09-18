@@ -127,7 +127,7 @@ watch(visible, async (v) => {
 .ask-overlay {
   position: fixed;
   inset: 0;
-  background-color: rgba(0, 0, 0, 0.45);
+  background-color: $color-overlay;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -142,7 +142,7 @@ watch(visible, async (v) => {
   background-color: $color-bg-secondary;
   border: 1px solid $color-border;
   border-radius: $radius-md;
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.4);
+  box-shadow: $shadow-lg;
 }
 
 .dialog-header {
@@ -193,7 +193,7 @@ watch(visible, async (v) => {
   display: inline-block;
   padding: 1px 8px;
   border-radius: 10px;
-  background-color: rgba(68, 71, 90, 0.8);
+  background-color: rgb(var(--color-bg-tertiary-rgb) / 0.8);
   color: $color-text-secondary;
   font-size: 11px;
 }
@@ -237,7 +237,7 @@ watch(visible, async (v) => {
 
   &.active {
     border-color: $color-primary;
-    background-color: rgba(189, 147, 249, 0.08);
+    background-color: rgb(var(--color-primary-rgb) / 0.08);
   }
 
   &:disabled {

@@ -351,7 +351,7 @@ function fmt(iso) {
   display: flex;
   align-items: center;
   justify-content: center;
-  background-color: rgba(0, 0, 0, 0.45);
+  background-color: $color-overlay;
   z-index: 100;
 }
 

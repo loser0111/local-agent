@@ -258,28 +258,28 @@ function formatTime(ts) {
 }
 
 .banner-warn {
-  color: #ffb86c;
-  border-color: rgba(255, 184, 108, 0.4);
-  background-color: rgba(255, 184, 108, 0.06);
+  color: $color-warning;
+  border-color: rgb(var(--color-warning-rgb) / 0.4);
+  background-color: rgb(var(--color-warning-rgb) / 0.06);
 }
 
 .banner-error {
-  color: #ff5555;
-  border-color: rgba(255, 85, 85, 0.4);
-  background-color: rgba(255, 85, 85, 0.06);
+  color: $color-error;
+  border-color: rgb(var(--color-error-rgb) / 0.4);
+  background-color: rgb(var(--color-error-rgb) / 0.06);
 }
 
 .banner-ok {
-  color: #50fa7b;
-  border-color: rgba(80, 250, 123, 0.35);
-  background-color: rgba(80, 250, 123, 0.06);
+  color: $color-success;
+  border-color: rgb(var(--color-success-rgb) / 0.35);
+  background-color: rgb(var(--color-success-rgb) / 0.06);
 }
 
 .card {
   border: 1px solid $color-border;
   border-radius: $radius-md;
   padding: 12px;
-  background-color: rgba(68, 71, 90, 0.18);
+  background-color: rgb(var(--color-bg-tertiary-rgb) / 0.18);
 }
 
 .card-title {
@@ -356,27 +356,27 @@ function formatTime(ts) {
   border-radius: 10px;
   font-size: 10px;
   font-weight: $font-weight-semibold;
-  background-color: rgba(68, 71, 90, 0.85);
+  background-color: rgb(var(--color-bg-tertiary-rgb) / 0.85);
   color: $color-text-secondary;
 }
 
 .tag-deny {
-  background-color: rgba(255, 85, 85, 0.2);
-  color: #ff5555;
+  background-color: rgb(var(--color-error-rgb) / 0.2);
+  color: $color-error;
 }
 
 .tag-ask {
-  background-color: rgba(255, 184, 108, 0.2);
-  color: #ffb86c;
+  background-color: rgb(var(--color-warning-rgb) / 0.2);
+  color: $color-warning;
 }
 
 .tag-allow {
-  background-color: rgba(80, 250, 123, 0.16);
-  color: #50fa7b;
+  background-color: rgb(var(--color-success-rgb) / 0.16);
+  color: $color-success;
 }
 
 .tag-plain {
-  background-color: rgba(98, 114, 164, 0.3);
+  background-color: rgb(var(--color-text-muted-rgb) / 0.3);
 }
 
 .audit-time {
@@ -418,8 +418,8 @@ function formatTime(ts) {
   color: $color-text-muted;
 
   &:hover:not(:disabled) {
-    color: #ff5555;
-    background-color: rgba(255, 85, 85, 0.12);
+    color: $color-error;
+    background-color: rgb(var(--color-error-rgb) / 0.12);
   }
 }
 </style>

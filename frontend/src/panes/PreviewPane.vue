@@ -10,11 +10,8 @@ const url = ref('http://localhost:5173')
     <PaneHeader type="preview" />
     <div class="preview-toolbar">
       <input v-model="url" class="url-input" readonly />
-      <button class="btn btn-ghost btn-sm" title="刷新">
-        <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
-          <path d="M1 6a5 5 0 019-3M11 6a5 5 0 01-9 3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
-        </svg>
-      </button>
+      <!-- 原先这里有个「刷新」按钮，但没有绑定事件；预览区目前也还没有可刷新的内容
+           （iframe 未接入），先移除，避免诱导点击。 -->
     </div>
     <div class="preview-body">
       <div class="preview-placeholder">

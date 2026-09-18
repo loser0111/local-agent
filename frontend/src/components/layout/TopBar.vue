@@ -1,10 +1,12 @@
 <script setup>
 import { ref, computed, onMounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
+import { Moon, Settings, Sun } from 'lucide-vue-next'
 import { useSessionStore } from '@/stores/session'
 import { useSettingStore } from '@/stores/setting'
 import { PERMISSION_MODES, VIEW_MODES } from '@/types'
 import { fetchModelNames } from '@/api/model'
+import { THEME_OPTIONS, resolveTheme } from '@/utils/theme'
 
 const sessionStore = useSessionStore()
 const settingStore = useSettingStore()
@@ -13,6 +15,28 @@ const router = useRouter()
 const emit = defineEmits(['toggle-sidebar'])
 
 const currentSession = computed(() => sessionStore.currentSession)
+
+// ===== 主题快捷切换 =====
+// 这个位置原本是一个「使用量」按钮，但它没有绑定任何点击事件（点了没反应），已替换为
+// 可用的主题切换。三选一（深色 / 浅色 / 跟随系统）在「设置 - 通用设置」里。
+const resolvedTheme = ref(resolveTheme(settingStore.settings.theme))
+
+watch(
+  () => settingStore.settings.theme,
+  (t) => {
+    resolvedTheme.value = resolveTheme(t)
+  }
+)
+
+const themeTitle = computed(() => {
+  const cur = THEME_OPTIONS.find((o) => o.value === settingStore.settings.theme)
+  const next = resolvedTheme.value === 'light' ? '深色' : '浅色'
+  return `主题：${cur?.label || '深色'}（点击切换为${next}）`
+})
+
+function toggleTheme() {
+  settingStore.setTheme(resolvedTheme.value === 'light' ? 'dark' : 'light')
+}
 
 // 从后端加载模型名称列表
 const modelNames = ref([])
@@ -104,22 +128,12 @@ function goSettings() {
           {{ m.label }}
         </button>
       </div>
-      <button class="icon-btn" title="使用量">
-        <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
-          <circle cx="9" cy="9" r="7" stroke="currentColor" stroke-width="1.5" />
-          <path d="M9 5V9L12 11" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
-        </svg>
+      <button class="icon-btn" :title="themeTitle" @click="toggleTheme">
+        <Sun v-if="resolvedTheme === 'light'" :size="18" />
+        <Moon v-else :size="18" />
       </button>
       <button class="icon-btn" title="设置" @click="goSettings">
-        <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
-          <circle cx="9" cy="9" r="2.5" stroke="currentColor" stroke-width="1.5" />
-          <path
-            d="M9 1.5v2M9 14.5v2M1.5 9h2M14.5 9h2M3.7 3.7l1.4 1.4M12.9 12.9l1.4 1.4M3.7 14.3l1.4-1.4M12.9 5.1l1.4-1.4"
-            stroke="currentColor"
-            stroke-width="1.5"
-            stroke-linecap="round"
-          />
-        </svg>
+        <Settings :size="18" />
       </button>
     </div>
   </div>

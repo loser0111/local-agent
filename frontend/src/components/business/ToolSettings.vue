@@ -395,7 +395,7 @@ function configHint(t) {
   color: $color-text-muted;
   padding: 0 6px;
   border-radius: 8px;
-  background-color: rgba(68, 71, 90, 0.6);
+  background-color: rgb(var(--color-bg-tertiary-rgb) / 0.6);
 }
 
 .group-hint {
@@ -442,13 +442,13 @@ function configHint(t) {
     color: $color-primary;
   }
   &.type-cli {
-    color: #8be9fd;
+    color: $color-info;
   }
   &.type-mcp {
-    color: #ffb86c;
+    color: $color-warning;
   }
   &.type-http {
-    color: #50fa7b;
+    color: $color-success;
   }
 }
 
@@ -480,14 +480,14 @@ function configHint(t) {
   font-size: 10px;
   padding: 1px 6px;
   border-radius: 8px;
-  background-color: rgba(68, 71, 90, 0.8);
+  background-color: rgb(var(--color-bg-tertiary-rgb) / 0.8);
   color: $color-text-secondary;
 
   &.badge-builtin {
-    color: #bd93f9;
+    color: $color-primary;
   }
   &.badge-mcp {
-    color: #ffb86c;
+    color: $color-warning;
   }
 }
 
@@ -644,7 +644,7 @@ function configHint(t) {
   padding: 5px 0;
 
   & + .sub-tool-item {
-    border-top: 1px dashed rgba(68, 71, 90, 0.7);
+    border-top: 1px dashed rgb(var(--color-bg-tertiary-rgb) / 0.7);
   }
 }
 
@@ -696,6 +696,6 @@ function configHint(t) {
   color: $color-text-muted;
   padding: 1px 6px;
   border-radius: 8px;
-  background-color: rgba(68, 71, 90, 0.8);
+  background-color: rgb(var(--color-bg-tertiary-rgb) / 0.8);
 }
 </style>

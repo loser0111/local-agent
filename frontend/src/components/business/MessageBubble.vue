@@ -61,7 +61,7 @@ const renderedHtml = computed(() => renderMarkdown(props.message.content || ''))
 }
 
 .message-assistant {
-  background-color: rgba(255, 255, 255, 0.02);
+  background-color: $color-surface-tint;
 }
 
 .avatar {
@@ -220,8 +220,8 @@ const renderedHtml = computed(() => renderMarkdown(props.message.content || ''))
     code:not(.hljs) {
       font-family: 'JetBrains Mono', 'Consolas', 'Courier New', monospace;
       font-size: 0.875em;
-      background-color: #44475a;
-      color: #ff79c6;
+      background-color: $color-code-inline-bg;
+      color: $color-code-inline-text;
       padding: 2px 6px;
       border-radius: 4px;
       white-space: nowrap;
@@ -230,7 +230,7 @@ const renderedHtml = computed(() => renderMarkdown(props.message.content || ''))
     // 代码块
     pre.md-code-block {
       position: relative;
-      background-color: #282a36;
+      background-color: $color-code-bg;
       border: 1px solid $color-border;
       border-radius: 6px;
       padding: 12px 14px;
@@ -255,18 +255,18 @@ const renderedHtml = computed(() => renderMarkdown(props.message.content || ''))
         line-height: 1.6;
         background: transparent;
         padding: 0;
-        color: #f8f8f2;
+        color: $color-code-text;
         white-space: pre;
       }
     }
 
     // highlight.js Dracula 配色
     .hljs {
-      color: #f8f8f2;
+      color: $color-code-text;
 
       &-comment,
       &-quote {
-        color: #6272a4;
+        color: $color-code-comment;
         font-style: italic;
       }
 
@@ -275,12 +275,12 @@ const renderedHtml = computed(() => renderMarkdown(props.message.content || ''))
       &-literal,
       &-section,
       &-link {
-        color: #ff79c6;
+        color: $color-code-keyword;
       }
 
       &-function,
       &-title.function_ {
-        color: #50fa7b;
+        color: $color-code-function;
       }
 
       &-string,
@@ -288,12 +288,12 @@ const renderedHtml = computed(() => renderMarkdown(props.message.content || ''))
       &-template-string,
       &-regexp,
       &-addition {
-        color: #f1fa8c;
+        color: $color-code-string;
       }
 
       &-number,
       &-meta {
-        color: #bd93f9;
+        color: $color-code-number;
       }
 
       &-title,
@@ -301,26 +301,26 @@ const renderedHtml = computed(() => renderMarkdown(props.message.content || ''))
       &-type,
       &-built_in,
       &-class .hljs-title {
-        color: #8be9fd;
+        color: $color-code-type;
       }
 
       &-attr {
-        color: #50fa7b;
+        color: $color-code-function;
       }
 
       &-symbol,
       &-bullet,
       &-variable,
       &-template-variable {
-        color: #f8f8f2;
+        color: $color-code-text;
       }
 
       &-comment {
-        color: #6272a4;
+        color: $color-code-comment;
       }
 
       &-deletion {
-        color: #ff5555;
+        color: $color-code-deletion;
       }
 
       &-emphasis {
@@ -337,7 +337,7 @@ const renderedHtml = computed(() => renderMarkdown(props.message.content || ''))
       margin: 10px 0;
       padding: 6px 14px;
       border-left: 3px solid $color-primary;
-      background-color: rgba(189, 147, 249, 0.08);
+      background-color: rgb(var(--color-primary-rgb) / 0.08);
       color: $color-text-secondary;
 
       p {
@@ -395,7 +395,7 @@ const renderedHtml = computed(() => renderMarkdown(props.message.content || ''))
     }
 
     th {
-      background-color: #44475a;
+      background-color: $color-bg-tertiary;
       color: $color-text-primary;
       font-weight: $font-weight-semibold;
     }
@@ -405,7 +405,7 @@ const renderedHtml = computed(() => renderMarkdown(props.message.content || ''))
     }
 
     tr:nth-child(even) td {
-      background-color: rgba(255, 255, 255, 0.02);
+      background-color: $color-surface-tint;
     }
 
     // 分隔线

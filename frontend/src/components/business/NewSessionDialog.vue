@@ -303,7 +303,7 @@ function submitForm() {
 .dialog-mask {
   position: fixed;
   inset: 0;
-  background-color: rgba(0, 0, 0, 0.6);
+  background-color: $color-overlay;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -490,8 +490,8 @@ function submitForm() {
   }
 
   .opt-inject {
-    color: #c084fc;
-    border-color: rgba(124, 58, 237, 0.5);
+    color: $color-primary;
+    border-color: rgb(var(--color-primary-rgb) / 0.5);
   }
 }
 
