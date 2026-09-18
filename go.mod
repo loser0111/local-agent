@@ -3,6 +3,7 @@ module wails-tmp
 go 1.25.0
 
 require (
+	github.com/fsnotify/fsnotify v1.9.0
 	github.com/modelcontextprotocol/go-sdk v1.7.0
 	github.com/wailsapp/wails/v2 v2.15.0
 	gopkg.in/yaml.v3 v3.0.1

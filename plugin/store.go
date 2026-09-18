@@ -1,6 +1,7 @@
 package plugin
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -40,6 +41,15 @@ type TaskStore struct {
 	file   TaskFile
 	dir    string
 	loaded bool
+
+	// selfSum / selfWritten 记录最近一次「自己写盘」的内容摘要。
+	//
+	// 为什么需要：App 自己的每一次 Save / mutate 都会改 tasks.json，从而触发
+	// fsnotify 事件。靠这对字段把「自己写的」与「外部写的」区分开 —— 否则任务
+	// 状态每变一次都会白跑一次重新加载（还可能引发无意义的前端广播）。
+	// selfWritten 为 false 时摘要不可比较（尚未写过盘）。
+	selfSum     [sha256.Size]byte
+	selfWritten bool
 }
 
 // NewTaskStore 创建 store；baseDir 为数据目录（~/.local-agent）。
@@ -103,6 +113,61 @@ func (s *TaskStore) Load() error {
 	s.file = f
 	s.loaded = true
 	return nil
+}
+
+// ReloadIfChanged 从磁盘重新加载，仅在「文件确实变了、且能完整解析」时替换内存；
+// 返回是否真的替换了内存。
+//
+// 与 Load 的分工（两者读同一个文件，但风险完全不同）：
+//   - Load 是**启动路径**，解析失败敢把坏文件改名成 .broken 并以空集启动；
+//   - 本方法是**外部变更路径**，写入方（脚本 / 编辑器）可能正处在非原子写的中间态，
+//     半截 JSON 绝不能触发「归档 + 清空」—— 那等于把用户的任务当场删掉。
+//     所以解析失败时保持内存与磁盘原样不动，把决定权交回调用方：通常只是记一条
+//     日志，等下一次事件把完整内容送进来。
+//
+// 自写识别：磁盘内容与最近一次自己写盘的摘要一致时返回 false。没有这一条，
+// App 自己的每一次 mutate 都会绕回来触发一次「外部变更」。
+func (s *TaskStore) ReloadIfChanged() (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	data, err := os.ReadFile(s.path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// 文件被外部删了：不擅自清空内存（清不清由调用方定），当作没变化。
+			return false, nil
+		}
+		return false, fmt.Errorf("读取 %s 失败: %w", s.path, err)
+	}
+
+	sum := sha256.Sum256(data)
+	if s.selfWritten && sum == s.selfSum {
+		// 磁盘内容就是自己刚写的：不是外部变更。
+		return false, nil
+	}
+
+	var f TaskFile
+	if err := json.Unmarshal(data, &f); err != nil {
+		return false, fmt.Errorf("外部写入的内容暂时无法解析，本次变更已忽略（内存与磁盘均未改动）: %w", err)
+	}
+	if f.Version > taskFileVersion {
+		// 与 migrateLocked 同一态度：更新的数据不猜、不改写。这里也不留 .bak。
+		return false, fmt.Errorf("外部文件版本 %d 高于本程序支持的 %d，已忽略以免丢数据", f.Version, taskFileVersion)
+	}
+	f.Version = taskFileVersion
+
+	if f.Settings == nil {
+		f.Settings = NewGlobalConfig()
+	}
+	f.Settings.applyDefaults()
+	normalizeTasks(f.Tasks)
+
+	s.file = f
+	s.loaded = true
+	// 内存与磁盘此刻一致：同步刷新摘要，免得下一次事件被误判成外部变更。
+	s.selfSum = sum
+	s.selfWritten = true
+	return true, nil
 }
 
 // migrateLocked 处理版本迁移；首迁前留 .bak 备份（已存在则不覆盖）。
@@ -193,9 +258,13 @@ func (s *TaskStore) saveLocked() error {
 	if err != nil {
 		return fmt.Errorf("序列化任务数据失败: %w", err)
 	}
-	if err := writeFileAtomic(s.path, append(data, '\n'), 0o600); err != nil {
+	payload := append(data, '\n')
+	if err := writeFileAtomic(s.path, payload, 0o600); err != nil {
 		return fmt.Errorf("写入 %s 失败: %w", s.path, err)
 	}
+	// 记下本次写盘内容的摘要：这是后面识别「自己写的事件」的唯一依据。
+	s.selfSum = sha256.Sum256(payload)
+	s.selfWritten = true
 	return nil
 }
 

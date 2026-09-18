@@ -44,6 +44,9 @@ type Plugin struct {
 	sched    *Scheduler
 	limiter  *RateLimiter
 	fallback *FallbackNotice
+	// watcher 监听数据文件的外部变更（外部写完 tasks.json 后免重启生效）。
+	// 读写都持 p.mu：Start 里赋值，Stop 里取走并置 nil。
+	watcher *fileWatcher
 
 	mu        sync.RWMutex
 	state     State
@@ -204,7 +207,15 @@ func (p *Plugin) Start(ctx context.Context) error {
 	p.mu.Unlock()
 	sched.Start()
 
-	// 8) 广播就绪。
+	// 8) 监听数据文件的外部变更：外部（脚本 / 编辑器）写完 tasks.json 后免重启生效。
+	//    监听起不来只记日志降级 —— 能力退回「重启才生效」，插件照常可用。
+	watcher := newFileWatcher(p.store.dir, taskFileName, watchDebounce, p.onTasksFileChanged, p.logf)
+	p.mu.Lock()
+	p.watcher = watcher
+	p.mu.Unlock()
+	watcher.Start()
+
+	// 9) 广播就绪。
 	p.emit(EventPluginReady, "", p.Info())
 	p.logf("已启动: %s", p.Info().String())
 	return nil
@@ -219,8 +230,15 @@ func (p *Plugin) Stop() error {
 	}
 	p.state = StateStopped
 	sched := p.sched
+	watcher := p.watcher
+	p.watcher = nil
 	p.mu.Unlock()
 
+	// 先停监听、再落盘：顺序反了的话，下面这次 Save 自己会触发一次文件事件，
+	// 让一个正在关闭的插件再走一遍「外部变更 → 重新加载」。
+	if watcher != nil {
+		watcher.Stop()
+	}
 	if sched != nil {
 		sched.Stop()
 	}
@@ -230,6 +248,31 @@ func (p *Plugin) Stop() error {
 	}
 	p.logf("已停止")
 	return nil
+}
+
+// watchDebounce 是外部文件变更的防抖窗口。
+//
+// 一次原子写在文件系统层面会冒出多个事件（临时文件 Create/Write + 目标文件
+// Rename），200ms 足够把它们合并成一次加载，又短到用户感觉不出延迟。
+const watchDebounce = 200 * time.Millisecond
+
+// onTasksFileChanged 处理 tasks.json 的外部变更（脚本 / 编辑器直接改文件）。
+//
+// 语义是「磁盘为准」：能解析成功就整份替换内存中的任务表，唤醒调度器重算下次
+// 触发时刻，并广播变更让前端刷新。解析失败（多半是写入方还没写完）只记一条日志，
+// 等下一次事件 —— 绝不动内存，也绝不把文件归档成 .broken（那是 Load 的启动语义）。
+func (p *Plugin) onTasksFileChanged() {
+	changed, err := p.store.ReloadIfChanged()
+	if err != nil {
+		p.logf("外部修改 tasks.json 未生效: %v", err)
+		return
+	}
+	if !changed {
+		return
+	}
+	p.logf("检测到 tasks.json 被外部修改，已重新加载并重算调度")
+	p.wake()
+	p.emit(EventChanged, "reloaded", nil)
 }
 
 func (p *Plugin) setErr(err error) {

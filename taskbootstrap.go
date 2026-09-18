@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"runtime/debug"
 	"sync"
 
 	"wails-tmp/plugin"
@@ -36,7 +37,16 @@ func currentDesktopPlugin() *plugin.Plugin {
 
 // startDesktopPlugin 装载并启动桌面插件。必须在 app.startup 之后调用，
 // 因为宿主适配器依赖 App 已初始化的 ctx 与 baseDir。
+//
+// 整个装配过程包在 recover 里：wails 的 OnStartup 跑在独立 goroutine 上，
+// 这里一旦 panic 就是进程级崩溃（窗口直接消失，用户看到的现象是「起不来」，
+// 而 wails build 是成功的、不会报错）。插件出问题只能降级，不能带走主程序。
 func startDesktopPlugin(app *App) {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Printf("[desktop-plugin] 装配发生 panic（插件功能不可用，主程序继续）: %v\n%s\n", r, debug.Stack())
+		}
+	}()
 	if app == nil {
 		fmt.Println("[desktop-plugin] 跳过加载：App 为空")
 		return

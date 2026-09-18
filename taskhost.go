@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"runtime/debug"
 	"sync"
 
 	wailsRuntime "github.com/wailsapp/wails/v2/pkg/runtime"
@@ -27,6 +28,39 @@ type appHost struct {
 
 	mu   sync.RWMutex
 	subs []func(plugin.RunEvent)
+}
+
+// 通知子系统只初始化一次（进程级）。
+//
+// 为什么必须显式初始化：wails 的 windows 实现里 categories 是**包级 map**，
+// 只有 InitializeNotifications() 才会 make 出来（internal/frontend/desktop/
+// windows/notifications.go:59）。未初始化就调 RegisterNotificationCategory，
+// 相当于往 nil map 里写，直接 panic：
+//
+//	panic: assignment to entry in nil map
+//	  .../windows.(*Frontend).RegisterNotificationCategory
+//	  main.(*appHost).RegisterCategories  ← 本文件
+//
+// 而这行代码跑在 wails 的 OnStartup goroutine 里，panic 无人接管，
+// 会带走整个进程（退出码 2）——表现就是「wails build 通过、程序起不来」。
+var (
+	notificationsOnce sync.Once
+	notificationsErr  error
+)
+
+// ensureNotifications 幂等地初始化通知子系统，返回首次初始化的结果。
+// 必须在任何通知类调用之前执行。
+func (h *appHost) ensureNotifications() error {
+	if h.app == nil || h.app.ctx == nil {
+		return fmt.Errorf("通知子系统初始化失败: 应用尚未就绪")
+	}
+	notificationsOnce.Do(func() {
+		notificationsErr = wailsRuntime.InitializeNotifications(h.app.ctx)
+		if notificationsErr != nil {
+			fmt.Printf("[desktop-plugin] 通知子系统初始化失败（通知将降级）: %v\n", notificationsErr)
+		}
+	})
+	return notificationsErr
 }
 
 // newAppHost 构造宿主适配器。
@@ -54,6 +88,10 @@ func (h *appHost) NotifyAvailable() bool {
 func (h *appHost) Notify(req plugin.NotifyRequest) error {
 	if h.app == nil || h.app.ctx == nil {
 		return fmt.Errorf("通知失败: 应用尚未就绪")
+	}
+	// 通知的发送与分类注册依赖同一套初始化（appName / toast 激活器）。
+	if err := h.ensureNotifications(); err != nil {
+		return fmt.Errorf("通知失败: %w", err)
 	}
 
 	opts := wailsRuntime.NotificationOptions{
@@ -91,6 +129,11 @@ func (h *appHost) RegisterCategories(cats []plugin.NotifyCategory) error {
 	if h.app == nil || h.app.ctx == nil {
 		return fmt.Errorf("注册通知分类失败: 应用尚未就绪")
 	}
+	// 必须先初始化通知子系统：否则下面的 RegisterNotificationCategory
+	// 会写 wails 的 nil categories map 并 panic（见 ensureNotifications 注释）。
+	if err := h.ensureNotifications(); err != nil {
+		return fmt.Errorf("注册通知分类失败: %w", err)
+	}
 	var failed []string
 	for _, c := range cats {
 		actions := make([]wailsRuntime.NotificationAction, 0, len(c.Actions))
@@ -120,7 +163,23 @@ func (h *appHost) OnNotifyResponse(fn func(plugin.NotifyResponse)) {
 	if h.app == nil || h.app.ctx == nil || fn == nil {
 		return
 	}
+	// 先初始化（幂等），再挂回调：保证回调挂在已就绪的通知通道上。
+	if err := h.ensureNotifications(); err != nil {
+		fmt.Printf("[desktop-plugin] 通知回调挂载前初始化失败: %v\n", err)
+	}
 	wailsRuntime.OnNotificationResponse(h.app.ctx, func(result wailsRuntime.NotificationResult) {
+		// 这个闭包跑在 wails 的通知 goroutine 上，panic 无人接管 ——
+		// 会直接带走整个进程（退出码 2），用户看到的现象是「点了一下通知按钮，
+		// 窗口就没了」，而且没有日志、没有弹窗、事件日志里也没有线索。
+		//
+		// 通知按钮最多只能影响任务状态，绝不能掀翻主程序，所以这里自己兜住：
+		// 与 startDesktopPlugin（装配期）、Scheduler.fire（调度期）、
+		// Plugin.fireSafely（触发期）一起，构成四条「panic 不得穿透」的边界。
+		defer func() {
+			if r := recover(); r != nil {
+				fmt.Printf("[desktop-plugin] 通知响应处理发生 panic（已隔离，主程序继续）: %v\n%s\n", r, debug.Stack())
+			}
+		}()
 		if result.Error != nil {
 			fmt.Printf("[desktop-plugin] 通知响应解析失败: %v\n", result.Error)
 			return
