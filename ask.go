@@ -173,7 +173,14 @@ func (b *askBroker) CancelSession(sessionID string) int {
 
 // Wait 等待答复。超时与会话取消都返回 Cancelled 答复（而非 error）：
 // 调用方据此告诉模型"用户没作答"，让模型自行决策或说明假设，而不是让整轮失败。
-func (b *askBroker) Wait(id string, ch chan AskAnswer) (AskAnswer, error) {
+// Wait 等待用户作答。
+//
+// ctx 取消（硬取消）与超时一样，都把"用户未作答"回给模型，让它自行决策，
+// 而不是让整轮对话失败——也避免用户点了停止之后还要再等 10 分钟。
+func (b *askBroker) Wait(ctx context.Context, id string, ch chan AskAnswer) (AskAnswer, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	timer := time.NewTimer(b.timeout)
 	defer timer.Stop()
 
@@ -181,6 +188,9 @@ func (b *askBroker) Wait(id string, ch chan AskAnswer) (AskAnswer, error) {
 	case ans := <-ch:
 		return ans, nil
 	case <-timer.C:
+		b.forget(id)
+		return AskAnswer{ID: id, Cancelled: true}, nil
+	case <-ctx.Done():
 		b.forget(id)
 		return AskAnswer{ID: id, Cancelled: true}, nil
 	}
@@ -344,7 +354,7 @@ func (a *App) askUser(ctx context.Context, sessionID string, req AskRequest) (As
 	a.askBroker.setRequest(id, req)
 
 	a.emitInteraction(ChatEvent{Type: "ask_user", Ask: &req})
-	return a.askBroker.Wait(id, ch)
+	return a.askBroker.Wait(ctx, id, ch)
 }
 
 // ResolveAskUser 前端提交答复（bound 方法）

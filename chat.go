@@ -65,12 +65,27 @@ type LLMReq struct {
 }
 
 // LLMResp LLM 响应
+// LLMUsage 一次请求的真实用量。
+//
+// 字段名统一用 OpenAI 的 prompt_tokens / completion_tokens，
+// Anthropic 的 input_tokens / output_tokens 在解析时映射进来，全项目只用这一套名字。
+//
+// 有它才能把「纯字符估算」升级成「真实锚点 + 增量估算」——精度是数量级差别。
+type LLMUsage struct {
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+	TotalTokens      int `json:"total_tokens,omitempty"`
+}
+
 type LLMResp struct {
 	Choices []LLMChoice `json:"choices"`
 	Created int64       `json:"created"`
 	ID      string      `json:"id"`
 	Model   string      `json:"model"`
 	Object  string      `json:"object"`
+	// Usage 用量。OpenAI 兼容响应直接映射进来；Anthropic 在适配器里映射。
+	// 部分网关的流式响应不带 usage，此时保持零值——估算会退回上一锚点+增量。
+	Usage LLMUsage `json:"usage"`
 }
 
 // LLMChoice LLM 选择项
@@ -88,6 +103,14 @@ type ChatResult struct {
 	Diff      []DiffFile `json:"diff,omitempty"`      // 本轮对话产生的工作区差异
 	Plan      *Plan      `json:"plan,omitempty"`      // 规划/执行流程返回时携带的计划
 	Error     string     `json:"error,omitempty"`     // 错误信息
+
+	// Cancelled 本轮是否被用户停止（区别于"失败"：取消不应触发自动重试，
+	// 前端文案也不同——超时可以说"重试一下"，取消不该）。
+	Cancelled  bool   `json:"cancelled,omitempty"`
+	CancelKind string `json:"cancelKind,omitempty"` // soft | hard
+
+	// Context 本轮结束时的上下文用量（前端据此显示用量指示；/compact 的提示也用它）
+	Context *ContextStat `json:"context,omitempty"`
 }
 
 // ===== 常量 =====
@@ -115,14 +138,15 @@ const (
 
 // ===== LLM HTTP 调用 =====
 
-// callLLM 调用 LLM API（OpenAI 兼容格式，非流式）
-func callLLM(url, token string, req *LLMReq) (*LLMResp, error) {
+// callLLM 调用 LLM API（OpenAI 兼容格式，非流式）。
+// ctx 取运行 ctx：硬取消要能立刻断开在途请求。
+func callLLM(ctx context.Context, url, token string, req *LLMReq) (*LLMResp, error) {
 	data, err := json.Marshal(req)
 	if err != nil {
 		return nil, fmt.Errorf("序列化 LLM 请求失败: %w", err)
 	}
 
-	httpReq, err := http.NewRequest(http.MethodPost, url, bytes.NewBuffer(data))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewBuffer(data))
 	if err != nil {
 		return nil, fmt.Errorf("创建 HTTP 请求失败: %w", err)
 	}
@@ -173,6 +197,9 @@ type llmStreamChunk struct {
 		} `json:"delta"`
 		FinishReason string `json:"finish_reason"`
 	} `json:"choices"`
+	// Usage 部分网关只在最后一帧里带用量（OpenAI 需 stream_options.include_usage）。
+	// 不带也不影响正确性：估算会退回「上一锚点 + 增量」。
+	Usage *LLMUsage `json:"usage"`
 }
 
 // callLLMStream 以 SSE 方式调用 LLM。
@@ -223,6 +250,8 @@ func callLLMStream(ctx context.Context, url, token string, req *LLMReq, onConten
 		tcArgs      = map[int]*strings.Builder{}
 		sawDataLine = false
 		badPayload  strings.Builder
+		// streamUsage 流式用量：只有网关在帧里带了才有值
+		streamUsage LLMUsage
 	)
 
 	scanner := bufio.NewScanner(resp.Body)
@@ -249,6 +278,10 @@ func callLLMStream(ctx context.Context, url, token string, req *LLMReq, onConten
 			// 单个坏帧跳过，不中断整个流
 			fmt.Printf("[chat] 跳过无法解析的 SSE 帧: %v\n", err)
 			continue
+		}
+		// 用量只在最后一帧出现，取到就覆盖（它是整次请求的累计值）
+		if chunk.Usage != nil && chunk.Usage.PromptTokens > 0 {
+			streamUsage = *chunk.Usage
 		}
 		for _, choice := range chunk.Choices {
 			if choice.Delta.Content != "" {
@@ -314,7 +347,7 @@ func callLLMStream(ctx context.Context, url, token string, req *LLMReq, onConten
 		}
 	}
 
-	return &LLMResp{Choices: []LLMChoice{{FinishReason: finish, Message: msg}}}, nil
+	return &LLMResp{Choices: []LLMChoice{{FinishReason: finish, Message: msg}}, Usage: streamUsage}, nil
 }
 
 // startDeltaFlusher 启动文本分片节流推送器：
@@ -404,6 +437,9 @@ const (
 	ChatEventToolCallEnd   = "tool_call_end"
 	ChatEventReplyDelta    = "reply_delta"
 	ChatEventPermission    = "permission_request"
+	// ChatEventCancelled 本轮被用户停止（软取消或硬取消）。前端据此把流式气泡
+	// 收尾成"已停止"，而不是留着它永远转圈。
+	ChatEventCancelled = "cancelled"
 )
 
 // emitChatEvent 向前端推送一个聊天事件（无 Wails 上下文时静默跳过）
@@ -498,7 +534,10 @@ func (a *App) executeChat(sessionID, query string, useStream bool) *ChatResult {
 	if err != nil {
 		return &ChatResult{Error: err.Error()}
 	}
-	return a.runToolLoop(sessionID, prompt, &model, useStream, false, nil)
+	// 登记为可取消的运行：前端「停止」经 StopChat 命中它（软取消 / 硬取消）
+	run := a.runs.begin(sessionID, "")
+	defer a.runs.end(run)
+	return a.runToolLoop(run, prompt, &model, useStream, false)
 }
 
 // buildBasePrompt 组装基础系统提示词：基础人设 + 工作区说明 + 技能上下文（L1 清单 / 强制注入正文）
@@ -573,9 +612,16 @@ func (a *App) skillAllowedInSession(session *Session, id string) bool {
 // systemPrompt 由调用方组装（buildBasePrompt，可再叠加计划上下文）；
 // 当前用户消息（普通聊天为用户输入、计划执行为合成的步骤消息）已由调用方持久化进会话历史；
 // compact=true 时对历史消息做确定性压缩（计划执行专用，普通聊天不受影响）；
-// checkCancel 在每轮工具循环前调用，返回 true 则中止（协作式取消，进行中的调用跑完）。
-func (a *App) runToolLoop(sessionID, systemPrompt string, model *Model,
-	useStream, compact bool, checkCancel func() bool) *ChatResult {
+// run 承载本次运行的取消控制与运行 ctx：软取消在每轮开始前生效；
+// 硬取消还会 cancel run.Ctx()，从而断开在途 LLM 请求、杀掉在跑的子进程、
+// 结束等待中的提问。run 为 nil 时自造一个不可取消的，保证函数可被单独调用。
+func (a *App) runToolLoop(run *runControl, systemPrompt string, model *Model,
+	useStream, compact bool) *ChatResult {
+	if run == nil {
+		run = (&runRegistry{}).begin("", "")
+	}
+	sessionID := run.sessionID
+
 	// 1. 重新加载会话：确保包含调用方刚持久化的用户消息以及此前全部消息（跨步骤上下文连续）
 	session, err := a.sessionStore.GetSession(sessionID)
 	if err != nil {
@@ -600,12 +646,9 @@ func (a *App) runToolLoop(sessionID, systemPrompt string, model *Model,
 		turnBase = a.diffService.TurnSnapshot(dir)
 	}
 
-	// 3. 构建历史消息；compact 时对早期工具结果做确定性截断（不改动存储）
-	history := session.Messages
-	if compact {
-		history = compactMessages(history)
-	}
-	messages := buildLLMMessages(history, systemPrompt)
+	// 3. 组装发给模型的消息序列：摘要前缀替换（若会话有生效摘要）+ 单条工具结果预算。
+	//    compact=true 是降级/调试开关，强制走确定性截断，不是常规路径。
+	messages := buildRunMessages(session, systemPrompt, compact)
 
 	// 4. 按会话白名单装配工具视图（装配期统一包一层权限网关），获取暴露给 LLM 的工具定义（仅 tool_router）
 	toolView := a.toolManager.BuildView(context.Background(), BuildOptions{
@@ -622,19 +665,71 @@ func (a *App) runToolLoop(sessionID, systemPrompt string, model *Model,
 	})
 	tools := toolView.GetToolsForLLM()
 
-	// 5. 工具调用循环
+	// 5. 上下文用量的基准量：窗口大小、工具定义的固定开销、用量锚点。
+	//    锚点由响应里回传的真实 input token 建立，把估算误差限制在两条锚点之间。
+	window := contextWindowOf(model)
+	toolTokens := toolSchemaTokens(tools)
+	var anchor *tokenAnchor
+	var ctxStat *ContextStat
+	overflowRetried := false
+	// summaryBroken 摘要器坏掉（调用失败/结果异常）后置位：本run之内不再尝试摘要式压缩。
+	// 否则每一轮都要白白付一次失败的 LLM 调用，而确定性截断本来就能兜住。
+	summaryBroken := false
+
+	// 6. 工具调用循环
 	var toolCallRecords []ToolCall
 	var persistedMsgs []Message // 本次运行持久化的所有消息
 
 	for turn := 0; turn < MaxChatTurns; turn++ {
-		// 协作式取消：进行中的 LLM 调用与工具执行跑完，下一轮循环不再开始
-		if checkCancel != nil && checkCancel() {
+		// 软取消：当前 LLM 调用与工具执行跑完，下一轮循环不再开始。
+		//
+		// 刻意**不在循环中途掐断**：本轮所有工具都会走完（硬取消时它们会因 ctx 已取消
+		// 而立即失败），随后 assistant 消息与全部 tool 结果一起落库，保证
+		// tool_calls 与 tool 消息一一配对。若在工具执行到一半直接返回，
+		// 会留下断裂的消息序列——它不会当次报错，而是在下一次构建请求时被 API 拒绝。
+		if run.SoftRequested() {
+			a.emitChatEvent(ChatEvent{Type: ChatEventCancelled, Error: "执行已取消"})
 			return &ChatResult{
-				Error:     "执行已取消",
-				ToolCalls: toolCallRecords,
-				Messages:  persistedMsgs,
+				Error:      "执行已取消",
+				ToolCalls:  toolCallRecords,
+				Messages:   persistedMsgs,
+				Cancelled:  true,
+				CancelKind: run.Kind(),
 			}
 		}
+
+		// 上下文接近窗口就先压缩再发请求——这是"敢让 agent 跑长任务"的关键一步。
+		// 压缩改的是存储（会话三个摘要字段），所以序列必须跟着重建、用量锚点必须作废。
+		// 压缩失败不阻断本轮：compactSession 内部已降级，这里只记一笔日志。
+		ctxStat = contextStatOf(session, messages, window, anchor, toolTokens)
+		compactedThisTurn := false
+		if needCompact(ctxStat.UsedTokens, window) && !summaryBroken && !compact {
+			out, cerr := a.compactSession(run.Ctx(), session, model)
+			switch {
+			case cerr != nil:
+				fmt.Printf("[context] 压缩出错（本轮继续，不阻断对话）: %v\n", cerr)
+				summaryBroken = true
+			case out.Degraded:
+				fmt.Printf("[context] 摘要不可用，本run改用确定性截断: %s\n", out.Reason)
+				summaryBroken = true
+				messages = buildRunMessages(session, systemPrompt, true)
+				ctxStat = contextStatOf(session, messages, window, nil, toolTokens)
+			case !out.Compressed:
+				fmt.Printf("[context] 未压缩: %s\n", out.Reason)
+			default:
+				if s2, e2 := a.sessionStore.GetSession(sessionID); e2 == nil {
+					session = s2
+					messages = buildRunMessages(session, systemPrompt, compact)
+					anchor = nil
+					ctxStat = contextStatOf(session, messages, window, nil, toolTokens)
+					compactedThisTurn = true
+				}
+			}
+		}
+
+		// 记录**真实发出的那一份**（摘要替换 + 工具结果预算之后），供界面排障查看。
+		// 快照内部做浅拷贝；这里不阻断任何逻辑，失败了也不影响对话。
+		a.reqLog.record(snapshotLLMRequest(run, session, turn, modelID, systemPrompt, messages, tools, ctxStat, compactedThisTurn))
 
 		req := &LLMReq{
 			Model:       modelID,
@@ -652,12 +747,51 @@ func (a *App) runToolLoop(sessionID, systemPrompt string, model *Model,
 		)
 		if useStream {
 			flusher, flushShutdown = a.startDeltaFlusher()
-			resp, err = callLLMStreamForModel(context.Background(), model, req, flusher)
+			resp, err = callLLMStreamForModel(run.Ctx(), model, req, flusher)
 			flushShutdown() // 确保残余分片在进入工具执行/done 前全部发出
 		} else {
-			resp, err = callLLMForModel(model, req)
+			resp, err = callLLMForModel(run.Ctx(), model, req)
 		}
 		if err != nil {
+			// 硬取消会让在途请求以 "context canceled" 失败：按"已取消"返回，
+			// 而不是当成一次真实失败——前端对这两者的处理不同（取消不该提示重试）。
+			if run.Kind() == cancelKindHard {
+				a.emitChatEvent(ChatEvent{Type: ChatEventCancelled, Error: "执行已取消"})
+				return &ChatResult{
+					Error:      "执行已取消",
+					ToolCalls:  toolCallRecords,
+					Messages:   persistedMsgs,
+					Cancelled:  true,
+					CancelKind: cancelKindHard,
+				}
+			}
+			// 上下文超限：这是压缩之外的最后一道防线（被动触发，说明前面的
+			// 主动阈值判断没兜住——比如窗口配得比真实值大）。只试一次，
+			// 免得和网络类错误混在一起反复重试。
+			if !overflowRetried && isContextOverflowError(err) {
+				overflowRetried = true
+				if !summaryBroken && !compact {
+					out, cerr := a.compactSession(run.Ctx(), session, model)
+					if cerr == nil && out.Compressed {
+						if s2, e2 := a.sessionStore.GetSession(sessionID); e2 == nil {
+							session = s2
+							messages = buildRunMessages(session, systemPrompt, compact)
+							anchor = nil
+							fmt.Printf("[context] 上下文超限，已摘要压缩（覆盖 %d 条消息）后重试\n", out.CoveredMsgs)
+							continue
+						}
+					}
+					if out.Degraded {
+						summaryBroken = true
+					}
+				}
+				// 摘要压不出来（消息太少 / 摘要器不可用）：退回确定性截断再试一次
+				messages = buildRunMessages(session, systemPrompt, true)
+				anchor = nil
+				fmt.Printf("[context] 上下文超限，改用确定性截断后重试\n")
+				continue
+			}
+
 			return &ChatResult{
 				Error:     err.Error(),
 				ToolCalls: toolCallRecords,
@@ -671,6 +805,12 @@ func (a *App) runToolLoop(sessionID, systemPrompt string, model *Model,
 				ToolCalls: toolCallRecords,
 				Messages:  persistedMsgs,
 			}
+		}
+
+		// 响应里带回真实用量就更新锚点：后续估算以它为基准，两条锚点之间的误差不累积。
+		// 这是整套估算敢用粗略字符系数的前提。
+		if resp.Usage.PromptTokens > 0 {
+			anchor = &tokenAnchor{InputTokens: resp.Usage.PromptTokens, MsgCount: len(messages)}
 		}
 
 		choice := resp.Choices[0]
@@ -703,7 +843,8 @@ func (a *App) runToolLoop(sessionID, systemPrompt string, model *Model,
 				mark := a.fileChanges.Mark(sessionID)
 				// 前后各扫一次工作区：执行窗口内的改动归因给本会话（含 exec_shell 改的文件）
 				a.diffService.NoteActivity(sessionID, dir, false)
-				result, execErr := toolView.ExecuteTool(tc.Function.Name, args)
+				// 执行工具：必须传运行 ctx —— 硬取消靠它切断权限等待、子进程与在途请求
+				result, execErr := toolView.ExecuteToolCtx(run.Ctx(), tc.Function.Name, args)
 				a.diffService.NoteActivity(sessionID, dir, true)
 				duration := time.Since(startTime).Seconds()
 				if changed := a.fileChanges.Since(sessionID, mark); len(changed) > 0 {
@@ -717,7 +858,13 @@ func (a *App) runToolLoop(sessionID, systemPrompt string, model *Model,
 				if execErr != nil {
 					toolCallRecord.Status = "error"
 					toolCallRecord.Duration = duration
-					toolCallRecord.Result = fmt.Sprintf("执行失败: %v", execErr)
+					if run.Kind() == cancelKindHard {
+						// 硬取消会让未跑完的工具统一报 "context canceled"，
+						// 换成可读说明——工具卡片与审计记录都要看得懂
+						toolCallRecord.Result = "已取消：运行被用户停止"
+					} else {
+						toolCallRecord.Result = fmt.Sprintf("执行失败: %v", execErr)
+					}
 				} else {
 					toolCallRecord.Status = "success"
 					toolCallRecord.Duration = duration
@@ -835,6 +982,7 @@ func (a *App) runToolLoop(sessionID, systemPrompt string, model *Model,
 			ToolCalls: toolCallRecords,
 			Messages:  persistedMsgs,
 			Diff:      diffFiles,
+			Context:   ctxStat,
 		}
 
 		// 推送完成事件
@@ -886,10 +1034,18 @@ func (a *App) ChatPlan(sessionID, query string, useStream bool) *ChatResult {
 	}
 	dir, _ := a.resolveProjectDir(sessionID)
 
+	// 登记为可取消的运行：规划期的 LLM 调用同样要能被停止
+	// （硬取消会断开在途的规划请求，而不是让用户白等一次 120s 超时）
+	run := a.runs.begin(sessionID, "")
+	defer a.runs.end(run)
+
 	// 2. 规划器调用：无工具、非流式、低温；失败重试一次
 	var resp *LLMResp
 	var lastErr error
 	for attempt := 0; attempt < 2; attempt++ {
+		if run.SoftRequested() {
+			return &ChatResult{Error: "执行已取消", Cancelled: true, CancelKind: run.Kind()}
+		}
 		req := &LLMReq{
 			Model:       modelID,
 			Temperature: 0.2,
@@ -898,7 +1054,7 @@ func (a *App) ChatPlan(sessionID, query string, useStream bool) *ChatResult {
 				{Role: RoleUser, Content: buildPlannerUserPrompt(query, dir)},
 			},
 		}
-		resp, lastErr = callLLMForModel(&model, req)
+		resp, lastErr = callLLMForModel(run.Ctx(), &model, req)
 		if lastErr == nil {
 			break
 		}
@@ -922,7 +1078,7 @@ func (a *App) ChatPlan(sessionID, query string, useStream bool) *ChatResult {
 		if err != nil {
 			return &ChatResult{Error: err.Error()}
 		}
-		return a.runToolLoop(sessionID, prompt, &model, useStream, false, nil)
+		return a.runToolLoop(run, prompt, &model, useStream, false)
 	}
 
 	// 5. 组装计划并落盘（待审核状态）
@@ -976,17 +1132,11 @@ func (a *App) executePlan(planID string, useStream bool) (result *ChatResult) {
 	dir, _ := a.resolveProjectDir(plan.SessionID)
 	basePrompt := a.buildBasePrompt(session, dir)
 
-	// 3. 注册协作式取消信号
-	cancelCh := a.registerPlanCancel(planID)
-	defer a.unregisterPlanCancel(planID)
-	checkCancel := func() bool {
-		select {
-		case <-cancelCh:
-			return true
-		default:
-			return false
-		}
-	}
+	// 3. 登记为可取消的运行。计划执行与普通聊天共用同一套取消机制
+	// （原先自己一套 planCancels），因此 CancelPlan 也能升级为硬取消。
+	run := a.runs.begin(plan.SessionID, planID)
+	defer a.runs.end(run)
+	checkCancel := func() bool { return run.SoftRequested() }
 
 	// 4. 计划置为执行中
 	plan.Status = PlanRunning
@@ -1064,7 +1214,7 @@ func (a *App) executePlan(planID string, useStream bool) (result *ChatResult) {
 		}
 
 		sys := buildPlanSystemPrompt(basePrompt, plan, step)
-		res := a.runToolLoop(plan.SessionID, sys, &model, useStream, true /*compact*/, checkCancel)
+		res := a.runToolLoop(run, sys, &model, useStream, true /*compact*/)
 
 		// 步骤中途取消：按本步实际结果落状态，计划置 cancelled
 		if checkCancel() {

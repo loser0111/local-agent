@@ -65,12 +65,15 @@ func resolveEndpointURL(model *Model) string {
 	return u
 }
 
-// isAnthropicStream 入口分发器
-func callLLMForModel(model *Model, req *LLMReq) (*LLMResp, error) {
+// callLLMForModel 非流式调用。
+//
+// ctx 是运行 ctx，必须一路传到 http.NewRequestWithContext —— 硬取消要能立刻断开
+// 在途请求，用 context.Background() 会让"点了停止还要等它跑完"（最长 120s 超时）。
+func callLLMForModel(ctx context.Context, model *Model, req *LLMReq) (*LLMResp, error) {
 	if isAnthropicEndpoint(model) {
-		return callAnthropic(resolveEndpointURL(model), model.APIKey, req)
+		return callAnthropic(ctx, resolveEndpointURL(model), model.APIKey, req)
 	}
-	return callLLM(resolveEndpointURL(model), model.APIKey, req)
+	return callLLM(ctx, resolveEndpointURL(model), model.APIKey, req)
 }
 
 func callLLMStreamForModel(ctx context.Context, model *Model, req *LLMReq, onContent func(string)) (*LLMResp, error) {
@@ -115,11 +118,41 @@ type anthropicContentBlock struct {
 	Content   string          `json:"content,omitempty"`
 }
 
+// anthropicStreamDelta 流式帧的 delta 字段。它承载两类内容：
+// content_block_delta 里的文本/工具参数分片，以及 message_delta 里的 stop_reason 与 output_tokens。
+type anthropicStreamDelta struct {
+	Type        string         `json:"type"`
+	Text        string         `json:"text"`
+	PartialJSON string         `json:"partial_json"`
+	StopReason  string         `json:"stop_reason"`
+	Usage       anthropicUsage `json:"usage"`
+}
+
+// anthropicStreamError 流式帧里的错误对象
+type anthropicStreamError struct {
+	Message string `json:"message"`
+}
+
+// anthropicStreamMessage 流式 message_start 帧里的 message 字段。
+// 单独提成具名类型而不是写成内联 struct：内联的多行字段类型会干扰所属结构体的
+// gofmt 列对齐，抽出来两边都干净。
+type anthropicStreamMessage struct {
+	Usage anthropicUsage `json:"usage"`
+}
+
+// anthropicUsage Anthropic 的用量字段名（input_tokens / output_tokens）。
+// 转换时映射进统一的 LLMUsage（prompt_tokens / completion_tokens），全项目只用一套名字。
+type anthropicUsage struct {
+	InputTokens  int `json:"input_tokens"`
+	OutputTokens int `json:"output_tokens"`
+}
+
 type anthropicResp struct {
 	ID         string                  `json:"id"`
 	Model      string                  `json:"model"`
 	Content    []anthropicContentBlock `json:"content"`
 	StopReason string                  `json:"stop_reason"`
+	Usage      anthropicUsage          `json:"usage"`
 }
 
 // ===== 请求转换（OpenAI 形状 → Anthropic）=====
@@ -295,6 +328,10 @@ func fromAnthropicResponse(r *anthropicResp) *LLMResp {
 			FinishReason: finish,
 			Message:      msg,
 		}},
+		Usage: LLMUsage{
+			PromptTokens:     r.Usage.InputTokens,
+			CompletionTokens: r.Usage.OutputTokens,
+		},
 	}
 }
 
@@ -316,14 +353,14 @@ func newAnthropicHTTPRequest(ctx context.Context, url, token string, body []byte
 }
 
 // callAnthropic 非流式调用 Anthropic Messages 协议。
-func callAnthropic(url, token string, req *LLMReq) (*LLMResp, error) {
+func callAnthropic(ctx context.Context, url, token string, req *LLMReq) (*LLMResp, error) {
 	areq := toAnthropicRequest(req)
 	areq.Stream = false
 	data, err := json.Marshal(areq)
 	if err != nil {
 		return nil, fmt.Errorf("序列化 Anthropic 请求失败: %w", err)
 	}
-	httpReq, err := newAnthropicHTTPRequest(context.Background(), url, token, data, false)
+	httpReq, err := newAnthropicHTTPRequest(ctx, url, token, data, false)
 	if err != nil {
 		return nil, fmt.Errorf("创建 HTTP 请求失败: %w", err)
 	}
@@ -396,16 +433,15 @@ func callAnthropicStream(ctx context.Context, url, token string, req *LLMReq, on
 		Type         string                 `json:"type"`
 		Index        int                    `json:"index"`
 		ContentBlock *anthropicContentBlock `json:"content_block"`
-		Delta        *struct {
-			Type        string `json:"type"`
-			Text        string `json:"text"`
-			PartialJSON string `json:"partial_json"`
-			StopReason  string `json:"stop_reason"`
-		} `json:"delta"`
-		Error *struct {
-			Message string `json:"message"`
-		} `json:"error"`
+		Delta        *anthropicStreamDelta  `json:"delta"`
+		Error        *anthropicStreamError  `json:"error"`
+		// Message 只在 message_start 出现，其中带 input_tokens
+		Message *anthropicStreamMessage `json:"message"`
 	}
+
+	// usage 流式用量：input_tokens 来自 message_start，output_tokens 来自 message_delta，
+	// 两者拼起来才是整次请求的用量（这正是"锚点"的来源）
+	var usage anthropicUsage
 
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
@@ -430,6 +466,10 @@ func callAnthropicStream(ctx context.Context, url, token string, req *LLMReq, on
 		}
 
 		switch ev.Type {
+		case "message_start":
+			if ev.Message != nil {
+				usage.InputTokens = ev.Message.Usage.InputTokens
+			}
 		case "content_block_start":
 			if ev.ContentBlock != nil && ev.ContentBlock.Type == "tool_use" {
 				tcByIdx[ev.Index] = &LLMToolCall{
@@ -460,8 +500,13 @@ func callAnthropicStream(ctx context.Context, url, token string, req *LLMReq, on
 				}
 			}
 		case "message_delta":
-			if ev.Delta != nil && ev.Delta.StopReason != "" {
-				stopReason = ev.Delta.StopReason
+			if ev.Delta != nil {
+				if ev.Delta.StopReason != "" {
+					stopReason = ev.Delta.StopReason
+				}
+				if ev.Delta.Usage.OutputTokens > 0 {
+					usage.OutputTokens = ev.Delta.Usage.OutputTokens
+				}
 			}
 		case "error":
 			msg := "未知错误"
@@ -500,5 +545,9 @@ func callAnthropicStream(ctx context.Context, url, token string, req *LLMReq, on
 	return &LLMResp{
 		Object:  "chat.completion",
 		Choices: []LLMChoice{{FinishReason: finish, Message: msg}},
+		Usage: LLMUsage{
+			PromptTokens:     usage.InputTokens,
+			CompletionTokens: usage.OutputTokens,
+		},
 	}, nil
 }

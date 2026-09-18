@@ -7,6 +7,9 @@ import {
   AppendConversation,
   UpdateSession,
   Chat,
+  StopChat,
+  GetContextStat,
+  GetLastLLMRequest,
   GetDiff,
   GetDiffTurns,
 } from '@/../wailsjs/go/main/App'
@@ -206,6 +209,7 @@ export async function chat(
     onToolCallStart,
     onToolCallEnd,
     onPlanUpdate,
+    onCancelled,
   } = {}
 ) {
   if (isWails()) {
@@ -224,6 +228,11 @@ export async function chat(
           break
         case 'plan_update':
           onPlanUpdate?.(eventData.plan)
+          break
+        // 被用户停止（软取消或硬取消）：立即通知调用方收尾流式气泡，
+        // 否则它会一直停在"正在输入"的状态
+        case 'cancelled':
+          onCancelled?.(eventData.error)
           break
         // 授权请求 / 模型提问走独立的 user:interaction 通道（由 App.vue 统一订阅），
         // 不在这里分发 —— 否则计划执行等入口会漏（详见 api/interaction.js 的说明）
@@ -408,4 +417,55 @@ export function onDiffUpdate(cb) {
   if (!isWails()) return () => {}
   EventsOn('diff:update', cb)
   return () => EventsOff('diff:update')
+}
+
+/**
+ * 停止某会话当前正在运行的生成（两级）。
+ *
+ * @param {string} sessionId
+ * @param {boolean} hard false=协作式（当前 LLM 请求与工具跑完，下一轮不再开始）；
+ *   true=硬取消（在途请求立即断开、正在跑的子进程被 kill、等待中的提问立即结束）
+ * @returns {Promise<boolean>} 是否命中了一个在跑的运行。
+ *   返回 false 时调用方**必须**复位按钮并结束本地"生成中"状态——
+ *   否则会出现"点了停止却没反应"的假象（这正是改造前的表现）。
+ */
+export async function stopChat(sessionId, hard = false) {
+  if (isWails()) return await StopChat(sessionId, !!hard)
+  return false // 浏览器 mock 模式没有真实运行可停
+}
+
+/**
+ * 查询某会话的上下文用量。
+ *
+ * 后端给的是**近似值**（不含系统提示与工具定义的精确开销），只用于界面显示比例，
+ * 不参与任何判定——真正的阈值判断在后端用运行期的真实序列算。
+ *
+ * @param {string} sessionId
+ * @returns {Promise<import('@/types').ContextStat|null>} 会话不存在时返回 null
+ */
+export async function getContextStat(sessionId) {
+  if (!isWails()) return null
+  try {
+    return await GetContextStat(sessionId)
+  } catch {
+    return null // 只是显示用，取不到就不显示，不打扰用户
+  }
+}
+
+/**
+ * 查询本会话**最近一次真实发出**的请求快照（压缩与工具结果预算之后的那一份）。
+ *
+ * 与会话里存的消息不同：会话存的是原文，这里记的是实际交给模型的序列。
+ * 快照只在内存里，应用重启后需要再发一条消息才会有。
+ *
+ * @param {string} sessionId
+ * @returns {Promise<import('@/types').LLMRequestSnapshot|null>} 无记录时返回 null
+ */
+export async function getLastLLMRequest(sessionId) {
+  if (!isWails()) return null
+  try {
+    return await GetLastLLMRequest(sessionId)
+  } catch {
+    return null
+  }
 }

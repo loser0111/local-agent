@@ -1,8 +1,9 @@
 # Agent 硬伤补齐技术方案（中断 / 上下文 / 撤销 / 子代理）
 
-> - 状态：方案待实施（本文档只定设计，不含实现）
+> - 状态：**P1-A（两级中断）与 P1-B（上下文管理）已实施**；P2 / P3 待实施
 > - 依据：对当前工作区代码的逐条盘点，每个论断都标了 `文件:行`
 > - 范围：四条硬伤。工具层与权限层不动（那两块已经够扎实）
+> - 实施记录见文末「附：P1-A 实施记录」与「附：P1-B 实施记录」——落地时与设计有出入之处，以实际代码为准
 
 ## 一、已拍板的四个决策
 
@@ -21,7 +22,7 @@
 
 **撤销** 的数据基础已经很好，缺的是"可回退性"。`DiffService.Snapshot`（`diff.go:406`）用 **`git stash create`** 产出悬空 commit，**不修改工作区与暂存区**，这正是回退所需的快照形态。本轮基线也在循环开头取好了（`chat.go:600` 的 `turnBase`）。但 `DiffTurn`（`diff.go:45`）只存 `Files/Additions/Deletions/CreatedAt`，**没有存这一轮的 baseline sha**，所以重启后无法回退；而且悬空 commit 没有任何引用，`git gc` 会把它回收掉。
 
-**子代理** 完全不存在。Go 侧搜不到任何 spawn/task 派生能力；`frontend/src/panes/SubagentPane.vue` 与 `TasksPane.vue` 是空壳——只 `import { ref } from 'vue'` 与 `PaneHeader`，没有任何 API 调用或数据源。
+**子代理** 完全不存在。Go 侧搜不到任何 spawn/task 派生能力；`frontend/src/panes/SubagentPane.vue` 与 `frontend/src/panes/TasksPane.vue` 是空壳——只 `import { ref } from 'vue'` 与 `PaneHeader`，没有任何 API 调用或数据源。
 
 **一个意外的好消息**：ctx 的管道基本已经铺好了。`ToolInterface.Execute(ctx, args)` 本身就带 ctx（`tools.go` 的接口定义），`guardedTool.Execute` 也已经把 ctx 传给了 `Enforce` 和 `inner.Execute`（`permission_app.go:45`），`Enforcer.Enforce(ctx, tool, args)` 也接受 ctx。真正缺的是"为每次运行创建一个**可取消**的 ctx，并让它真的被传递和尊重"。
 
@@ -106,7 +107,7 @@ Cancelled  bool   `json:"cancelled"`
 CancelKind string `json:"cancelKind,omitempty"` // soft | hard
 ```
 
-前端 `stopGeneration`（`ChatPane.vue:361`）现在的分支顺序是先处理提问与授权、再处理计划、最后落到 `isGenerating=false`。改为：先按需结掉提问与授权（保持现状），然后**统一调 `StopChat(sessionId, hard)`**，其中 `hard` 由"是否已经在停止中"决定——即按钮在收到取消确认前保持"停止中"状态，此时再点就是硬取消。按钮的三态（运行中 / 停止中 / 已停止）本来就是 `chatStore.isGenerating` 加一个本地标志，不需要新的全局状态。
+前端 `stopGeneration`（`frontend/src/panes/ChatPane.vue:361`）现在的分支顺序是先处理提问与授权、再处理计划、最后落到 `isGenerating=false`。改为：先按需结掉提问与授权（保持现状），然后**统一调 `StopChat(sessionId, hard)`**，其中 `hard` 由"是否已经在停止中"决定——即按钮在收到取消确认前保持"停止中"状态，此时再点就是硬取消。按钮的三态（运行中 / 停止中 / 已停止）本来就是 `chatStore.isGenerating` 加一个本地标志，不需要新的全局状态。
 
 ### 3.6 边界与失败模式
 
@@ -386,4 +387,93 @@ UI 上有个容易混淆的地方需要澄清：`SubagentPane` 放**子代理**�
 **验证边界（重要）**：本方案是对着当前工作区代码读出来的设计，所有 `文件:行` 引用都是读码所得，但**方案本身未实现、未编译、未运行验证**（开发沙箱没有 Go 工具链）。实现阶段有两处需要在目标环境先确认一次：`git stash create` 确实不含未跟踪文件（5.3 的前提，用 `git stash create` 后 `git cat-file -p <sha>:<一个未跟踪文件>` 验证）、以及 plumbing 快照命令（`GIT_INDEX_FILE` + `add -A` + `write-tree` + `commit-tree`）在目标 git 版本上的行为一致。
 
 一个意外的好消息：P2 是这四条里**唯一能在当前沙箱里真跑测试**的部分——它依赖的是 git 命令而不是 Go 工具链，只要有 git 就能把回退算法验证到位。
+
+## 附：P1-A 实施记录（2026-09-17）
+
+设计在落地时与代码实际有四处出入，都以下面的**实际实现**为准。
+
+**一、ctx 的洞是 7 个，不是设计里说的 3 个。** 逐一核对下来有七处，其中最关键的一处设计定位偏了一层：
+
+- **`SessionView.ExecuteTool` 硬编码 `context.Background()`**（`tools.go`）。这是最大的一个——它让权限等待里**已经写好的** `ctx.Done()` 分支（`permissionBroker.Wait`，`permission_app.go:358`）在真实运行里永远不可能触发。设计里写的是"权限询问没有 ctx 分支"，实际它有分支，只是拿到的 ctx 是死的。（顺带说明为什么这个洞没被更早发现：`permissionBroker.Wait` 的 ctx 参数看起来已经接好了，光看它的签名会以为链路是通的。）
+- `callAnthropic`（`anthropic.go`）内部硬编码 `context.Background()`。
+- `callLLM`（`chat.go`）用 `http.NewRequest` 而非 `NewRequestWithContext`。
+- `callLLMForModel` 与 `callLLM` 的**签名里根本没有 ctx 形参**。
+- 主循环的流式调用传的是 `context.Background()`。
+- `CLITool.Execute`（exec_shell）收了 ctx 却用 `exec.Command`。
+- `askBroker.Wait`（`ask.go`）确实没有 ctx 分支——设计里这条是对的。
+
+**二、没有改 `ExecuteTool` 的签名，而是新增了 `ExecuteToolCtx`。** 改签名要动 33 处测试调用点（横跨 5 个测试文件），为一次纯重命名付出这些改动不划算。做法是：`ExecuteToolCtx(ctx, name, args)` 是唯一实现，`ExecuteTool(name, args)` 退化成它的 `context.Background()` 薄封装，并在注释里明确标注"仅供测试与一次性调用，不会被硬取消中断"。生产侧只有 1 处调用点需要改（主循环的工具执行处）。这样既省掉大量测试改动，又把那个危险的默认值约束在一个有名字、有说明、有警告的入口里，而不是散落在实现内部。
+
+**三、计划取消与普通聊天统一到同一个注册表，但 `CancelPlan` 的对外语义一字未改。** `planCancels map[string]chan struct{}` 与 `planMu` 整体删除换成 `runRegistry`；`CancelPlan` 先按 planID 查活跃运行走软取消，查不到再走原来那套"强制收尾"，计划不在 running 时仍然明确报错。既有测试（`TestExecutePlanCancel`、`TestCancelPlanRecoversStuckRunning`）的断言全部保持不变。
+
+**四、取消不再走 `Chat` 的错误路径。** `Chat` 原本把"Error 非空且 Reply 为空"一律当失败抛给前端，而取消恰好是这个形状——不改的话用户点一下停止会看到"发送失败：执行已取消"。改为仅在 `!result.Cancelled` 时才当错误；前端据此把取消渲染成"已停止"而不是"调用失败"。
+
+**新增回归测试**（`runcontrol_test.go`，10 个）：软取消只置信号不碰 ctx；硬取消先置软信号再 cancel ctx；软→硬升级；重复取消幂等；注册表按会话/计划查找与释放；**零值 App 下 nil 注册表不 panic**（`plan_test.go` 依赖这一点，是我在写代码时差点造出的一个崩溃）；`StopChat` 无运行时报 false；**硬取消能杀掉正在跑的 `sleep 30`**（`exec.Command` → `CommandContext` 的回归测试，改造前这个测试要等满 30 秒）；提问等待被 ctx 取消后立即返回"用户未作答"；两个端到端——软取消在下一轮边界停下且不跳过本轮工具、硬取消断开在途请求并返回 `cancelled=true kind=hard`。
+
+**仍未验证**：沙箱无 Go 工具链，这批 Go 改动**未编译、未跑测试**。静态检查（括号配平、未使用 import、跨文件重名、结构体字面量字段名、未使用局部变量、BOM）与新增类型的方法调用点核对都通过，但那挡不住类型错误。请本地 `go build ./... && go test ./...` 验收。
+
+**下一步**：P1-B 上下文管理。它同样落在 `runToolLoop` 里（触发点就在循环开头、取消检查之后），且它的前置改造——给 `LLMResp` 补 `usage` 解析——是独立的一小块，可以先做。
+
+## 附：P1-B 实施记录（2026-09-17）
+
+新增 `contextmgmt.go`（核心）+ `contextmgmt_test.go`（15 个测试）。三层手段按设计落地，落地时的取舍与补充记录如下。
+
+**一、锚点的来源比设计里更细。** 设计只说要"补 `usage` 解析"，实际分三处：`LLMResp` 加 `Usage LLMUsage` 字段后，**OpenAI 兼容的非流式响应会自动映射进来**（json 字段名就是 `prompt_tokens`，无需额外代码）；Anthropic 的 `input_tokens`/`output_tokens` 需要手动映射，为此加了 `anthropicUsage` 与两个转换点的赋值；流式两端都尽量取——OpenAI 侧从最后一帧取（只在网关支持 `stream_options.include_usage` 时才有），Anthropic 侧从 `message_start` 取 input、`message_delta` 取 output 再拼起来。
+
+**刻意没有加 `stream_options: {"include_usage": true}`**：部分网关会因未知字段直接拒绝请求，为了一个可选的用量信息冒这个风险不值得。拿不到 usage 时估算退回"上一锚点 + 增量"，只是精度略降，不影响正确性。
+
+**二、切点选择的方向被刻意定成"往前找"。** `findCompactCut` 从 `len-keepRecent` 往**前**扫，而不是往后。这样找不到合法切点时只会**保留更多**而不是更少——宁可少压一点，也不要把最近一轮切掉。配合"切点必须落在非 tool 结果的 user 消息之前"这条硬约束（tool 结果与其 assistant(tool_calls) 必须同侧，切开会被 API 拒绝），测试里专门断言了切点左侧不能是"带 tool_calls 的 assistant"。
+
+**三、摘要消息用 user 角色，不是 system。** 设计没写这条，但 Anthropic 协议要求 system 只在序列最前，中途插 system 会被拒；user 角色各协议都接受。摘要正文前缀一句"以下是此前对话的摘要，用于节省上下文；完整原文仍在会话记录中"，避免模型误以为对话真只有这些。
+
+**四、降级路径多了一个 `summaryBroken` 闸。** 设计里的三条防线（摘要失败→截断、摘要异常→截断、API 超限→压缩重试）都实现了；额外加了 `summaryBroken`：一旦本 run 内摘要器失败过，**后续轮次不再尝试摘要式压缩**。否则摘要器坏掉时每一轮都要白付一次失败的 LLM 调用，而确定性截断本来就能兜住。
+
+**五、`/compact` 走 `Chat` 的最前面拦截**，优先级高于同名技能（内置命令不该被技能覆盖）。压缩后落一条 assistant 说明消息（含覆盖条数、摘要字数、省下的 token），保证 user/assistant 成对，也让这次维护操作留在会话记录里。它同样登记为可取消的运行——压缩要额外发一次 LLM 请求，硬取消应该能断掉它。
+
+**六、会话新增三个字段，压缩可逆。** `ContextSummary` / `ContextCoveredUpTo` / `ContextSummaryAt`，只在 `buildRunMessages` 里生效，`Session.Messages` 一字不动。`ClearContextSummary` 是"可逆"的落地点——出任何问题调它就能回到压缩前。测试里有一条专门覆盖这个往返。
+
+**七、单条工具结果预算做成独立防线**（`applyToolResultBudget`）：超限保留头尾、中间省略并明确标注省略了多少字符，同时提示模型"用 offset/limit 分段读或 grep 定位"。它只作用于**副本**，持久化仍存全量——测试里断言了传入的切片必须原样。
+
+**八、前端多了一个可点的用量指示**，以及模型表单新增「上下文窗口」字段（`Model.ContextWindow`，留空按 32K）。不做这个字段的话，默认 32K 对 200K 窗口的模型会把占用比显示成 6 倍、并过早触发压缩。用量指示点击即发送 `/compact`。
+
+**新增回归测试**（`contextmgmt_test.go`，15 个）：估算量级（中文比同长度 ASCII 贵）；锚点生效/失效的行为；**切点不落进 tool_call/tool 组内**、找不到合法切点时返回 -1；工具结果预算只动副本；有/无摘要时的消息组装；**清空摘要即回到全量**（可逆性）；用量统计与阈值边界；上下文超长错误的识别（且 `rate limit exceeded` 必须**不**被误判）；摘要器不可用时的降级；正常压缩的落库；消息太少时不压；以及三条端到端——**超限后压缩重试成功**、**摘要器坏掉时靠截断兜住仍能完成**、`/compact` 命令路径。
+
+**仍未验证**：沙箱无 Go 工具链，这批改动**未编译、未跑测试**。静态检查（括号配平、未使用 import、跨文件重名、结构体字面量字段名、未使用局部变量、BOM）全过，新增字段的引用与声明也逐项核对过，但挡不住类型错误。请本地 `go build ./... && go test ./...`。
+
+**第一轮编译反馈（3 个错误，均为本批引入，已修）**：
+
+1. `anthropic.go` — `ev.Delta.Usage` 不存在。流式事件里的 `Delta` 原本是**内联匿名结构体**，我读它的 `Usage` 字段却忘了往那个内联结构里加字段。修法：把 `Delta` / `Error` / `Message` 全部提成具名类型（`anthropicStreamDelta` / `anthropicStreamError` / `anthropicStreamMessage`）。这不只是为了修错——**具名类型是可被静态检查的，匿名结构体不是**，提出来之后同类错误才有机会被工具提前发现。
+2. `contextmgmt.go:386` — 把本地 `Message` 当 `LLMMessage` 传给了 `messageTokens`。两者字段名相同，但工具调用的元素类型不同（`[]ToolCall` vs `[]LLMToolCall`），Go 拒绝隐式转换。修法：新增 `storedMessageTokens(Message)`，两个类型各用各的估算函数，不做转换。
+
+这两个错误恰好落在静态检查**够不着**的两类上，值得记下来：一是**字段读取**（只检查了结构体字面量里的字段名，没检查 `x.Field` 这种读取，尤其是匿名结构体上的读取）；二是**参数类型**（不做类型推导，看不出"长得像但不是一个类型"）。这两类只有编译器能拦——所以每批改动后那一轮本地编译不是形式，是必需的。
+
+**顺带补了一条测试**：`TestAnthropicStreamCapturesUsage`。Anthropic 流式的用量要从 `message_start` 取 input、从 `message_delta` 取 output 再拼起来，而整个"锚点"机制都依赖这两个值——这条路径此前没有任何覆盖。
+
+**复查时发现并修掉的一个静默丢信息缺陷（连续压缩场景）**：
+
+`compactSession` 原本把 `pending[:cut]`（即 `Messages[base:base+cut]`）喂给摘要器，却把新摘要标记为覆盖 `Messages[0:base+cut]`。第一次压缩没问题（base=0），但**第二次压缩时，上一段摘要覆盖过的内容既没进新摘要、又因为 `buildRunMessages` 的前缀替换而不再发给模型——静默丢失**。写单次压缩的测试发现不了它，因为只压一次时两种写法等价。
+
+修法：构造摘要器输入时，若已有摘要就把旧摘要作为一条消息并入（`summarizeInput = [旧摘要] + pending[:cut]`），这样不变式「`ContextSummary` 覆盖 `Messages[0:ContextCoveredUpTo]`」才成立。新增回归测试 `TestSecondCompactCarriesPreviousSummary`：连压两次，**捕获第二次摘要请求的原始 body 并断言其中含第一次摘要的标记**——只断言最终状态是抓不到这个 bug 的，必须看中间输入。
+
+这个坑的一般形式值得记住：**当一份派生数据（摘要、索引、缓存）是"整体替换"而不是"增量累积"时，新值必须把被替换的旧值并入自己**，否则它的元数据（这里是覆盖范围）会大于它的实际内容，而消费方只看到元数据。
+
+### 请求快照视图（`requestlog.go` + `frontend/src/components/business/RequestPreviewDialog.vue`）
+
+压缩做完之后没有地方能验证它到底做了什么：会话里存的是**原文**，而实际发出去的是经过「摘要前缀替换 → 必要时确定性截断 → 单条工具结果预算」三层处理后的序列，两者不同，此前全靠猜。补上了一个可查视图。
+
+**记录的是真实发出的那一份**，不是事后重算：在 `runToolLoop` 里发起请求之前做一次浅拷贝（`chat.go:732`）。之所以不重算——重算需要重新装配工具视图（`BuildView` 会去连 MCP），而且未必与当时一致。普通聊天与计划执行两条路径都经过这里，所以两边的请求都能看。
+
+三条刻意约束：**只保留每会话最近一次、且只在内存里**（它是排障视图不是审计日志，落盘会让每次对话多一次写 I/O，而要看的时候通常就是刚发完那次；界面会明确提示"重启后需再发一条"）；**只记录内部统一格式**（OpenAI 形状；Anthropic 发送前还会由适配器再转一次，这点在界面上标注了）；**工具定义只留名字与体积估算**，不带 JSON Schema（那是静态的，几十个工具的 schema 会把快照撑得很大而排障价值为零）。
+
+界面入口是工具栏上的「请求」按钮，弹窗里按序展示：元信息（轮次/模型/用量/消息数）→ 摘要压缩提示 → 系统提示（可折叠）→ 工具名清单 → **消息序列**（每条的序号、角色、字符数、内容，超长默认截断 400 字符可展开；摘要说明那条用紫色高亮并标注"替代原文"）。另有「复制完整 JSON」按钮，方便贴到别处比对。
+
+**实现上最需要注意的一点**：快照必须与循环里的切片**解耦**。循环随后还会 `append` / 重建 `messages`，`append` 可能复用底层数组——若不拷贝，事后看到的就不是当时发出去的那一份了。这是"记录现场"这类功能的经典坑，专门写了 `TestSnapshotIsDecoupledFromCallerSlice` 守住它。
+
+新增测试（`requestlog_test.go`，5 个）：摘要消息下标的各种边界（含 `ContextCoveredUpTo=0` 但摘要非空的异常态）、**快照与调用方切片解耦**、记录/读取对 nil 接收者安全（零值 App 不 panic）、会话间隔离与 `forget`、以及端到端——跑完一次真实对话后快照里是**压缩后**的序列（含摘要标记、条数少于原文）。
+
+**关于 gofmt 对齐的一点说明**：我这轮改动的文件里，凡是**我引入**的列错位都已修掉（`runcontrol.go` 与 `chat.go` 各一处，都用"把行尾注释改成独立行"的方式解决——行尾注释要参与列对齐，插在字段中间又会打断分组，两种写法都容易把相邻行带歪）。`chat.go`/`tools.go`/`ask.go`/`sessions.go` 里还有若干处**既有**错位我没有动：验证方法是拿 `git show HEAD:<file>` 跑同一个对齐器，行号与数量一致即说明早于本次改动（`tools.go` 3 处、`ask.go` 2 处、`chat.go` 7 处、`sessions.go` 6 处）。`gofmt -w .` 会一并抹平。
+
+顺带记一个自己踩的坑：我用来做对齐的脚本 v1 用有限正则匹配类型列，**认不出 `[]*Conversation` 这类写法**，于是把一个结构体切成不相邻的分组、只收窄了其中一部分——反而把文件改得比原来更不一致。已重写为"字段名之后、反引号 tag 之前都算类型"的分段解析（v3），并在已对齐的文件上自检零改动后才使用。教训是：**自动化格式化工具本身必须先有验证，否则它会以"修复"的名义制造新问题**。
+
+**下一步**：P2 撤销。设计已就绪（见第五章），实现前先按 5.6 的待确认项验证两条 git 行为。
 

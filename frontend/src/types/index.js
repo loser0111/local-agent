@@ -173,6 +173,26 @@
  */
 
 /**
+ * 一次真实发出的 LLM 请求快照（排障用）。
+ * 注意与会话里存的消息不同：会话存原文，这份是压缩与工具结果预算**之后**实际交给模型的序列。
+ * @typedef {Object} LLMRequestSnapshot
+ * @property {string} sessionId
+ * @property {string} [runId]
+ * @property {number} turn
+ * @property {string} model
+ * @property {number} at Unix 毫秒
+ * @property {string} systemPrompt
+ * @property {Array<{role: string, content: string, tool_call_id?: string, tool_calls?: Array}>} messages
+ * @property {number} summaryIndex 摘要说明消息的下标（-1 表示本次无摘要）
+ * @property {string[]} toolNames 工具定义只留名字，不含 schema
+ * @property {number} toolSchemaTokens 工具定义的估算开销
+ * @property {number} estimatedTokens
+ * @property {number} windowTokens
+ * @property {boolean} compactedThisTurn 本轮是否刚做过摘要压缩
+ * @property {number} coveredMsgs 摘要累计覆盖的消息条数
+ */
+
+/**
  * 计划步骤
  * @typedef {Object} PlanStep
  * @property {number} index

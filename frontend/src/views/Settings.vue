@@ -54,6 +54,7 @@ const form = reactive({
   apiKey: '',
   url: '',
   protocol: '',
+  contextWindow: '',
 })
 
 async function loadModels() {
@@ -83,6 +84,7 @@ async function handleAdd() {
       apiKey: form.apiKey,
       url: form.url.trim(),
       protocol: form.protocol || '',
+      contextWindow: Number(form.contextWindow) || 0,
     })
     form.name = ''
     form.alias = ''
@@ -90,6 +92,7 @@ async function handleAdd() {
     form.apiKey = ''
     form.url = ''
     form.protocol = ''
+    form.contextWindow = ''
     await loadModels()
     await loadModelNamesForDefault()
   } catch (e) {
@@ -149,6 +152,7 @@ const editForm = reactive({
   apiKey: '',
   url: '',
   protocol: '',
+  contextWindow: '',
 })
 const editSubmitting = ref(false)
 const editTesting = ref(false)
@@ -166,6 +170,7 @@ async function startEdit(m) {
     editForm.apiKey = full.apiKey || ''
     editForm.url = full.url || ''
     editForm.protocol = full.protocol || ''
+    editForm.contextWindow = full.contextWindow || ''
   } catch (e) {
     // 回退到脱敏数据
     editForm.name = m.name
@@ -174,6 +179,7 @@ async function startEdit(m) {
     editForm.apiKey = m.apiKey || ''
     editForm.url = m.url || ''
     editForm.protocol = m.protocol || ''
+    editForm.contextWindow = m.contextWindow || ''
   }
   editTestResult.value = null
 }
@@ -187,6 +193,7 @@ function cancelEdit() {
   editForm.apiKey = ''
   editForm.url = ''
   editForm.protocol = ''
+  editForm.contextWindow = ''
   editTestResult.value = null
 }
 
@@ -205,6 +212,7 @@ async function handleUpdate() {
       apiKey: editForm.apiKey,
       url: editForm.url.trim(),
       protocol: editForm.protocol || '',
+      contextWindow: Number(editForm.contextWindow) || 0,
     })
     cancelEdit()
     await loadModels()
@@ -374,6 +382,13 @@ onMounted(() => {
                 <option value="anthropic">Anthropic（/v1/messages）</option>
               </select>
             </div>
+            <div class="form-group">
+              <label>
+                上下文窗口
+                <span class="checkbox-hint">（token 数；留空按 32K 估算。只影响「何时压缩上下文」，不影响请求本身）</span>
+              </label>
+              <input v-model="form.contextWindow" class="input" style="max-width: 360px" placeholder="如：128000" />
+            </div>
             <!-- 测试连接结果（添加表单） -->
             <div v-if="testResult" class="test-result" :class="testResult.success ? 'test-success' : 'test-error'">
               {{ testResult.message }}
@@ -474,6 +489,13 @@ onMounted(() => {
                 <option value="openai">OpenAI（/chat/completions）</option>
                 <option value="anthropic">Anthropic（/v1/messages）</option>
               </select>
+            </div>
+            <div class="form-group">
+              <label>
+                上下文窗口
+                <span class="checkbox-hint">（token 数；留空按 32K 估算）</span>
+              </label>
+              <input v-model="editForm.contextWindow" class="input" style="max-width: 360px" placeholder="如：128000" />
             </div>
             <!-- 测试连接结果（编辑弹窗） -->
             <div v-if="editTestResult" class="test-result" :class="editTestResult.success ? 'test-success' : 'test-error'">

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -78,7 +79,7 @@ func TestCallModelForOpenAI_SendsPlaintextKey(t *testing.T) {
 		Model:    "m1",
 		Messages: []LLMMessage{{Role: RoleUser, Content: "ping"}},
 	}
-	if _, err := callLLMForModel(&model, req); err != nil {
+	if _, err := callLLMForModel(context.Background(), &model, req); err != nil {
 		t.Fatalf("callLLMForModel 失败: %v", err)
 	}
 
@@ -138,7 +139,7 @@ func TestCallModelForAnthropic_SendsPlaintextKey(t *testing.T) {
 		Model:    "m1",
 		Messages: []LLMMessage{{Role: RoleUser, Content: "ping"}},
 	}
-	if _, err := callLLMForModel(&model, req); err != nil {
+	if _, err := callLLMForModel(context.Background(), &model, req); err != nil {
 		t.Fatalf("callLLMForModel 失败: %v", err)
 	}
 

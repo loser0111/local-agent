@@ -74,12 +74,20 @@ export function ExportMCPServers(arg1) {
   return window['go']['main']['App']['ExportMCPServers'](arg1);
 }
 
+export function GetContextStat(arg1) {
+  return window['go']['main']['App']['GetContextStat'](arg1);
+}
+
 export function GetDiff(arg1) {
   return window['go']['main']['App']['GetDiff'](arg1);
 }
 
 export function GetDiffTurns(arg1) {
   return window['go']['main']['App']['GetDiffTurns'](arg1);
+}
+
+export function GetLastLLMRequest(arg1) {
+  return window['go']['main']['App']['GetLastLLMRequest'](arg1);
 }
 
 export function GetModel(arg1) {
@@ -228,6 +236,10 @@ export function SetSubToolEnabled(arg1, arg2, arg3) {
 
 export function SkillsDir() {
   return window['go']['main']['App']['SkillsDir']();
+}
+
+export function StopChat(arg1, arg2) {
+  return window['go']['main']['App']['StopChat'](arg1, arg2);
 }
 
 export function TestModelConnection(arg1) {

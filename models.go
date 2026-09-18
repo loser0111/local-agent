@@ -17,6 +17,11 @@ type Model struct {
 	APIKey   string `json:"apiKey"`             // API Key
 	URL      string `json:"url"`                // API 端点 URL
 	Protocol string `json:"protocol,omitempty"` // 协议类型：openai / anthropic，留空自动推断
+
+	// ContextWindow 模型上下文窗口（token 数）。0 表示未配置，按保守默认值（32K）处理。
+	// 只影响「何时压缩上下文」，不影响请求本身；配小了会压得偏早（浪费一点 token），
+	// 配大了只会更晚触发，撑爆时还有"超限报错→压缩重试"兜底。
+	ContextWindow int `json:"contextWindow,omitempty"`
 }
 
 // ModelStore 负责模型配置的 JSON 持久化

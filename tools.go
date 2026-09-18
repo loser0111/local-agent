@@ -53,11 +53,16 @@ func (t *CLITool) Execute(ctx context.Context, args map[string]interface{}) (str
 	if !ok {
 		return "", fmt.Errorf("cmd 参数是必需的")
 	}
+	if ctx == nil {
+		ctx = context.Background() // exec.CommandContext 不接受 nil ctx
+	}
+	// 必须用 CommandContext：否则硬取消杀不掉正在跑的命令，
+	// "点了停止"要等到命令自己结束（可能是几分钟）才生效。
 	var cmd *exec.Cmd
 	if runtime.GOOS == "windows" {
-		cmd = exec.Command("powershell", "-Command", cmdStr)
+		cmd = exec.CommandContext(ctx, "powershell", "-Command", cmdStr)
 	} else {
-		cmd = exec.Command("bash", "-c", cmdStr)
+		cmd = exec.CommandContext(ctx, "bash", "-c", cmdStr)
 	}
 	if t.Dir != "" {
 		cmd.Dir = t.Dir
@@ -620,13 +625,31 @@ func (v *SessionView) GetToolsForLLM() []LLMTool {
 }
 
 // ExecuteTool 在会话视图内执行工具
+// ExecuteTool 执行工具（不带 ctx）。
+//
+// ⚠️ 仅供测试与一次性调用：它内部用 context.Background()，因此**不会被硬取消中断**
+// ——权限等待、子进程、HTTP 在途请求都感知不到取消信号。
+// 运行循环必须用 ExecuteToolCtx 把运行 ctx 传进来。
 func (v *SessionView) ExecuteTool(name string, args map[string]interface{}) (string, error) {
+	return v.ExecuteToolCtx(context.Background(), name, args)
+}
+
+// ExecuteToolCtx 执行工具，并把 ctx 一路传下去。
+//
+// 这个 ctx 是硬取消能否真正切断在途操作的唯一通路，链路上每一个环节都必须传：
+// guardedTool → Enforcer.Enforce → permissionBroker.Wait 的 ctx.Done 分支；
+// guardedTool → inner.Execute → exec_shell 的 CommandContext、HTTP 工具的在途请求。
+// 只要有一环退回 context.Background()，取消就会退化成"等它自己跑完"。
+func (v *SessionView) ExecuteToolCtx(ctx context.Context, name string, args map[string]interface{}) (string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if name == "tool_router" {
-		return v.meta.Execute(context.Background(), args)
+		return v.meta.Execute(ctx, args)
 	}
 	tool, ok := v.nonMeta[name]
 	if !ok {
 		return "", fmt.Errorf("未找到工具: %s", name)
 	}
-	return tool.Execute(context.Background(), args)
+	return tool.Execute(ctx, args)
 }

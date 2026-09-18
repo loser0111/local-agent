@@ -6,14 +6,16 @@ import { usePaneStore } from '@/stores/pane'
 import { useDiffStore } from '@/stores/diff'
 import { useSettingStore } from '@/stores/setting'
 import { usePlanStore } from '@/stores/plan'
-import { appendMessage, appendConversation, chat, onDiffUpdate } from '@/api/session'
+import { appendMessage, appendConversation, chat, stopChat, getContextStat, onDiffUpdate } from '@/api/session'
 import { fetchPendingInteraction } from '@/api/interaction'
 import { DEFAULT_VIEW_MODE } from '@/types'
 import { usePermissionStore } from '@/stores/permissions'
 import { useAskStore } from '@/stores/asks'
 import { useSkillsStore } from '@/stores/skills'
+import { useUiStore } from '@/stores/ui'
 import PermissionDialog from '@/components/business/PermissionDialog.vue'
 import AskUserDialog from '@/components/business/AskUserDialog.vue'
+import RequestPreviewDialog from '@/components/business/RequestPreviewDialog.vue'
 import PaneHeader from '@/components/layout/PaneHeader.vue'
 import MessageBubble from '@/components/business/MessageBubble.vue'
 import ToolProcess from '@/components/business/ToolProcess.vue'
@@ -27,9 +29,48 @@ const planStore = usePlanStore()
 const permissionStore = usePermissionStore()
 const askStore = useAskStore()
 const skillsStore = useSkillsStore()
+const ui = useUiStore()
 
 // 计划模式（单次意图，非全局偏好）：开启后下一条消息走规划流程
 const planMode = ref(false)
+// 停止请求已发出、正在等后端收尾。此时再点「停止」升级为硬取消。
+const stopping = ref(false)
+
+// 请求快照查看（排障用）：显示实际发出的 message 列表
+const reqPreviewVisible = ref(false)
+
+// 上下文用量（后端算的近似值）。用于显示占用比例；点它可直接触发压缩。
+const contextStat = ref(null)
+
+function updateContextStat(st) {
+  if (st) contextStat.value = st
+}
+
+const contextPercent = computed(() => {
+  const st = contextStat.value
+  if (!st || !st.windowTokens) return 0
+  return Math.round((st.usedTokens / st.windowTokens) * 100)
+})
+
+const contextTitle = computed(() => {
+  const st = contextStat.value
+  if (!st) return ''
+  const lines = [
+    `上下文用量约 ${contextPercent.value}%（≈${st.usedTokens} / ${st.windowTokens} token，${st.messageCount} 条消息）`,
+  ]
+  if (st.coveredMsgs > 0) {
+    lines.push(`已压缩：摘要覆盖前 ${st.coveredMsgs} 条消息（${st.summaryChars} 字），原文仍保留`)
+  }
+  lines.push('点击立即压缩（等价于输入 /compact）')
+  return lines.join('\n')
+})
+
+// 点用量指示 = 手动压缩：复用发送路径，后端把 /compact 当上下文维护操作拦截
+function requestCompact() {
+  if (!sessionId.value || chatStore.isGenerating) return
+  input.value = '/compact'
+  sendMessage()
+}
 const plan = computed(() => planStore.plan)
 
 // 订阅后端 diff 实时推送（有文件改动时刷新差异数据）
@@ -133,7 +174,17 @@ watch(
 )
 
 // 切换会话时恢复该会话挂起的提问（后端仍在阻塞等待，弹窗必须补回来）
-watch(sessionId, (id) => askStore.loadPending(id), { immediate: true })
+watch(
+  sessionId,
+  (id) => {
+    askStore.loadPending(id)
+    // 上下文用量是「打开会话就该看到」的信息，跟着会话一起加载。
+    // 它在后端是近似值，取不到就不显示，不打扰用户。
+    contextStat.value = null
+    if (id) getContextStat(id).then(updateContextStat)
+  },
+  { immediate: true }
+)
 
 // 运行期间轮询“是否有人在等我应答”作为兜底：事件万一没送达（前后端产物版本错配、
 // 运行时时序），弹窗仍然会补出来，而不是让工具卡片一直卡在“运行中”直到超时。
@@ -201,6 +252,7 @@ async function sendMessage() {
 
   input.value = ''
   chatStore.isGenerating = true
+  stopping.value = false
   const startAt = Date.now()
 
   try {
@@ -225,6 +277,7 @@ async function sendMessage() {
         plan: true,
         onPlanUpdate: (p) => planStore.applyUpdate(p),
       })
+      updateContextStat(result?.context)
       if (result?.plan) {
         planStore.applyUpdate(result.plan)
         planMode.value = false // 计划是单次意图，生成后自动复位
@@ -278,7 +331,14 @@ async function sendMessage() {
           result: tc.result,
         })
       },
+      // 被用户停止：立刻收尾流式气泡，否则它会一直停在"正在输入"
+      onCancelled: () => {
+        if (streamingMessageId.value) {
+          chatStore.updateLocalMessage(streamingMessageId.value, { streaming: false })
+        }
+      },
     })
+    updateContextStat(result?.context)
 
     // 4. 移除流式占位消息，用后端持久化的消息替换
     const placeholderIdx = chatStore.messages.findIndex((m) => m.id === streamingMessageId.value)
@@ -295,8 +355,17 @@ async function sendMessage() {
       }
     }
 
-    // 6. 如果有错误且没有回复，追加错误消息
-    if (result.error && !result.reply) {
+    // 6. 被取消 / 出错。取消是用户的主动行为，不能显示成"调用失败"——
+    //    这也是后端把取消从错误路径里摘出来的原因（见 App.Chat）。
+    if (result.cancelled) {
+      chatStore.addLocalMessage({
+        id: `cancelled-${Date.now()}`,
+        role: 'assistant',
+        content: result.cancelKind === 'hard' ? '已强制停止。' : '已停止（当前步骤执行完即停）。',
+        createdAt: Date.now(),
+        streaming: false,
+      })
+    } else if (result.error && !result.reply) {
       chatStore.addLocalMessage({
         id: `error-${Date.now()}`,
         role: 'assistant',
@@ -335,6 +404,7 @@ async function sendMessage() {
     }
   } finally {
     chatStore.isGenerating = false
+    stopping.value = false
     streamingMessageId.value = null
   }
 }
@@ -358,21 +428,43 @@ function markPendingToolCard(tool) {
   }
 }
 
+// 两级停止：
+//   第一次点 → 软取消。后端在当前 LLM 请求与工具跑完后于下一轮边界停下。
+//   已在停止中再点 → 硬取消。后端 cancel 运行 ctx：在途请求立即断开、
+//   正在跑的子进程被 kill、等待中的提问立即以"取消"结束。
+// 改造前这里只把 chatStore.isGenerating 置 false——纯客户端标志位，
+// 后端那一轮循环仍在跑、仍在写文件、仍在起子进程。
 async function stopGeneration() {
-  // 有挂起的提问：先取消（后端把"用户未作答"回给模型），否则会一直阻塞到超时
+  // 挂起的提问 / 授权：必须先结掉，否则后端还卡在等待里，"停止"看起来毫无反应。
+  // 这两条是"用户在弹窗上的选择"，与"停止运行"是两件事，所以要前置处理。
   if (askStore.hasPending) {
     await askStore.skip(sessionId.value)
   }
-  // 有待应答的授权请求：先取消它（后端按拒绝处理并立刻返回），避免一直挂着
   if (permissionStore.hasPending) {
     await permissionStore.cancel(sessionId.value)
   }
-  // 计划执行中：触发协作式取消（当前步骤跑完后停止）
+
+  // 计划执行中：交给计划取消（后端是同一套取消机制，走软取消）
   if (planStore.executing && plan.value) {
     await planStore.cancel(plan.value.id)
+    stopping.value = true
     return
   }
-  chatStore.isGenerating = false
+
+  const hard = stopping.value
+  try {
+    const hit = await stopChat(sessionId.value, hard)
+    if (!hit) {
+      // 后端已经没有在跑的运行：直接复位，避免按钮卡在"停止中"
+      chatStore.isGenerating = false
+      stopping.value = false
+      return
+    }
+    stopping.value = true
+    if (hard) ui.notify('已强制停止', 'info')
+  } catch (e) {
+    ui.notify(`停止失败：${e.message || e}`, 'error')
+  }
 }
 
 // 授权请求被应答后，把对应卡片从「等待授权」还原为「运行中」，
@@ -486,6 +578,13 @@ function openDiff() {
     <!-- 模型提问弹窗（ask_user）：答复作为工具结果回到模型手里 -->
     <AskUserDialog />
 
+    <!-- 实际发出的请求快照（排障用，按需拉取，不随每轮推送） -->
+    <RequestPreviewDialog
+      :visible="reqPreviewVisible"
+      :session-id="sessionId || ''"
+      @close="reqPreviewVisible = false"
+    />
+
     <div class="messages scroll-container" ref="messagesContainer" @scroll="handleScroll">
       <div v-if="chatStore.loadingHistory" class="loading-history">历史消息加载中...</div>
 
@@ -572,11 +671,34 @@ function openDiff() {
           </svg>
           计划
         </button>
-        <button v-if="chatStore.isGenerating" class="tool-btn stop-btn" @click="stopGeneration">
+        <button
+          class="tool-btn"
+          :disabled="!sessionId"
+          title="查看实际发给模型的 message 列表（压缩与工具结果预算之后的那一份）"
+          @click="reqPreviewVisible = true"
+        >
+          请求
+        </button>
+        <button
+          v-if="contextStat"
+          class="tool-btn ctx-btn"
+          :class="{ warn: contextPercent >= 70 }"
+          :title="contextTitle"
+          @click="requestCompact"
+        >
+          上下文 {{ contextPercent }}%
+        </button>
+        <button
+          v-if="chatStore.isGenerating"
+          class="tool-btn stop-btn"
+          :class="{ active: stopping }"
+          :title="stopping ? '再点一次强制停止（立即中断在途请求与子进程）' : '停止（当前步骤跑完后停下）'"
+          @click="stopGeneration"
+        >
           <svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor">
             <rect x="2" y="2" width="10" height="10" rx="1" />
           </svg>
-          停止
+          {{ stopping ? '强制停止' : '停止' }}
         </button>
       </div>
 
@@ -749,10 +871,27 @@ function openDiff() {
     color: $color-text-primary;
   }
 
+  // 上下文用量指示：点击即压缩。等宽数字避免百分比变化时按钮宽度抖动。
+  &.ctx-btn {
+    font-variant-numeric: tabular-nums;
+
+    &.warn {
+      color: #facc15;
+    }
+  }
+
   &.stop-btn {
     color: $color-error;
     &:hover {
       background-color: rgba(255, 85, 85, 0.1);
+    }
+    // 已在"停止中"：按钮文案变成"强制停止"，用实底强调再点一次会立即中断
+    &.active {
+      color: #fff;
+      background-color: $color-error;
+      &:hover {
+        background-color: $color-error;
+      }
     }
   }
 

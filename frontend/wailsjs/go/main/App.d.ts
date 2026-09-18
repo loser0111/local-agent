@@ -38,9 +38,13 @@ export function ExecutePlan(arg1:string,arg2:boolean):Promise<main.ChatResult>;
 
 export function ExportMCPServers(arg1:Array<string>):Promise<string>;
 
+export function GetContextStat(arg1:string):Promise<main.ContextStat>;
+
 export function GetDiff(arg1:string):Promise<Array<main.DiffFile>>;
 
 export function GetDiffTurns(arg1:string):Promise<Array<main.DiffTurn>>;
+
+export function GetLastLLMRequest(arg1:string):Promise<main.LLMRequestSnapshot>;
 
 export function GetModel(arg1:string):Promise<main.Model>;
 
@@ -115,6 +119,8 @@ export function SetSessionPermissionMode(arg1:string,arg2:string):Promise<main.S
 export function SetSubToolEnabled(arg1:string,arg2:string,arg3:boolean):Promise<void>;
 
 export function SkillsDir():Promise<string>;
+
+export function StopChat(arg1:string,arg2:boolean):Promise<boolean>;
 
 export function TestModelConnection(arg1:main.Model):Promise<void>;
 

@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	wailsRuntime "github.com/wailsapp/wails/v2/pkg/runtime"
@@ -38,9 +37,11 @@ type App struct {
 	// 文件改动归因：文件工具写入时记录 before/after（内存）
 	fileChanges *FileChangeLog
 
-	// 计划执行取消注册表：planID -> 取消信号（close 即取消）
-	planCancels map[string]chan struct{}
-	planMu      sync.Mutex
+	// 运行取消注册表：普通聊天与计划执行共用，支持软/硬两级取消
+	runs *runRegistry
+
+	// reqLog 各会话最近一次真实发出的 LLM 请求快照（仅供界面查看/排障，内存态）
+	reqLog *llmRequestLog
 }
 
 // NewApp creates a new App application struct
@@ -83,6 +84,8 @@ func (a *App) startup(ctx context.Context) {
 
 	// 初始化权限管理（授权存储 / 审计 / 授权询问回路）与文件改动归因
 	a.baseDir = baseDir
+	a.runs = &runRegistry{}
+	a.reqLog = &llmRequestLog{}
 	a.ensurePermissionState()
 	a.fileChanges = NewFileChangeLog(500)
 }
@@ -189,7 +192,8 @@ func (a *App) TestModelConnection(model Model) error {
 	}
 
 	// 复用已有的协议适配逻辑（OpenAI / Anthropic 自动分发）
-	resp, err := callLLMForModel(&model, req)
+	// 连接测试没有运行上下文，用 Background 即可（它本身可以被取消也没意义）
+	resp, err := callLLMForModel(context.Background(), &model, req)
 	if err != nil {
 		return err
 	}
@@ -586,15 +590,78 @@ func (a *App) UpdateSession(id string, patch SessionPatch) (*Session, error) {
 // useStream=true 时以 SSE 流式请求模型，文本分片通过 chat:event 的 reply_delta 事件推送
 // usePlan=true 时走规划流程（ChatPlan）：产出可审核的结构化计划而非直接执行
 func (a *App) Chat(sessionID string, query string, useStream bool, usePlan bool) (*ChatResult, error) {
+	// 手动压缩：/compact 不是一次对话，而是对当前上下文的一次维护操作。
+	// 放在最前面拦截——内置命令的优先级高于同名技能，技能不该能覆盖掉它。
+	if cmd, _, ok := ParseSkillCommand(query); ok && cmd == contextCompactCmd {
+		return a.handleCompactCommand(sessionID)
+	}
+
 	var result *ChatResult
 	if usePlan {
 		result = a.ChatPlan(sessionID, query, useStream)
 	} else {
 		result = a.executeChat(sessionID, query, useStream)
 	}
-	if result.Error != "" && result.Reply == "" {
+	// 取消不走错误路径：它是用户的主动行为，结果照常返回（前端据 cancelled 字段
+	// 显示"已停止"）。否则用户点一下停止会看到"发送失败：执行已取消"。
+	if result.Error != "" && result.Reply == "" && !result.Cancelled {
 		return result, fmt.Errorf("%s", result.Error)
 	}
+	return result, nil
+}
+
+// ===== 上下文用量与手动压缩（P1-B）=====
+
+// GetContextStat 返回某会话当前的上下文用量，供界面显示。
+// 这是**近似值**：不含系统提示与工具定义的精确开销（那两者只有运行期才知道），
+// 用于给用户一个大致的占用比例，不用于任何判定。
+func (a *App) GetContextStat(sessionID string) (*ContextStat, error) {
+	st := a.contextStatForSession(sessionID)
+	if st == nil {
+		return nil, fmt.Errorf("会话不存在: %s", sessionID)
+	}
+	return st, nil
+}
+
+// contextStatForSession 组装界面用的上下文用量（会话不存在时返回 nil）
+func (a *App) contextStatForSession(sessionID string) *ContextStat {
+	session, err := a.sessionStore.GetSession(sessionID)
+	if err != nil {
+		return nil
+	}
+	model, _ := a.modelStore.GetModelForCall(session.Model)
+	messages := buildRunMessages(session, "", false)
+	return contextStatOf(session, messages, contextWindowOf(&model), nil, 0)
+}
+
+// handleCompactCommand 处理 /compact：压缩当前会话上下文，并把结果作为一条
+// assistant 回复返回——前端照常渲染，用户能直接看到省下了多少。
+func (a *App) handleCompactCommand(sessionID string) (*ChatResult, error) {
+	// 与普通对话一样登记为可取消的运行：压缩要额外发一次 LLM 请求，
+	// 硬取消同样应该能把它断掉，而不是让用户白等。
+	run := a.runs.begin(sessionID, "")
+	defer a.runs.end(run)
+
+	out, err := a.compactSessionContext(run.Ctx(), sessionID)
+	if err != nil {
+		return nil, err
+	}
+
+	var reply string
+	if out.Compressed {
+		reply = fmt.Sprintf("已压缩上下文：摘要覆盖前 %d 条消息，摘要正文 %d 字，估算省下约 %d 个输入 token。\n原始对话记录仍完整保留，清空摘要即可回到全量上下文。",
+			out.CoveredMsgs, out.SummaryChars, out.SavedTokens)
+	} else {
+		reply = "本次未压缩：" + out.Reason
+	}
+
+	// 落一条 assistant 消息：保持 user/assistant 成对，也让这次操作留在会话记录里
+	result := &ChatResult{Reply: reply}
+	if saved, serr := a.sessionStore.AppendMessage(sessionID, Message{Role: RoleAssistant, Content: reply}); serr == nil {
+		result.Messages = []Message{*saved}
+	}
+	a.emitChatEvent(ChatEvent{Type: "done", Reply: reply})
+	result.Context = a.contextStatForSession(sessionID)
 	return result, nil
 }
 
@@ -653,20 +720,13 @@ func (a *App) ReopenPlan(planID string) (*Plan, error) {
 	return plan, nil
 }
 
-// CancelPlan 取消执行中的计划：协作式取消，当前步骤跑完后在下一步边界停止。
+// CancelPlan 取消执行中的计划：协作式取消（软），当前步骤跑完后在下一步边界停止。
 //
-// 若找不到活跃的取消通道（执行协程已异常退出，而计划还停在 running），
-// 则强制把计划收尾为 cancelled —— 否则前端只能重启应用才能脱困。
+// 找不到活跃运行时（执行协程已异常退出，而计划还停在 running），
+// 强制把计划收尾为 cancelled —— 否则前端只能重启应用才能脱困。
+// 计划本身已不在 running 时明确报错，且不改动它的状态。
 func (a *App) CancelPlan(planID string) error {
-	a.planMu.Lock()
-	ch, ok := a.planCancels[planID]
-	if ok {
-		close(ch)
-		delete(a.planCancels, planID)
-	}
-	a.planMu.Unlock()
-
-	if ok {
+	if hit, _ := a.runs.stopPlan(planID, false); hit {
 		return nil
 	}
 
@@ -693,23 +753,26 @@ func (a *App) CancelPlan(planID string) error {
 	return nil
 }
 
-// registerPlanCancel 注册计划取消信号（ExecutePlan 开始时调用）
-func (a *App) registerPlanCancel(planID string) chan struct{} {
-	a.planMu.Lock()
-	defer a.planMu.Unlock()
-	if a.planCancels == nil {
-		a.planCancels = map[string]chan struct{}{}
-	}
-	ch := make(chan struct{})
-	a.planCancels[planID] = ch
-	return ch
-}
+// ===== 运行停止（普通聊天与计划执行共用）=====
 
-// unregisterPlanCancel 注销计划取消信号（ExecutePlan 结束时调用）
-func (a *App) unregisterPlanCancel(planID string) {
-	a.planMu.Lock()
-	defer a.planMu.Unlock()
-	delete(a.planCancels, planID)
+// StopChat 停止某会话当前正在跑的运行。
+//
+//	hard=false 协作式：当前 LLM 请求与工具调用跑完，下一轮不再开始。
+//	hard=true  硬取消：在协作式之上 cancel 运行 ctx —— 在途的 LLM 请求立即断开、
+//	                   正在跑的子进程被 kill、等待中的提问立即以"取消"结束。
+//
+// 返回 hit=false 表示当前没有活跃运行，前端应据此复位按钮，
+// 避免出现"点了停止却没反应"的假象。
+//
+// 注意：挂起的授权弹窗与提问由前端在调用本方法之前先自行结掉
+// （CancelPermissionWait / CancelAskUser），这里不重复处理——
+// 那两条路是"用户在弹窗上的选择"，与"停止运行"是两件事。
+func (a *App) StopChat(sessionID string, hard bool) (bool, error) {
+	if sessionID == "" {
+		return false, fmt.Errorf("会话 ID 不能为空")
+	}
+	hit, _ := a.runs.stopSession(sessionID, hard)
+	return hit, nil
 }
 
 // ===== 文件改动归因（供差异面板与工具卡片展示）=====

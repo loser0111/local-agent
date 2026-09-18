@@ -185,6 +185,32 @@ export namespace main {
 	        this.timeout = source["timeout"];
 	    }
 	}
+	export class ContextStat {
+	    sessionId: string;
+	    usedTokens: number;
+	    windowTokens: number;
+	    ratio: number;
+	    messageCount: number;
+	    coveredMsgs: number;
+	    summaryChars: number;
+	    summaryAt?: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new ContextStat(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.sessionId = source["sessionId"];
+	        this.usedTokens = source["usedTokens"];
+	        this.windowTokens = source["windowTokens"];
+	        this.ratio = source["ratio"];
+	        this.messageCount = source["messageCount"];
+	        this.coveredMsgs = source["coveredMsgs"];
+	        this.summaryChars = source["summaryChars"];
+	        this.summaryAt = source["summaryAt"];
+	    }
+	}
 	export class PlanStep {
 	    index: number;
 	    title: string;
@@ -414,6 +440,9 @@ export namespace main {
 	    diff?: DiffFile[];
 	    plan?: Plan;
 	    error?: string;
+	    cancelled?: boolean;
+	    cancelKind?: string;
+	    context?: ContextStat;
 	
 	    static createFrom(source: any = {}) {
 	        return new ChatResult(source);
@@ -427,6 +456,9 @@ export namespace main {
 	        this.diff = this.convertValues(source["diff"], DiffFile);
 	        this.plan = this.convertValues(source["plan"], Plan);
 	        this.error = source["error"];
+	        this.cancelled = source["cancelled"];
+	        this.cancelKind = source["cancelKind"];
+	        this.context = this.convertValues(source["context"], ContextStat);
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -447,6 +479,7 @@ export namespace main {
 		    return a;
 		}
 	}
+	
 	export class Conversation {
 	    index: number;
 	    query: string;
@@ -550,6 +583,148 @@ export namespace main {
 	        this.timeout = source["timeout"];
 	    }
 	}
+	export class LLMToolFunction {
+	    name: string;
+	    arguments: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new LLMToolFunction(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.name = source["name"];
+	        this.arguments = source["arguments"];
+	    }
+	}
+	export class LLMToolCall {
+	    id: string;
+	    type: string;
+	    function: LLMToolFunction;
+	
+	    static createFrom(source: any = {}) {
+	        return new LLMToolCall(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.type = source["type"];
+	        this.function = this.convertValues(source["function"], LLMToolFunction);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class LLMMessage {
+	    role: string;
+	    content: string;
+	    tool_call_id?: string;
+	    tool_calls?: LLMToolCall[];
+	
+	    static createFrom(source: any = {}) {
+	        return new LLMMessage(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.role = source["role"];
+	        this.content = source["content"];
+	        this.tool_call_id = source["tool_call_id"];
+	        this.tool_calls = this.convertValues(source["tool_calls"], LLMToolCall);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class LLMRequestSnapshot {
+	    sessionId: string;
+	    runId?: string;
+	    turn: number;
+	    model: string;
+	    at: number;
+	    systemPrompt: string;
+	    messages: LLMMessage[];
+	    summaryIndex: number;
+	    toolNames: string[];
+	    toolSchemaTokens: number;
+	    estimatedTokens: number;
+	    windowTokens: number;
+	    compactedThisTurn: boolean;
+	    coveredMsgs: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new LLMRequestSnapshot(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.sessionId = source["sessionId"];
+	        this.runId = source["runId"];
+	        this.turn = source["turn"];
+	        this.model = source["model"];
+	        this.at = source["at"];
+	        this.systemPrompt = source["systemPrompt"];
+	        this.messages = this.convertValues(source["messages"], LLMMessage);
+	        this.summaryIndex = source["summaryIndex"];
+	        this.toolNames = source["toolNames"];
+	        this.toolSchemaTokens = source["toolSchemaTokens"];
+	        this.estimatedTokens = source["estimatedTokens"];
+	        this.windowTokens = source["windowTokens"];
+	        this.compactedThisTurn = source["compactedThisTurn"];
+	        this.coveredMsgs = source["coveredMsgs"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	
+	
 	export class MCPConfig {
 	    type?: string;
 	    url?: string;
@@ -641,6 +816,7 @@ export namespace main {
 	    apiKey: string;
 	    url: string;
 	    protocol?: string;
+	    contextWindow?: number;
 	
 	    static createFrom(source: any = {}) {
 	        return new Model(source);
@@ -654,6 +830,7 @@ export namespace main {
 	        this.apiKey = source["apiKey"];
 	        this.url = source["url"];
 	        this.protocol = source["protocol"];
+	        this.contextWindow = source["contextWindow"];
 	    }
 	}
 	export class PermissionAskRequest {
@@ -821,6 +998,9 @@ export namespace main {
 	    diffTouched?: string[];
 	    enabledTools?: string[];
 	    enabledSkills?: string[];
+	    contextSummary?: string;
+	    contextCoveredUpTo?: number;
+	    contextSummaryAt?: number;
 	
 	    static createFrom(source: any = {}) {
 	        return new Session(source);
@@ -845,6 +1025,9 @@ export namespace main {
 	        this.diffTouched = source["diffTouched"];
 	        this.enabledTools = source["enabledTools"];
 	        this.enabledSkills = source["enabledSkills"];
+	        this.contextSummary = source["contextSummary"];
+	        this.contextCoveredUpTo = source["contextCoveredUpTo"];
+	        this.contextSummaryAt = source["contextSummaryAt"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {

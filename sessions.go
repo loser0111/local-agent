@@ -97,6 +97,12 @@ type Session struct {
 	DiffTouched    []string        `json:"diffTouched,omitempty"`
 	EnabledTools   []string        `json:"enabledTools,omitempty"`  // 本会话可用的工具 ID 白名单（空=全部已启用工具）
 	EnabledSkills  []string        `json:"enabledSkills,omitempty"` // 本会话可用的技能 ID 白名单（空=全部已启用技能）
+
+	// 上下文压缩状态（P1-B）。摘要只在**构建请求时**生效，会话里的 Messages 一字不动——
+	// 因此压缩是可逆的：清空这三个字段就回到全量上下文。
+	ContextSummary     string `json:"contextSummary,omitempty"`     // 被摘要覆盖那部分的摘要正文
+	ContextCoveredUpTo int    `json:"contextCoveredUpTo,omitempty"` // 摘要覆盖到第几条消息（不含）
+	ContextSummaryAt   int64  `json:"contextSummaryAt,omitempty"`   // 摘要生成时间（Unix 毫秒）
 }
 
 // SessionConfig 创建会话时的配置
@@ -335,6 +341,28 @@ func (s *SessionStore) AppendDiff(id string, turn DiffTurn, baseline string, tou
 		return 0, err
 	}
 	return turn.Turn, nil
+}
+
+// SetContextSummary 写入上下文摘要（P1-B）。
+// coveredUpTo 之前（不含）的消息在构建请求时会被摘要替换；会话里的原文完整保留。
+func (s *SessionStore) SetContextSummary(id, summary string, coveredUpTo int, at int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	session, err := s.loadSession(id)
+	if err != nil {
+		return err
+	}
+	session.ContextSummary = summary
+	session.ContextCoveredUpTo = coveredUpTo
+	session.ContextSummaryAt = at
+	return s.saveSession(session)
+}
+
+// ClearContextSummary 清空摘要，让会话回到全量上下文。
+// 这是"压缩可逆"的落地点：出了任何问题，调它就能回到压缩前的状态。
+func (s *SessionStore) ClearContextSummary(id string) error {
+	return s.SetContextSummary(id, "", 0, 0)
 }
 
 // UpdateSession 更新会话元数据
