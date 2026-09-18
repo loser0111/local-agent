@@ -3,10 +3,8 @@ package main
 import (
 	"bufio"
 	"bytes"
-	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -49,6 +47,16 @@ type DiffTurn struct {
 	Additions int        `json:"additions"`
 	Deletions int        `json:"deletions"`
 	CreatedAt int64      `json:"createdAt"`
+
+	// Base 本轮开始时的 checkpoint 快照 sha（**含未跟踪文件**）。
+	// 空表示该轮不可回退——非 git 仓库、或取快照失败（快照失败不阻断对话，只是这轮不能撤销）。
+	Base string `json:"base,omitempty"`
+	// EndState 本轮结束时各触碰路径的内容状态：blob 哈希，空串表示"该轮结束时不存在"。
+	// 回退前用它判断"这些文件在本轮之后是否又被改过"，用来保护用户的手工改动。
+	EndState map[string]string `json:"endState,omitempty"`
+	// Undone 该轮是否已被回退过。保留记录本身而不是删掉——用户可能回退后重新执行，
+	// 历史应当留痕。
+	Undone bool `json:"undone,omitempty"`
 }
 
 const (
@@ -63,20 +71,11 @@ const (
 //	-c core.quotepath=false  避免中文/非 ASCII 路径被转义成 \xxx，否则无法解析
 //	--no-pager               防止进入分页
 //	固定超时                 防止大仓库卡死对话
+// runGit 执行 git 命令。具体实现在 checkpoint.go 的 runGitEnv——它多一个
+// "附加环境变量"的能力（checkpoint 要传 GIT_INDEX_FILE 才能不污染真实索引），
+// 这里委托过去，全项目只保留一份 git 调用封装。
 func runGit(dir string, args ...string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), gitTimeout)
-	defer cancel()
-
-	full := append([]string{"-C", dir, "-c", "core.quotepath=false", "--no-pager"}, args...)
-	cmd := exec.CommandContext(ctx, "git", full...)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("git %s 失败: %v: %s",
-			strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
-	}
-	return stdout.String(), nil
+	return runGitEnv(dir, nil, args...)
 }
 
 // ===== 会话级差异服务 =====
@@ -269,6 +268,24 @@ func (s *DiffService) GetBaseline(sessionID string) string {
 		return st.baseline
 	}
 	return ""
+}
+
+// DropTouched 从会话的归因集合里移除若干路径（回退之后调用）。
+// 只删指定的路径，不做任何批量清理——回退不该波及无关文件。
+func (s *DiffService) DropTouched(sessionID string, paths []string) {
+	if sessionID == "" || len(paths) == 0 {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st, ok := s.sessions[sessionID]
+	if !ok {
+		return
+	}
+	for _, p := range paths {
+		delete(st.touched, p)
+		delete(st.turn, p)
+	}
 }
 
 // TurnSnapshot 每轮开始时取本轮基线

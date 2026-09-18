@@ -193,6 +193,35 @@
  */
 
 /**
+ * 一轮的回退可用性
+ * @typedef {Object} CheckpointInfo
+ * @property {number} turn
+ * @property {string} label
+ * @property {boolean} available 是否有快照且快照仍在
+ * @property {string} [reason] 不可回退的原因
+ * @property {string[]} files 将被回退的路径
+ * @property {string[]} conflicts 本轮之后又被改过的路径（回退会覆盖它们）
+ * @property {boolean} [undone] 是否已回退过
+ */
+
+/**
+ * 单个文件的回退结果
+ * @typedef {Object} UndoFileResult
+ * @property {string} path
+ * @property {'restore'|'delete'|'skip'} action
+ * @property {string} [err]
+ */
+
+/**
+ * 一次回退的结果（部分失败不当成整体失败）
+ * @typedef {Object} UndoResult
+ * @property {number} turn
+ * @property {UndoFileResult[]} files
+ * @property {number} failed
+ * @property {number} skipped
+ */
+
+/**
  * 计划步骤
  * @typedef {Object} PlanStep
  * @property {number} index

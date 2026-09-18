@@ -158,6 +158,10 @@ export function InstallSkillFromZip(arg1) {
   return window['go']['main']['App']['InstallSkillFromZip'](arg1);
 }
 
+export function ListCheckpoints(arg1) {
+  return window['go']['main']['App']['ListCheckpoints'](arg1);
+}
+
 export function ListPlans(arg1) {
   return window['go']['main']['App']['ListPlans'](arg1);
 }
@@ -256,6 +260,10 @@ export function ToggleSkill(arg1, arg2) {
 
 export function ToggleTool(arg1, arg2) {
   return window['go']['main']['App']['ToggleTool'](arg1, arg2);
+}
+
+export function UndoDiffTurn(arg1, arg2, arg3) {
+  return window['go']['main']['App']['UndoDiffTurn'](arg1, arg2, arg3);
 }
 
 export function UpdateModel(arg1, arg2) {

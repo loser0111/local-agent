@@ -237,7 +237,13 @@ func (a *App) GetSession(id string) (*Session, error) {
 
 // DeleteSession 删除指定会话
 func (a *App) DeleteSession(id string) error {
+	// 清掉该会话的 checkpoint ref。这是本项目唯一会写入用户仓库 refs/ 的地方，
+	// 必须在会话生命周期结束时清理干净，否则会在用户的 .git 里永久残留。
+	if dir, err := a.resolveProjectDir(id); err == nil && dir != "" {
+		_ = DropSessionCheckpoints(dir, id)
+	}
 	a.diffService.ForgetBaseline(id)
+	a.reqLog.forget(id)
 	return a.sessionStore.DeleteSession(id)
 }
 

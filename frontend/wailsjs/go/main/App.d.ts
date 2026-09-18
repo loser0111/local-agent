@@ -80,6 +80,8 @@ export function InstallSkillFromGit(arg1:string,arg2:string,arg3:string):Promise
 
 export function InstallSkillFromZip(arg1:string):Promise<Array<main.SkillInstallResult>>;
 
+export function ListCheckpoints(arg1:string):Promise<Array<main.CheckpointInfo>>;
+
 export function ListPlans(arg1:string):Promise<Array<main.Plan>>;
 
 export function ListSessions():Promise<Array<main.Session>>;
@@ -129,6 +131,8 @@ export function TestToolConnection(arg1:main.ToolSource):Promise<Array<main.MCPT
 export function ToggleSkill(arg1:string,arg2:boolean):Promise<void>;
 
 export function ToggleTool(arg1:string,arg2:boolean):Promise<void>;
+
+export function UndoDiffTurn(arg1:string,arg2:number,arg3:boolean):Promise<main.UndoResult>;
 
 export function UpdateModel(arg1:string,arg2:main.Model):Promise<void>;
 

@@ -638,12 +638,24 @@ func (a *App) runToolLoop(run *runControl, systemPrompt string, model *Model,
 	dir, _ := a.resolveProjectDir(sessionID)
 	isRepo := dir != "" && a.diffService.IsRepo(dir)
 	turnBase := ""
+	// turnCheckpoint 撤销用的完整快照。与 turnBase 刻意分开、各取一份：
+	// turnBase（stash create）不含未跟踪文件、用于算 diff；这份含未跟踪文件、用于回退。
+	// 合并会带来两个问题：diff 会把未跟踪文件重复计算；回退会误删用户手写的未跟踪文件。
+	turnCheckpoint := ""
 	if isRepo {
 		// 先恢复会话里持久化的 diff 状态（基线与已归因的路径），重启后仍能算会话级 diff
 		a.diffService.RestoreSession(sessionID, session.DiffBaseline, session.DiffTouched)
 		a.diffService.EnsureBaseline(sessionID, dir)
 		a.diffService.BeginTurn(sessionID)
 		turnBase = a.diffService.TurnSnapshot(dir)
+
+		// 取不到不算错误：本轮只是不可回退，对话照常进行
+		if cp, cpErr := Checkpoint(dir, sessionID, nextDiffTurn(session)); cpErr == nil {
+			turnCheckpoint = cp
+			PruneCheckpoints(dir, sessionID, checkpointKeepTurns)
+		} else {
+			fmt.Printf("[checkpoint] 本轮快照失败，该轮不可回退: %v\n", cpErr)
+		}
 	}
 
 	// 3. 组装发给模型的消息序列：摘要前缀替换（若会话有生效摘要）+ 单条工具结果预算。
@@ -966,6 +978,9 @@ func (a *App) runToolLoop(run *runControl, systemPrompt string, model *Model,
 					Additions: sumAdd(files),
 					Deletions: sumDel(files),
 					CreatedAt: time.Now().UnixMilli(),
+					// 撤销所需的两项：本轮开始时的完整快照 + 本轮结束时各文件的内容状态
+					Base:     turnCheckpoint,
+					EndState: endStateOf(dir, files),
 				}, base, touched)
 				if appendErr == nil && a.ctx != nil {
 					wailsRuntime.EventsEmit(a.ctx, "diff:update", ChatEvent{

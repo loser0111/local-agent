@@ -318,6 +318,18 @@ func (s *SessionStore) AppendConversation(id string, conv *Conversation) error {
 // AppendDiff 追加一轮差异并落盘，轮次号自动递增，返回本轮轮次号。
 // 同时把会话级 diff 状态（基线 + 触碰过的路径）一并落盘——与 diff 同一次写入，
 // 避免为了同步状态再写一遍整个会话文件。
+// nextDiffTurn 下一轮的轮次号。
+//
+// 这个规则必须只有一处：AppendDiff 用它给 DiffTurn 编号，chat.go 取 checkpoint 时
+// 也用它——两处若各写一份 `len(Diffs)+1`，一旦有一边改了就会让 checkpoint 的 ref
+// 编号与 DiffTurn.Turn 错位，表现为"某几轮的回退按钮点了没反应"。
+func nextDiffTurn(session *Session) int {
+	if session == nil {
+		return 1
+	}
+	return len(session.Diffs) + 1
+}
+
 func (s *SessionStore) AppendDiff(id string, turn DiffTurn, baseline string, touched []string) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -326,7 +338,7 @@ func (s *SessionStore) AppendDiff(id string, turn DiffTurn, baseline string, tou
 	if err != nil {
 		return 0, err
 	}
-	turn.Turn = len(session.Diffs) + 1
+	turn.Turn = nextDiffTurn(session)
 	if turn.Label == "" {
 		turn.Label = fmt.Sprintf("第 %d 轮", turn.Turn)
 	}
@@ -363,6 +375,25 @@ func (s *SessionStore) SetContextSummary(id, summary string, coveredUpTo int, at
 // 这是"压缩可逆"的落地点：出了任何问题，调它就能回到压缩前的状态。
 func (s *SessionStore) ClearContextSummary(id string) error {
 	return s.SetContextSummary(id, "", 0, 0)
+}
+
+// MarkDiffUndone 标记某轮已被回退。
+// 保留 DiffTurn 记录本身而不是删掉：用户可能回退后重新执行，历史应当留痕。
+func (s *SessionStore) MarkDiffUndone(id string, turn int, undone bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	session, err := s.loadSession(id)
+	if err != nil {
+		return err
+	}
+	for i := range session.Diffs {
+		if session.Diffs[i].Turn == turn {
+			session.Diffs[i].Undone = undone
+			return s.saveSession(session)
+		}
+	}
+	return fmt.Errorf("轮次不存在: %d", turn)
 }
 
 // UpdateSession 更新会话元数据

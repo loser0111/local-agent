@@ -10,6 +10,8 @@ import {
   StopChat,
   GetContextStat,
   GetLastLLMRequest,
+  ListCheckpoints,
+  UndoDiffTurn,
   GetDiff,
   GetDiffTurns,
 } from '@/../wailsjs/go/main/App'
@@ -468,4 +470,34 @@ export async function getLastLLMRequest(sessionId) {
   } catch {
     return null
   }
+}
+
+/**
+ * 查询会话各轮的回退可用性与冲突情况。
+ * @param {string} sessionId
+ * @returns {Promise<Array<import('@/types').CheckpointInfo>>} 不可回退的轮次也在列表里（带 reason）
+ */
+export async function listCheckpoints(sessionId) {
+  if (!isWails()) return []
+  try {
+    return (await ListCheckpoints(sessionId)) || []
+  } catch {
+    return []
+  }
+}
+
+/**
+ * 回退某一轮：把该轮改过的文件恢复到轮次开始时的状态。
+ *
+ * 有冲突（文件在该轮之后又被改过）且 force=false 时后端会拒绝并抛出带冲突清单的错误，
+ * 由调用方确认后带 force 重试。
+ *
+ * @param {string} sessionId
+ * @param {number} turn
+ * @param {boolean} [force]
+ * @returns {Promise<import('@/types').UndoResult>}
+ */
+export async function undoDiffTurn(sessionId, turn, force = false) {
+  if (!isWails()) throw new Error('mock 模式不支持回退')
+  return await UndoDiffTurn(sessionId, turn, !!force)
 }
