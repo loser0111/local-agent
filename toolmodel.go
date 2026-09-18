@@ -71,10 +71,13 @@ func ValidExposure(e Exposure) bool {
 // 内置的常用工具直出（对齐既有行为：文件工具与 ask_user 直出），其余经路由器。
 //
 // 这里曾经写成「内置但不在直出名录里 → ExposureInternal」，结果把 exec_shell 整个从模型
-// 视野里抹掉了：它是 defaultSources() 里唯一不在 directToolOrder 的内置工具，于是命中兜底
-// 分支被标记 internal，listTools 跳过它、describe/execute 当"未找到"，模型只能报
+// 视野里抹掉了：它当时是 defaultSources() 里唯一不在 directToolOrder 的内置工具，于是命中
+// 兜底分支被标记 internal，listTools 跳过它、describe/execute 当"未找到"，模型只能报
 // "找不到 exec_shell"。**internal 绝不能由"没配置"推断出来**——只能由配置显式指定，
 // 否则以后任何一个新增内置工具，只要忘了加进 directToolOrder，就会对模型凭空消失。
+//
+// 如今 exec_shell 已在 directToolOrder 里，直出比 router 更不容易"消失"；下面的兜底分支
+// 仍返回 router——它服务的是将来可能新增的内置工具，而不是给已知工具开特例。
 func DefaultExposure(kind SourceKind, name string) Exposure {
 	if kind != SourceBuiltin {
 		return ExposureRouter

@@ -48,6 +48,14 @@ func NewDynamicCLITool(src *ToolSource) *DynamicCLITool {
 	return t
 }
 
+// RequiredParams 取配置声明的必填参数（见 requiredFromConfig）
+func (t *DynamicCLITool) RequiredParams() []string {
+	if t.src == nil {
+		return nil
+	}
+	return requiredFromConfig(t.src.Parameters)
+}
+
 func (t *DynamicCLITool) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
 	// 配置已是类型化字段，不再需要每次 Unmarshal
 	if t.src == nil || t.src.CLI == nil {
@@ -122,6 +130,14 @@ func NewDynamicAPITool(src *ToolSource) *DynamicAPITool {
 		Parameters:  paramsFromConfig(src.Parameters),
 	}
 	return t
+}
+
+// RequiredParams 取配置声明的必填参数（见 requiredFromConfig）
+func (t *DynamicAPITool) RequiredParams() []string {
+	if t.src == nil {
+		return nil
+	}
+	return requiredFromConfig(t.src.Parameters)
 }
 
 func (t *DynamicAPITool) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
@@ -455,6 +471,22 @@ func paramsFromConfig(defs []ToolParamConfig) map[string]*ToolArgDef {
 		m[d.Name] = &ToolArgDef{Type: "string", Description: d.Description}
 	}
 	return m
+}
+
+// requiredFromConfig 取来源配置里标为必填的参数名（保持配置中的顺序）。
+//
+// 必须与 paramsFromConfig 成对使用：参数定义那个 map 是无序的、且丢掉了 Required 标记，
+// 必填信息只能走 RequiredParams() 这条独立通道才能到 buildJSONSchema。
+// 历史缺陷：只有前者没有后者，于是 exec_shell 的 cmd 必填仅存在于 Execute 的错误
+// 信息里（"cmd 参数是必需的"），模型完全看不到，只能靠猜——猜错就白烧一轮。
+func requiredFromConfig(defs []ToolParamConfig) []string {
+	out := make([]string, 0, len(defs))
+	for _, d := range defs {
+		if d.Required {
+			out = append(out, d.Name)
+		}
+	}
+	return out
 }
 
 // paramsFromJSONSchema 从 MCP 工具的 JSON Schema 提取第一层参数定义

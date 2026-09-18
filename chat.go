@@ -559,6 +559,21 @@ func (a *App) buildBasePrompt(session *Session, dir string) string {
 		"可以用 spawn_agent 派一个子代理去做：它有自己独立的上下文，你只收到一份结论，" +
 		"那些中间过程不会占用你的上下文。一两步就能做完的事不必派。"
 
+	// 效率约定：引导模型一轮批量调用、避免重复读数与无谓的工具发现往返。
+	// 执行层本就支持一轮返回多个 tool_calls（runToolLoop 串行执行、整体只算一轮），
+	// 但此前的提示词从未提及，模型只会一个一个来，探索类任务因此多耗一倍以上轮次。
+	prompt += "\n\n## 效率约定\n" +
+		"轮次很宝贵，请用下面这些方式减少往返：\n" +
+		"1. 一轮可以发起多个互不依赖的工具调用：在同一次响应里返回多个 tool_call，它们只算一轮、按先后顺序执行。" +
+		"调研阶段（读多个文件、搜多处代码、列目录）请尽量合并到同一轮，不要一个个来。\n" +
+		"2. 有副作用的操作（write_file / edit_file / exec_shell）一次只发一个，确认结果无误再发下一个：" +
+		"批量发出会让权限确认连续弹窗，出错了也更难定位是哪一个。\n" +
+		"3. 同一个文件不要反复读：读完记住内容，要改就直接 edit_file；" +
+		"已经确认过的命令也不要再跑一遍去'再验证'。\n" +
+		"4. 先用 glob / grep 定位到具体文件与行，再 read_file 精读；不要盲目通读整个目录。\n" +
+		"5. 上面「工具使用偏好」里已点名的工具都可直接调用，不必先经 tool_router 去 list / describe；" +
+		"只有不确定有哪些工具、或不确定某工具的完整参数时，才用 tool_router 发现。"
+
 	if a.skillStore != nil {
 		enabled := a.enabledSkillsForSession(session)
 		if idx := BuildSkillIndex(enabled); idx != "" {
