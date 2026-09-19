@@ -261,7 +261,7 @@ func TestContextStatOf(t *testing.T) {
 		ContextSummary:     "摘要",
 	}
 	msgs := buildRunMessages(session, "", false)
-	st := contextStatOf(session, msgs, 1000, nil, 0)
+	st := contextStatOf(session, msgs, 1000, nil, 0, 1.0)
 	if st.SessionID != "s1" || st.WindowTokens != 1000 {
 		t.Fatalf("基础字段错误: %+v", st)
 	}
@@ -272,7 +272,7 @@ func TestContextStatOf(t *testing.T) {
 		t.Fatalf("应带上压缩状态: %+v", st)
 	}
 	// 窗口未知时不除零
-	zero := contextStatOf(session, msgs, 0, nil, 0)
+	zero := contextStatOf(session, msgs, 0, nil, 0, 1.0)
 	if zero.Ratio != 0 {
 		t.Fatalf("窗口为 0 时比例应为 0，实际 %v", zero.Ratio)
 	}

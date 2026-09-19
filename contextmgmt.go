@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 )
@@ -50,6 +51,8 @@ const (
 
 	// contextCompactCmd 手动压缩命令（/compact）
 	contextCompactCmd = "compact"
+	// contextStatCmd 上下文统计命令（/context-stat）。纯读，不改状态。
+	contextStatCmd = "context-stat"
 )
 
 // ===== 用量估算 =====
@@ -90,6 +93,32 @@ func isCJK(r rune) bool {
 		return true
 	}
 	return false
+}
+
+// scaleTokens 把字符估算按校准系数缩放。**这是全项目唯一的缩放入口**：
+//
+// 分散成多处各乘各的，早晚会有人漏乘一处或者重复乘（同一条消息既进 used 又进 saved）。
+// 系数为 0/负数时按 1.0 处理——绝不能让估算变成"乘 0"，那会把用量显示成 0，
+// 用户会以为上下文是空的。
+func scaleTokens(n int, calib float64) int {
+	if calib <= 0 {
+		calib = calibDefault
+	}
+	v := int(math.Round(float64(n) * calib))
+	if v < 0 {
+		return 0
+	}
+	return v
+}
+
+// normalizeCalib 把调用方传进来的系数收进合法区间，并保证"没有系数"落在 1.0。
+// 单独成函数是为了让 CalibRatio 与 SavedTokens 用上同一个值——两者分头回落，
+// 报告里就会出现"系数显示 1.0、saved 却是 0"这种自相矛盾。
+func normalizeCalib(calib float64) float64 {
+	if calib <= 0 {
+		return calibDefault
+	}
+	return clampCalib(calib)
 }
 
 // tokenAnchor 一次真实用量锚点：由 MsgCount 条消息构成的请求，
@@ -211,7 +240,7 @@ func findCompactCut(msgs []Message, keepRecent int) int {
 func withContextSummary(history []Message, covered int, summary string) []Message {
 	out := make([]Message, 0, len(history)-covered+1)
 	out = append(out, Message{
-		Role: RoleUser,
+		Role:    RoleUser,
 		Content: "（以下是此前对话的摘要，用于节省上下文；完整原文仍在会话记录中）\n\n" + summary,
 	})
 	out = append(out, history[covered:]...)
@@ -340,11 +369,11 @@ func summarizeContext(ctx context.Context, model *Model, msgs []Message) (string
 // CompactOutcome 一次压缩的结果
 type CompactOutcome struct {
 	Compressed   bool   `json:"compressed"`
-	CoveredMsgs  int    `json:"coveredMsgs"`        // 摘要累计覆盖的消息条数
+	CoveredMsgs  int    `json:"coveredMsgs"` // 摘要累计覆盖的消息条数
 	SummaryChars int    `json:"summaryChars"`
-	SavedTokens  int    `json:"savedTokens"`        // 估算省下的输入 token
+	SavedTokens  int    `json:"savedTokens"` // 估算省下的输入 token
 	Degraded     bool   `json:"degraded,omitempty"`
-	Reason       string `json:"reason,omitempty"`   // 未压缩的原因
+	Reason       string `json:"reason,omitempty"` // 未压缩的原因
 }
 
 // ContextStat 上下文用量（给界面展示与阈值判断）
@@ -352,11 +381,23 @@ type ContextStat struct {
 	SessionID    string  `json:"sessionId"`
 	UsedTokens   int     `json:"usedTokens"`
 	WindowTokens int     `json:"windowTokens"`
-	Ratio        float64 `json:"ratio"`               // 0..1
+	Ratio        float64 `json:"ratio"` // 0..1
 	MessageCount int     `json:"messageCount"`
-	CoveredMsgs  int     `json:"coveredMsgs"`         // 摘要已覆盖的条数（0=未压缩）
+	CoveredMsgs  int     `json:"coveredMsgs"` // 摘要已覆盖的条数（0=未压缩）
 	SummaryChars int     `json:"summaryChars"`
 	SummaryAt    int64   `json:"summaryAt,omitempty"`
+	// HasAnchor 本次统计是否建立在**真实用量锚点**上。
+	// 锚点只在一次真实模型调用回传 usage 之后建立，所以界面查询与命令路径恒为 false，
+	// 此时 UsedTokens 是纯字符估算，误差可以到两位数百分比——这点必须让用户看见。
+	HasAnchor bool `json:"hasAnchor"`
+	// SavedTokens 上一次摘要压缩省下的输入 token（估算）。
+	// 由"被覆盖原文 - 摘要正文"现算，不额外持久化：原文一直在会话里，随时能重算，
+	// 多存一个字段等于制造第二个真源（手工清掉摘要就会对不上）。
+	SavedTokens int `json:"savedTokens"`
+	// CalibRatio 本次统计套用的**估算校准系数**（真实 token / 字符估算，按模型观测而来）。
+	// 无锚点时 UsedTokens 与 SavedTokens 都乘过它；有锚点时它只说明"若退回估算会乘多少"，
+	// 因为锚点本身就是真值，再乘一次等于对真值做二次修正（见 contextStatOf）。
+	CalibRatio float64 `json:"calibRatio"`
 }
 
 // compactSessionContext 按会话 ID 做一次摘要式压缩。
@@ -389,7 +430,7 @@ func (a *App) compactSession(ctx context.Context, session *Session, model *Model
 		}, nil
 	}
 
-	cut := findCompactCut(pending, contextKeepRecentMsgs)
+	cut := findCompactCut(pending, a.keepRecentMsgs())
 	if cut <= 0 {
 		return &CompactOutcome{
 			Compressed: false,
@@ -437,7 +478,10 @@ func (a *App) compactSession(ctx context.Context, session *Session, model *Model
 		return nil, fmt.Errorf("保存摘要失败: %w", err)
 	}
 
-	saved := beforeTokens - estimateTokens(summary)
+	// 口径必须与 summarySavedTokens 一致（两侧各自缩放后相减），否则 /compact 当场报出的
+	// 数字与之后 /context-stat 读到的会对不上。
+	calib := a.calibFor(session.Model)
+	saved := scaleTokens(beforeTokens, calib) - scaleTokens(estimateTokens(summary), calib)
 	if saved < 0 {
 		saved = 0
 	}
@@ -449,13 +493,104 @@ func (a *App) compactSession(ctx context.Context, session *Session, model *Model
 	}, nil
 }
 
+// keepRecentMsgs 压缩时要保留的最近消息条数（读可配置项）。
+//
+// 存储未初始化时（测试里直接构造 App，或 startup 尚未跑到）回落到内置默认值——
+// 压缩策略不能因为一个 nil 指针就变成"留 0 条"，那会把整段对话压没。
+func (a *App) keepRecentMsgs() int {
+	if a == nil || a.contextPrefs == nil {
+		return contextKeepRecentMsgs
+	}
+	return a.contextPrefs.Get().KeepRecentMsgs
+}
+
+// summarySavedTokens 估算"上次压缩一共省下多少输入 token"。
+//
+// 用"被摘要覆盖的原文 - 摘要正文"现算，不额外落盘：原文一直在会话里，随时能重算，
+// 多存一个字段反而会制造第二个真源（手工清空摘要之后两边就对不上了）。
+// 口径与 compactSession 里那一次 saved 的计算保持一致。
+func summarySavedTokens(session *Session, calib float64) int {
+	if session == nil || session.ContextCoveredUpTo <= 0 || strings.TrimSpace(session.ContextSummary) == "" {
+		return 0
+	}
+	covered := session.ContextCoveredUpTo
+	if covered > len(session.Messages) {
+		covered = len(session.Messages)
+	}
+	before := 0
+	for _, m := range session.Messages[:covered] {
+		before += storedMessageTokens(m)
+	}
+	// 两侧按同一个系数缩放。同一个系数不会互相抵消——差值被整体放大/缩小，而这正是
+	// 想要的：中文会话真比字符估算贵，省下的量也该按真实比例算。
+	// （摘要与原文的字种构成不同，套同一个系数是一处已知近似。）
+	saved := scaleTokens(before, calib) - scaleTokens(estimateTokens(session.ContextSummary), calib)
+	if saved < 0 {
+		saved = 0
+	}
+	return saved
+}
+
+// FormatContextStatReport 把用量统计渲染成 /context-stat 的文本报告。
+//
+// 单独成函数（而不是写在 App 方法里）是为了让测试能直接盯住它：
+// 这份报告的每一行都在解释"数字为什么变了"，说错就是误导。
+func FormatContextStatReport(st *ContextStat, keepRecent int) string {
+	if st == nil {
+		return "上下文统计不可用（会话不存在）。"
+	}
+	pct := 0
+	if st.WindowTokens > 0 {
+		pct = st.UsedTokens * 100 / st.WindowTokens
+	}
+	threshold := st.WindowTokens * contextCompactRatioNum / 100
+	reachLine := "未达"
+	if st.WindowTokens > 0 && st.UsedTokens*100 >= st.WindowTokens*contextCompactRatioNum {
+		reachLine = "已达（下一轮满足切点条件时会自动压缩）"
+	}
+
+	var b strings.Builder
+	b.WriteString("上下文统计\n")
+	fmt.Fprintf(&b, "用量：%d / %d token（%d%%）\n", st.UsedTokens, st.WindowTokens, pct)
+	fmt.Fprintf(&b, "消息：%d 条\n", st.MessageCount)
+	if st.CoveredMsgs > 0 {
+		fmt.Fprintf(&b, "摘要：已覆盖前 %d 条消息（%d 字）", st.CoveredMsgs, st.SummaryChars)
+		if st.SummaryAt > 0 {
+			fmt.Fprintf(&b, "，生成于 %s", time.UnixMilli(st.SummaryAt).Format("2006-01-02 15:04:05"))
+		}
+		b.WriteString("\n")
+		fmt.Fprintf(&b, "省下：约 %d 个输入 token（原文仍在会话记录中，清空摘要即回到全量）\n", st.SavedTokens)
+	} else {
+		b.WriteString("摘要：未压缩，发给模型的是全量原文\n")
+	}
+	if st.HasAnchor {
+		b.WriteString("锚点：有（以模型回传的真实 usage 为基准，误差只累积在两次锚点之间）\n")
+	} else {
+		b.WriteString("锚点：无（纯字符估算；锚点只在真实模型调用回传 usage 后建立）\n")
+	}
+	if st.CalibRatio > 0 && math.Abs(st.CalibRatio-1) > 0.005 {
+		fmt.Fprintf(&b, "估算系数：×%.2f（按本模型的历史真实用量自校准，仅无锚点时的估算套用）\n", st.CalibRatio)
+	}
+	fmt.Fprintf(&b, "压缩触发线：%d%%（≈%d token）→ 当前%s\n", contextCompactRatioNum, threshold, reachLine)
+	fmt.Fprintf(&b, "保留最近原文：%d 条（可在设置→通用 调整）\n", keepRecent)
+	return b.String()
+}
+
 // contextStatOf 计算某会话当前的上下文用量。
 // messages 与 anchor 由调用方给出（循环里是真实序列，界面查询时是近似序列）。
-func contextStatOf(session *Session, messages []LLMMessage, window int, anchor *tokenAnchor, extra int) *ContextStat {
+func contextStatOf(session *Session, messages []LLMMessage, window int, anchor *tokenAnchor, extra int, calib float64) *ContextStat {
 	used := estimateSeqTokens(messages, anchor) + extra
+	// 只在**无锚点**时套校准系数：有锚点时上式里的锚点部分已经是模型回传的真值，
+	// 再乘一次等于对真值做二次修正，只会把它推歪。
+	if anchor == nil {
+		used = scaleTokens(used, calib)
+	}
+	calib = normalizeCalib(calib)
 	st := &ContextStat{
 		UsedTokens:   used,
 		WindowTokens: window,
+		HasAnchor:    anchor != nil && anchor.InputTokens > 0,
+		CalibRatio:   calib,
 		MessageCount: len(messages),
 	}
 	if session != nil {
@@ -463,6 +598,7 @@ func contextStatOf(session *Session, messages []LLMMessage, window int, anchor *
 		st.CoveredMsgs = session.ContextCoveredUpTo
 		st.SummaryChars = len([]rune(session.ContextSummary))
 		st.SummaryAt = session.ContextSummaryAt
+		st.SavedTokens = summarySavedTokens(session, calib)
 	}
 	if window > 0 {
 		st.Ratio = float64(used) / float64(window)

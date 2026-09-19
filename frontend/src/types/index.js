@@ -193,6 +193,31 @@
  */
 
 /**
+ * 上下文用量统计（后端算的近似值）。
+ * @typedef {Object} ContextStat
+ * @property {string} sessionId
+ * @property {number} usedTokens 估算的已用 token
+ * @property {number} windowTokens 该模型配置的上下文窗口
+ * @property {number} ratio 0–1 的占用比例
+ * @property {number} messageCount 会话里的消息条数
+ * @property {number} coveredMsgs 摘要已覆盖的消息条数
+ * @property {number} summaryChars 摘要正文字数
+ * @property {number} [summaryAt] 摘要生成时间（Unix 毫秒）
+ * @property {boolean} hasAnchor 用量是否建立在模型回传的真实 token 锚点上。
+ *   无锚点时是纯字符估算（含系统提示与工具定义时误差可能达两位数百分比）。
+ * @property {number} savedTokens 上次摘要压缩省下的输入 token（估算，原文仍在会话里）。
+ *   这是**上界**：原文按会话里存的完整内容计，未扣除发给模型时单条工具结果的截断。
+ * @property {number} calibRatio 估算校准系数（真实 usage / 字符估算，按模型观测而来）。
+ *   1 表示未校准；无锚点时 usedTokens/savedTokens 已经乘过它。
+ */
+
+/**
+ * 上下文压缩偏好（后端配置，存放在 ~/.local-agent/context.json）
+ * @typedef {Object} ContextPrefs
+ * @property {number} keepRecentMsgs 压缩时强制保留的最近消息条数（不含进摘要的那段）
+ */
+
+/**
  * 一轮的回退可用性
  * @typedef {Object} CheckpointInfo
  * @property {number} turn

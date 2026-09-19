@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
@@ -60,6 +61,33 @@ func (g *guardedTool) GetDescription() string { return g.inner.GetDescription() 
 // GetParameters 透传参数定义
 func (g *guardedTool) GetParameters() map[string]*ToolArgDef { return g.inner.GetParameters() }
 
+// RequiredParams 透传必填参数名。
+//
+// ⚠️ 这不是可有可无的转发。装配期会给 registry 里每个工具包一层本装饰器，
+// 而 schemaForTool 是对**装饰后**的对象做 `t.(RequiredParams)` 类型断言的——
+// 少这一层转发，接口断言就会失败，required 退化成空，直出给模型的 schema 里
+// 不再有任何 "required" 字段，模型只能从散文描述里猜哪个参数必填，
+// 猜错就吃一个参数校验错误、白烧一轮。
+func (g *guardedTool) RequiredParams() []string {
+	if rp, ok := g.inner.(RequiredParams); ok {
+		return rp.RequiredParams()
+	}
+	return nil
+}
+
+// JSONSchema 透传工具自报的完整 schema。
+//
+// 同 RequiredParams：不转发的话 SchemaProvider 断言同样失败，MCP 工具从服务器
+// 原样带回来的 inputSchema（enum / items / 嵌套 / required）会被压平成
+// type + description，模型因此凑不出合法的枚举值。
+// 返回 nil 表示"本工具没有自报 schema"，schemaForTool 会照旧走合成路径。
+func (g *guardedTool) JSONSchema() json.RawMessage {
+	if sp, ok := g.inner.(SchemaProvider); ok {
+		return sp.JSONSchema()
+	}
+	return nil
+}
+
 // ===== 授权请求 / 应答协议 =====
 
 // PermissionAskRequest 送到前端的授权请求
@@ -67,10 +95,10 @@ type PermissionAskRequest struct {
 	ID        string   `json:"id"`
 	SessionID string   `json:"sessionId"`
 	Tool      string   `json:"tool"`
-	Subject   string   `json:"subject"`   // 待确认内容的单行摘要
-	Units     []string `json:"units"`     // 命令类主体分解后的各段（供界面展示与生成规则）
-	Stage     string   `json:"stage"`     // 判定落在管线的哪一步
-	Reason    string   `json:"reason"`    // 为什么要问
+	Subject   string   `json:"subject"` // 待确认内容的单行摘要
+	Units     []string `json:"units"`   // 命令类主体分解后的各段（供界面展示与生成规则）
+	Stage     string   `json:"stage"`   // 判定落在管线的哪一步
+	Reason    string   `json:"reason"`  // 为什么要问
 	CreatedAt int64    `json:"createdAt"`
 }
 

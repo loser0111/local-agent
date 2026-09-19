@@ -66,7 +66,7 @@ func NewToolStore(filePath string) *ToolStore {
 func defaultSources() []*ToolSource {
 	return []*ToolSource{
 		{
-			ID: "exec_shell", Name: "exec_shell", Label: "执行终端命令",
+			ID: toolExecShell, Name: toolExecShell, Label: "执行终端命令",
 			Description: "在本机终端执行shell/终端命令，用于运行构建、测试、git 等；读写文件请优先用文件工具",
 			Kind:        SourceBuiltin, Icon: "terminal", Enabled: true, Builtin: true,
 			Parameters: []ToolParamConfig{

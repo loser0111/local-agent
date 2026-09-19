@@ -92,7 +92,7 @@ type Session struct {
 	EndAt          int64           `json:"endAt"`
 	Messages       []Message       `json:"messages"`
 	Conversations  []*Conversation `json:"conversations"`
-	Diffs          []DiffTurn      `json:"diffs,omitempty"`         // 每轮对话产生的文件差异
+	Diffs          []DiffTurn      `json:"diffs,omitempty"` // 每轮对话产生的文件差异
 	DiffBaseline   string          `json:"diffBaseline,omitempty"`
 	DiffTouched    []string        `json:"diffTouched,omitempty"`
 	EnabledTools   []string        `json:"enabledTools,omitempty"`  // 本会话可用的工具 ID 白名单（空=全部已启用工具）
@@ -123,8 +123,8 @@ type SessionConfig struct {
 	PermissionMode string   `json:"permissionMode"`
 	ViewMode       string   `json:"viewMode"` // 视图模式：控制工具调用过程的展示粒度
 	Environment    string   `json:"environment"`
-	EnabledTools   []string `json:"enabledTools"`  // 本会话可用的工具 ID 白名单（空=全部已启用工具）
-	EnabledSkills  []string `json:"enabledSkills"` // 本会话可用的技能 ID 白名单（空=全部已启用技能）
+	EnabledTools   []string `json:"enabledTools"`       // 本会话可用的工具 ID 白名单（空=全部已启用工具）
+	EnabledSkills  []string `json:"enabledSkills"`      // 本会话可用的技能 ID 白名单（空=全部已启用技能）
 	ParentID       string   `json:"parentId,omitempty"` // 非空=子代理会话（不出现在会话列表里）
 }
 
@@ -578,6 +578,91 @@ func (s *SessionStore) CountSessionsByModel(modelName string) (int, error) {
 		}
 	}
 	return count, nil
+}
+
+// ListSessionsByModel 返回引用指定模型名称的**用户可见**会话（按最近活跃倒序，不带消息）。
+//
+// 与 CountSessionsByModel 只差一个过滤：子代理会话（ParentID != ""）不算。
+// 它们刻意不进会话列表，前端也没有任何入口能看到、删除它们，所以它们不能成为
+// 删除模型的阻挡者——否则用户会收到「有 N 个会话正在使用该模型」，却在列表里
+// 怎么也找不到这 N 个会话，模型等于被永久锁死。
+//
+// 返回会话本身而不是数量：报错时才能点名「是哪几个会话在用」，用户可直接去处理。
+func (s *SessionStore) ListSessionsByModel(modelName string) ([]*Session, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	entries, err := os.ReadDir(s.dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("读取会话目录失败: %w", err)
+	}
+
+	refs := make([]*Session, 0, 4)
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+			continue
+		}
+		id := strings.TrimSuffix(entry.Name(), ".json")
+		session, err := s.loadSession(id)
+		if err != nil {
+			continue
+		}
+		if session.ParentID != "" || session.Model != modelName {
+			continue
+		}
+		session.Messages = []Message{}
+		session.Conversations = []*Conversation{}
+		session.Diffs = nil
+		refs = append(refs, session)
+	}
+	sort.Slice(refs, func(i, j int) bool {
+		return refs[i].EndAt > refs[j].EndAt
+	})
+	return refs, nil
+}
+
+// ClearSubagentModelReference 把**子代理会话**中引用 modelName 的 model 字段清空，
+// 返回清理条数。只在模型删除成功后调用。
+//
+// 子代理会话是历史产物（跑完就不会再被调度），其 model 字段只是一条展示用的名字。
+// 不清掉的话，删掉模型后这些文件里会残留一个已不存在的模型名，日后排障时容易被
+// 误读成「模型还在被使用」。用户可见的会话**一律不动**：它们要么已被 DeleteModel
+// 拦下（说明确有引用，得由用户自己切换），要么本就没有引用。
+func (s *SessionStore) ClearSubagentModelReference(modelName string) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	entries, err := os.ReadDir(s.dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("读取会话目录失败: %w", err)
+	}
+
+	cleared := 0
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+			continue
+		}
+		id := strings.TrimSuffix(entry.Name(), ".json")
+		session, err := s.loadSession(id)
+		if err != nil {
+			continue
+		}
+		if session.ParentID == "" || session.Model != modelName {
+			continue
+		}
+		session.Model = ""
+		if err := s.saveSession(session); err != nil {
+			return cleared, err
+		}
+		cleared++
+	}
+	return cleared, nil
 }
 
 // RenameModelReference 将所有会话中引用 oldName 的 model 字段更新为 newName

@@ -45,6 +45,8 @@ export function ExecutePlan(arg1:string,arg2:boolean):Promise<main.ChatResult>;
 
 export function ExportMCPServers(arg1:Array<string>):Promise<string>;
 
+export function GetContextPrefs():Promise<main.ContextPrefs>;
+
 export function GetContextStat(arg1:string):Promise<main.ContextStat>;
 
 export function GetDiff(arg1:string):Promise<Array<main.DiffFile>>;
@@ -138,6 +140,8 @@ export function SavePlan(arg1:main.Plan):Promise<void>;
 export function SaveSkill(arg1:string,arg2:main.SkillDraft):Promise<void>;
 
 export function SaveTool(arg1:main.ToolSource):Promise<main.ToolSource>;
+
+export function SetContextKeepRecentMsgs(arg1:number):Promise<main.ContextPrefs>;
 
 export function SetExposure(arg1:string,arg2:string):Promise<void>;
 
