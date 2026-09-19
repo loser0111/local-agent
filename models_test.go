@@ -33,10 +33,14 @@ func TestModelStore_CRUD(t *testing.T) {
 		t.Fatal("空名称应返回错误")
 	}
 
-	// 查询
+	// 查询（GetModels 脱敏）
 	models := store.GetModels()
 	if len(models) != 1 || models[0].Name != "claude-sonnet" {
 		t.Fatalf("模型列表异常: %v", models)
+	}
+	// APIKey 应被脱敏
+	if models[0].APIKey == "sk-123" {
+		t.Fatalf("GetModels 返回的 APIKey 应被脱敏")
 	}
 
 	names := store.GetModelNames()
@@ -44,13 +48,22 @@ func TestModelStore_CRUD(t *testing.T) {
 		t.Fatalf("模型名称列表异常: %v", names)
 	}
 
-	// GetModel
+	// GetModel（脱敏）
 	got, err := store.GetModel("claude-sonnet")
 	if err != nil {
 		t.Fatalf("GetModel 失败: %v", err)
 	}
-	if got.APIKey != "sk-123" {
-		t.Fatalf("APIKey 不匹配: %s", got.APIKey)
+	if got.APIKey == "sk-123" {
+		t.Fatalf("GetModel 返回的 APIKey 应被脱敏")
+	}
+
+	// GetModelFull（不脱敏）
+	gotFull, err := store.GetModelFull("claude-sonnet")
+	if err != nil {
+		t.Fatalf("GetModelFull 失败: %v", err)
+	}
+	if gotFull.APIKey != "sk-123" {
+		t.Fatalf("GetModelFull APIKey 不匹配: %s", gotFull.APIKey)
 	}
 
 	// GetModel 不存在
@@ -89,11 +102,99 @@ func TestModelStore_Persistence(t *testing.T) {
 
 	// 第二个 store 从同一文件加载，应能读到之前的模型
 	store2 := NewModelStore(storePath)
-	models := store2.GetModels()
-	if len(models) != 1 || models[0].Name != "model-a" {
-		t.Fatalf("持久化加载失败: %v", models)
+	// 使用 GetModelFull 验证原始 APIKey
+	got, err := store2.GetModelFull("model-a")
+	if err != nil {
+		t.Fatalf("GetModelFull 失败: %v", err)
 	}
-	if models[0].APIKey != "key-a" {
-		t.Fatalf("APIKey 持久化失败: %s", models[0].APIKey)
+	if got.APIKey != "key-a" {
+		t.Fatalf("APIKey 持久化失败: %s", got.APIKey)
+	}
+}
+
+func TestModelStore_Rename(t *testing.T) {
+	tmpDir := t.TempDir()
+	storePath := filepath.Join(tmpDir, "models.json")
+	store := NewModelStore(storePath)
+
+	// 添加两个模型
+	if err := store.AddModel(Model{Name: "model-a", Alias: "A", APIKey: "key-a"}); err != nil {
+		t.Fatalf("添加 model-a 失败: %v", err)
+	}
+	if err := store.AddModel(Model{Name: "model-b", APIKey: "key-b"}); err != nil {
+		t.Fatalf("添加 model-b 失败: %v", err)
+	}
+
+	// 重命名 model-a → model-c
+	if err := store.UpdateModel("model-a", Model{Name: "model-c", Alias: "A-renamed", APIKey: "key-a"}); err != nil {
+		t.Fatalf("重命名失败: %v", err)
+	}
+
+	// 验证旧名称不存在
+	if _, err := store.GetModelFull("model-a"); err == nil {
+		t.Fatal("旧名称应不存在")
+	}
+	// 验证新名称存在
+	got, err := store.GetModelFull("model-c")
+	if err != nil {
+		t.Fatalf("获取重命名后的模型失败: %v", err)
+	}
+	if got.Alias != "A-renamed" {
+		t.Fatalf("Alias 不匹配: %s", got.Alias)
+	}
+
+	// 重命名为已存在的名称应报错
+	err = store.UpdateModel("model-c", Model{Name: "model-b"})
+	if err == nil {
+		t.Fatal("重命名为已存在的名称应报错")
+	}
+
+	// 不改名的更新（Name 为空）
+	if err := store.UpdateModel("model-c", Model{Alias: "new-alias", APIKey: "key-a"}); err != nil {
+		t.Fatalf("不改名更新失败: %v", err)
+	}
+	got2, _ := store.GetModelFull("model-c")
+	if got2.Alias != "new-alias" {
+		t.Fatalf("Alias 更新失败: %s", got2.Alias)
+	}
+}
+
+func TestModelStore_UpdatePreservesAPIKey(t *testing.T) {
+	tmpDir := t.TempDir()
+	storePath := filepath.Join(tmpDir, "models.json")
+	store := NewModelStore(storePath)
+
+	if err := store.AddModel(Model{Name: "m1", APIKey: "sk-secret"}); err != nil {
+		t.Fatalf("添加失败: %v", err)
+	}
+
+	// 更新时 APIKey 传空（前端脱敏后未修改场景）
+	if err := store.UpdateModel("m1", Model{Name: "m1", Alias: "updated", APIKey: ""}); err != nil {
+		t.Fatalf("更新失败: %v", err)
+	}
+
+	got, _ := store.GetModelFull("m1")
+	if got.APIKey != "sk-secret" {
+		t.Fatalf("APIKey 应保留旧值，实际: %s", got.APIKey)
+	}
+}
+
+func TestMaskAPIKey(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{"", ""},
+		{"ab", "**"},
+		{"abc", "***"},
+		{"abcd", "****"},
+		{"abcde", "*bcde"},
+		{"sk-1234567890", "*********7890"},
+	}
+	for _, tt := range tests {
+		got := maskAPIKey(tt.input)
+		if got != tt.expected {
+			t.Errorf("maskAPIKey(%q) = %q, want %q", tt.input, got, tt.expected)
+		}
 	}
 }

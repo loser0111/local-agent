@@ -21,9 +21,11 @@ async function loadModelNames() {
   try {
     const names = await fetchModelNames()
     modelNames.value = names
-    // 如果当前会话没有模型且有可用模型，默认选第一个并持久化
+    // 如果当前会话没有模型，优先使用设置的默认模型，否则选第一个可用模型
     if (currentSession.value && !currentSession.value.model && names.length > 0) {
-      await sessionStore.patchSession(currentSession.value.id, { model: names[0] })
+      const defaultModel = settingStore.settings.defaultModel
+      const target = (defaultModel && names.includes(defaultModel)) ? defaultModel : names[0]
+      await sessionStore.patchSession(currentSession.value.id, { model: target })
     }
   } catch (e) {
     console.error('加载模型列表失败:', e)
@@ -49,8 +51,10 @@ async function changePermissionMode(e) {
   }
 }
 
-function changeViewMode(mode) {
-  settingStore.updateSetting('viewMode', mode)
+async function changeViewMode(mode) {
+  if (currentSession.value) {
+    await sessionStore.patchSession(currentSession.value.id, { viewMode: mode })
+  }
 }
 
 function goSettings() {
@@ -92,7 +96,9 @@ function goSettings() {
           v-for="m in VIEW_MODES"
           :key="m.value"
           class="view-btn"
-          :class="{ active: settingStore.settings.viewMode === m.value }"
+          :class="{ active: currentSession?.viewMode === m.value }"
+          :disabled="!currentSession"
+          :title="m.desc"
           @click="changeViewMode(m.value)"
         >
           {{ m.label }}
@@ -190,8 +196,14 @@ function goSettings() {
     color: #fff;
   }
 
-  &:not(.active):hover {
+  &:not(.active):not(:disabled):hover {
     color: $color-text-primary;
+  }
+
+  // 无会话时不可切换视图模式（视图模式是会话级配置）
+  &:disabled {
+    cursor: default;
+    opacity: 0.45;
   }
 }
 

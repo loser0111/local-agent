@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
-import { getDiffTurns } from '@/api/session'
+import { getDiffTurns, listCheckpoints, undoDiffTurn } from '@/api/session'
 
 /**
  * 差异视图 Store
@@ -11,6 +11,8 @@ export const useDiffStore = defineStore('diff', () => {
   const activeTurn = ref(0)
   const loading = ref(false)
   const loadedSessionId = ref(null)
+  // 各轮的回退可用性（是否可回退、冲突文件、是否已回退过）
+  const checkpoints = ref([])
 
   const currentTurn = computed(
     () => turns.value.find((t) => t.turn === activeTurn.value) || turns.value[0] || null
@@ -25,6 +27,7 @@ export const useDiffStore = defineStore('diff', () => {
   async function load(sessionId) {
     if (!sessionId) {
       turns.value = []
+      checkpoints.value = []
       loadedSessionId.value = null
       return 0
     }
@@ -34,6 +37,7 @@ export const useDiffStore = defineStore('diff', () => {
       loadedSessionId.value = sessionId
       const last = turns.value[turns.value.length - 1]
       activeTurn.value = last ? last.turn : 0
+      await loadCheckpoints(sessionId)
       return files.value.length
     } catch (e) {
       console.error('加载 diff 失败:', e)
@@ -42,6 +46,40 @@ export const useDiffStore = defineStore('diff', () => {
     } finally {
       loading.value = false
     }
+  }
+
+  /** 拉取各轮的回退可用性（不可回退的轮次也会在列表里，带 reason） */
+  async function loadCheckpoints(sessionId) {
+    if (!sessionId) {
+      checkpoints.value = []
+      return
+    }
+    try {
+      checkpoints.value = (await listCheckpoints(sessionId)) || []
+    } catch {
+      checkpoints.value = []
+    }
+  }
+
+  /** 取某轮的回退信息；没有则返回 null */
+  function checkpointOf(turn) {
+    return checkpoints.value.find((c) => c.turn === turn) || null
+  }
+
+  /**
+   * 回退某一轮。
+   *
+   * 成功后就地重新拉取：**不用 diff:update 事件**——回退后这一轮的 diff 常常变成空，
+   * 而 applyUpdate 会把空 diff 直接丢掉（见下方 `if (!diff || !diff.length) return`），
+   * 靠事件刷新会留下过期数据。
+   */
+  async function undo(sessionId, turn, force = false) {
+    const keep = activeTurn.value
+    const res = await undoDiffTurn(sessionId, turn, force)
+    await load(sessionId)
+    // 尽量留在原来那一轮；该轮已被清掉时 load 会落到最后一轮
+    if (turns.value.some((t) => t.turn === keep)) activeTurn.value = keep
+    return res
   }
 
   /**
@@ -72,6 +110,7 @@ export const useDiffStore = defineStore('diff', () => {
 
   function clear() {
     turns.value = []
+    checkpoints.value = []
     activeTurn.value = 0
     loadedSessionId.value = null
   }
@@ -81,11 +120,15 @@ export const useDiffStore = defineStore('diff', () => {
     activeTurn,
     loading,
     loadedSessionId,
+    checkpoints,
     currentTurn,
     files,
     additions,
     deletions,
     load,
+    loadCheckpoints,
+    checkpointOf,
+    undo,
     applyUpdate,
     setActiveTurn,
     clear,

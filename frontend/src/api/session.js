@@ -7,10 +7,17 @@ import {
   AppendConversation,
   UpdateSession,
   Chat,
+  StopChat,
+  GetContextStat,
+  GetLastLLMRequest,
+  ListCheckpoints,
+  UndoDiffTurn,
   GetDiff,
   GetDiffTurns,
 } from '@/../wailsjs/go/main/App'
 import { EventsOn, EventsOff } from '@/../wailsjs/runtime/runtime'
+import { putMockPlan } from '@/api/plan'
+import { DEFAULT_VIEW_MODE } from '@/types'
 
 /**
  * 判断是否运行在 Wails 桌面环境
@@ -47,7 +54,7 @@ function genSessionId() {
 
 /**
  * 创建会话
- * @param {{title?:string, project?:string, model?:string, permissionMode?:string, environment?:string}} config
+ * @param {{title?:string, project?:string, model?:string, permissionMode?:string, viewMode?:string, environment?:string, enabledTools?:string[], enabledSkills?:string[]}} config
  * @returns {Promise<object>} 创建的完整会话
  */
 export async function createSession(config = {}) {
@@ -62,12 +69,15 @@ export async function createSession(config = {}) {
     project: config.project || '',
     model: config.model || '',
     permissionMode: config.permissionMode || 'manual',
+    viewMode: config.viewMode || DEFAULT_VIEW_MODE,
     environment: config.environment || 'local',
     status: 'active',
     startAt: now,
     endAt: now,
     messages: [],
     conversations: [],
+    enabledTools: config.enabledTools || [],
+    enabledSkills: config.enabledSkills || [],
   }
   map[session.id] = session
   writeMockSessions(map)
@@ -165,7 +175,7 @@ export async function appendConversation(sessionId, conversation) {
 /**
  * 更新会话元数据
  * @param {string} id
- * @param {{title?:string, model?:string, permissionMode?:string, status?:string, project?:string}} patch
+ * @param {{title?:string, model?:string, permissionMode?:string, viewMode?:string, status?:string, project?:string}} patch
  */
 export async function updateSession(id, patch) {
   if (isWails()) {
@@ -184,31 +194,56 @@ export async function updateSession(id, patch) {
 
 /**
  * 发送消息给 AI 并获取回复（真正的 LLM 调用）
- * 在 Wails 环境下，通过事件接收工具调用中间状态，最终返回完整回复
+ * 在 Wails 环境下，通过事件接收工具调用中间状态与流式文本分片，最终返回完整回复
  * 后端会持久化所有中间消息（assistant+tool_calls, tool结果, 最终回复）
  * @param {string} sessionId
  * @param {string} query
- * @param {{onToolCallStart?:Function, onToolCallEnd?:Function}} callbacks
- * @returns {Promise<{reply:string, toolCalls?:array, messages?:array, error?:string}>}
+ * @param {{stream?:boolean, plan?:boolean, onReplyDelta?:Function, onToolCallStart?:Function, onToolCallEnd?:Function, onPlanUpdate?:Function, }} callbacks
+ * @returns {Promise<{reply:string, toolCalls?:array, messages?:array, plan?:object, error?:string}>}
  */
-export async function chat(sessionId, query, { onToolCallStart, onToolCallEnd } = {}) {
+export async function chat(
+  sessionId,
+  query,
+  {
+    stream = true,
+    plan = false,
+    onReplyDelta,
+    onToolCallStart,
+    onToolCallEnd,
+    onPlanUpdate,
+    onCancelled,
+  } = {}
+) {
   if (isWails()) {
-    // 监听工具调用中间状态事件
+    // 监听工具调用中间状态、流式分片、计划状态与授权请求事件
     const eventHandler = (eventData) => {
       if (!eventData) return
       switch (eventData.type) {
+        case 'reply_delta':
+          onReplyDelta?.(eventData.reply)
+          break
         case 'tool_call_start':
           onToolCallStart?.(eventData.toolCall)
           break
         case 'tool_call_end':
           onToolCallEnd?.(eventData.toolCall)
           break
+        case 'plan_update':
+          onPlanUpdate?.(eventData.plan)
+          break
+        // 被用户停止（软取消或硬取消）：立即通知调用方收尾流式气泡，
+        // 否则它会一直停在"正在输入"的状态
+        case 'cancelled':
+          onCancelled?.(eventData.error)
+          break
+        // 授权请求 / 模型提问走独立的 user:interaction 通道（由 App.vue 统一订阅），
+        // 不在这里分发 —— 否则计划执行等入口会漏（详见 api/interaction.js 的说明）
       }
     }
     EventsOn('chat:event', eventHandler)
 
     try {
-      const result = await Chat(sessionId, query)
+      const result = await Chat(sessionId, query, !!stream, !!plan)
       return result
     } finally {
       EventsOff('chat:event')
@@ -216,6 +251,29 @@ export async function chat(sessionId, query, { onToolCallStart, onToolCallEnd } 
   }
 
   // ===== 浏览器开发模式 mock =====
+
+  // 计划模式：返回模拟计划（3 步骤，待审核状态）
+  if (plan) {
+    await new Promise((r) => setTimeout(r, 800))
+    const now = Date.now()
+    const mockPlan = {
+      id: `plan_${now}_m0ck`,
+      sessionId,
+      title: `「${(query || '').slice(0, 12)}…」执行计划`,
+      status: 'awaiting_approval',
+      steps: [
+        { index: 0, title: '梳理现有结构与依赖', detail: '阅读相关文件并总结现状', status: 'pending' },
+        { index: 1, title: '实施主要变更', detail: '', status: 'pending' },
+        { index: 2, title: '验证并汇总结果', detail: '', status: 'pending' },
+      ],
+      createdAt: now,
+      updatedAt: now,
+    }
+    putMockPlan(mockPlan) // 落库，供 savePlan/executePlan mock 读写
+    onPlanUpdate?.(mockPlan)
+    return { plan: mockPlan }
+  }
+
   // 模拟工具调用 + AI 回复（返回 messages 模拟后端持久化的消息）
   const tcId = `tc-${Date.now()}`
   const toolCall = {
@@ -236,6 +294,16 @@ export async function chat(sessionId, query, { onToolCallStart, onToolCallEnd } 
   }
 
   const reply = `这是浏览器开发模式的模拟回复。\n\n你说的是："${query}"\n\n在 Wails 桌面环境中，这里会返回真正的 LLM 回复。`
+
+  // 模拟 SSE：把回复切成小分片逐段回调
+  if (stream && onReplyDelta) {
+    const chunks = reply.match(/[\s\S]{1,6}/g) || [reply]
+    for (const c of chunks) {
+      onReplyDelta(c)
+      await new Promise((r) => setTimeout(r, 30))
+    }
+  }
+
   const now = Date.now()
 
   return {
@@ -351,4 +419,85 @@ export function onDiffUpdate(cb) {
   if (!isWails()) return () => {}
   EventsOn('diff:update', cb)
   return () => EventsOff('diff:update')
+}
+
+/**
+ * 停止某会话当前正在运行的生成（两级）。
+ *
+ * @param {string} sessionId
+ * @param {boolean} hard false=协作式（当前 LLM 请求与工具跑完，下一轮不再开始）；
+ *   true=硬取消（在途请求立即断开、正在跑的子进程被 kill、等待中的提问立即结束）
+ * @returns {Promise<boolean>} 是否命中了一个在跑的运行。
+ *   返回 false 时调用方**必须**复位按钮并结束本地"生成中"状态——
+ *   否则会出现"点了停止却没反应"的假象（这正是改造前的表现）。
+ */
+export async function stopChat(sessionId, hard = false) {
+  if (isWails()) return await StopChat(sessionId, !!hard)
+  return false // 浏览器 mock 模式没有真实运行可停
+}
+
+/**
+ * 查询某会话的上下文用量。
+ *
+ * 后端给的是**近似值**（不含系统提示与工具定义的精确开销），只用于界面显示比例，
+ * 不参与任何判定——真正的阈值判断在后端用运行期的真实序列算。
+ *
+ * @param {string} sessionId
+ * @returns {Promise<import('@/types').ContextStat|null>} 会话不存在时返回 null
+ */
+export async function getContextStat(sessionId) {
+  if (!isWails()) return null
+  try {
+    return await GetContextStat(sessionId)
+  } catch {
+    return null // 只是显示用，取不到就不显示，不打扰用户
+  }
+}
+
+/**
+ * 查询本会话**最近一次真实发出**的请求快照（压缩与工具结果预算之后的那一份）。
+ *
+ * 与会话里存的消息不同：会话存的是原文，这里记的是实际交给模型的序列。
+ * 快照只在内存里，应用重启后需要再发一条消息才会有。
+ *
+ * @param {string} sessionId
+ * @returns {Promise<import('@/types').LLMRequestSnapshot|null>} 无记录时返回 null
+ */
+export async function getLastLLMRequest(sessionId) {
+  if (!isWails()) return null
+  try {
+    return await GetLastLLMRequest(sessionId)
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 查询会话各轮的回退可用性与冲突情况。
+ * @param {string} sessionId
+ * @returns {Promise<Array<import('@/types').CheckpointInfo>>} 不可回退的轮次也在列表里（带 reason）
+ */
+export async function listCheckpoints(sessionId) {
+  if (!isWails()) return []
+  try {
+    return (await ListCheckpoints(sessionId)) || []
+  } catch {
+    return []
+  }
+}
+
+/**
+ * 回退某一轮：把该轮改过的文件恢复到轮次开始时的状态。
+ *
+ * 有冲突（文件在该轮之后又被改过）且 force=false 时后端会拒绝并抛出带冲突清单的错误，
+ * 由调用方确认后带 force 重试。
+ *
+ * @param {string} sessionId
+ * @param {number} turn
+ * @param {boolean} [force]
+ * @returns {Promise<import('@/types').UndoResult>}
+ */
+export async function undoDiffTurn(sessionId, turn, force = false) {
+  if (!isWails()) throw new Error('mock 模式不支持回退')
+  return await UndoDiffTurn(sessionId, turn, !!force)
 }

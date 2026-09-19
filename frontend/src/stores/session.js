@@ -73,6 +73,7 @@ export const useSessionStore = defineStore('session', () => {
         title: updated.title,
         model: updated.model,
         permissionMode: updated.permissionMode,
+        viewMode: updated.viewMode,
         status: updated.status,
         project: updated.project,
         endAt: updated.endAt,

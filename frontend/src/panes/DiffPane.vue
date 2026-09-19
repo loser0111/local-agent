@@ -5,13 +5,79 @@ import { useDiffStore } from '@/stores/diff'
 import { useSessionStore } from '@/stores/session'
 import { useChatStore } from '@/stores/chat'
 import { usePaneStore } from '@/stores/pane'
+import { useUiStore } from '@/stores/ui'
+import { Loader2 } from 'lucide-vue-next'
 
 const diffStore = useDiffStore()
 const sessionStore = useSessionStore()
 const chatStore = useChatStore()
 const paneStore = usePaneStore()
+const ui = useUiStore()
 
 const selectedFile = ref(0)
+const undoing = ref(false)
+
+// 当前轮的回退信息。turn=0 是「累计」整体视图，不是真实轮次，不可回退。
+const activeCheckpoint = computed(() => {
+  const t = diffStore.activeTurn
+  if (!t) return null
+  return diffStore.checkpointOf(t)
+})
+
+const canUndo = computed(() => !!activeCheckpoint.value?.available)
+
+const undoHint = computed(() => {
+  if (!diffStore.activeTurn) return '「累计」是整体视图，不能回退；请在上方选择具体某一轮'
+  const c = activeCheckpoint.value
+  if (!c) return '正在读取该轮的回退信息…'
+  if (!c.available) return `该轮不可回退：${c.reason || '未知原因'}`
+  const n = c.files?.length || 0
+  const conflict = c.conflicts?.length ? `；其中 ${c.conflicts.length} 个文件在该轮之后又被改过` : ''
+  return `把这一轮改过的 ${n} 个文件恢复到该轮开始时的状态${conflict}`
+})
+
+async function handleUndo() {
+  const turn = diffStore.activeTurn
+  const sid = sessionStore.currentSessionId
+  const cp = activeCheckpoint.value
+  if (!turn || !sid || !cp?.available || undoing.value) return
+
+  const conflicts = cp.conflicts || []
+  if (conflicts.length > 0) {
+    // 有冲突时先把后果说清再让用户决定——回退会覆盖这些文件上的手工改动
+    const ok = await ui.ask({
+      title: `回退第 ${turn} 轮（会覆盖手工改动）`,
+      message:
+        `以下文件在第 ${turn} 轮之后又被改动过，回退会把它们改回该轮开始时的状态：\n` +
+        conflicts.join('\n') +
+        `\n\n确定继续吗？`,
+      confirmText: '仍然回退',
+      danger: true,
+    })
+    if (!ok) return
+  } else {
+    const list = (cp.files || []).slice(0, 20).join('\n')
+    const ok = await ui.ask({
+      title: `回退第 ${turn} 轮`,
+      message: `将把这一轮改过的 ${cp.files?.length || 0} 个文件恢复到该轮开始时的状态：\n${list}`,
+      confirmText: '回退',
+    })
+    if (!ok) return
+  }
+
+  undoing.value = true
+  try {
+    const res = await diffStore.undo(sid, turn, conflicts.length > 0)
+    const failed = res?.failed || 0
+    const skipped = res?.skipped || 0
+    const tail = failed || skipped ? `；${failed} 个失败、${skipped} 个跳过` : ''
+    ui.notify(`已回退第 ${turn} 轮${tail}`, failed > 0 ? 'error' : 'success')
+  } catch (e) {
+    ui.notify(`回退失败：${e.message || e}`, 'error')
+  } finally {
+    undoing.value = false
+  }
+}
 
 const diffFiles = computed(() => diffStore.files)
 const currentFile = computed(() => diffFiles.value[selectedFile.value] || null)
@@ -85,6 +151,16 @@ function reviewCode() {
           </option>
         </select>
         <button
+          v-if="diffStore.turns.length"
+          class="btn btn-ghost btn-sm undo-btn"
+          :disabled="!canUndo || undoing"
+          :title="undoHint"
+          @click="handleUndo"
+        >
+          <Loader2 v-if="undoing" :size="12" class="spin" />
+          回退本轮
+        </button>
+        <button
           class="btn btn-ghost btn-sm review-btn"
           :disabled="!currentFile"
           @click="reviewCode"
@@ -138,7 +214,13 @@ function reviewCode() {
       </div>
 
       <div v-else class="diff-empty">
-        {{ diffStore.loading ? '正在计算差异…' : '本轮对话暂无文件改动' }}
+        <template v-if="diffStore.loading">正在计算差异…</template>
+        <template v-else>
+          <div>本会话暂无文件改动</div>
+          <div class="diff-empty-hint">
+            差异按会话隔离：只显示本会话改过的文件（含 exec_shell 改的）
+          </div>
+        </template>
       </div>
     </div>
   </div>
@@ -314,15 +396,48 @@ function reviewCode() {
 .diff-empty {
   flex: 1;
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
+  gap: $space-xs;
   color: $color-text-muted;
   font-size: $font-size-sm;
+  text-align: center;
+  padding: $space-lg;
+}
+
+.diff-empty-hint {
+  font-size: $font-size-xs;
+  color: $color-text-muted;
+  opacity: 0.75;
 }
 
 .btn-sm {
   padding: 2px $space-sm;
   font-size: $font-size-xs;
+}
+
+// 回退按钮。不可回退时不隐藏、只置灰——用户能从 title 里读到原因，
+// 比"按钮凭空消失"更容易理解。
+.undo-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+
+  &:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+}
+
+.spin {
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .turn-select {

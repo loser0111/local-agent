@@ -1,9 +1,11 @@
 <script setup>
 import { ref, computed } from 'vue'
 import { useSessionStore } from '@/stores/session'
+import { useUiStore } from '@/stores/ui'
 import { formatTime } from '@/utils/format'
 
 const sessionStore = useSessionStore()
+const ui = useUiStore()
 
 const emit = defineEmits(['new-session'])
 
@@ -41,7 +43,13 @@ function handleSwitch(id) {
 
 async function handleDelete(e, id) {
   e.stopPropagation()
-  if (!confirm('确定删除该会话吗？')) return
+  // 用应用内确认框：原生 confirm 在部分 webview 上返回假值，会导致删除静默失效
+  const ok = await ui.ask({
+    title: '删除会话',
+    message: '确定删除该会话吗？会话记录与消息将一并移除，且不可恢复。',
+    confirmText: '删除',
+  })
+  if (!ok) return
   try {
     await sessionStore.deleteSession(id)
   } catch (err) {

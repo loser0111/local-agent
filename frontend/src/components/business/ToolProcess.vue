@@ -4,32 +4,16 @@ import ToolCallCard from './ToolCallCard.vue'
 
 /**
  * 模型思考 / 工具调用过程折叠块（Claude Code 风格）
- * - 流式执行中：自动展开，实时展示每个工具调用状态
- * - 执行完成：自动折叠，标题行展示摘要（可手动展开查看细节）
+ * 展开策略随会话的视图模式（viewMode）变化：
+ *   - verbose：常展开，完整展示工具调用过程
+ *   - normal ：流式执行中自动展开、完成后自动折叠（原有行为）
+ *   - summary：只保留一行摘要，隐藏工具调用细节；工具报错时强制展开
  */
 const props = defineProps({
   toolCalls: { type: Array, default: () => [] },
   streaming: { type: Boolean, default: false },
+  viewMode: { type: String, default: 'normal' },
 })
-
-// 用户是否手动切换过折叠状态（手动操作后不再自动折叠）
-const userToggled = ref(false)
-// 展开状态：流式中默认展开，完成后默认折叠
-const expanded = ref(props.streaming)
-
-watch(
-  () => props.streaming,
-  (streaming) => {
-    if (!userToggled.value) {
-      expanded.value = streaming
-    }
-  }
-)
-
-function toggle() {
-  userToggled.value = true
-  expanded.value = !expanded.value
-}
 
 // ===== 工具名称友好化 =====
 function truncate(str, n = 40) {
@@ -53,7 +37,11 @@ function toolLabel(tc) {
 }
 
 // ===== 状态统计 =====
-const runningCount = computed(() => props.toolCalls.filter((t) => t.status === 'running').length)
+// 等待授权的工具卡片也算"进行中"：否则过程块会在等人应答时自动折叠，把提问藏起来
+const pendingCount = computed(() => props.toolCalls.filter((t) => t.status === 'pending').length)
+const runningCount = computed(
+  () => props.toolCalls.filter((t) => t.status === 'running' || t.status === 'pending').length
+)
 const errorCount = computed(() => props.toolCalls.filter((t) => t.status === 'error').length)
 const successCount = computed(() => props.toolCalls.filter((t) => t.status === 'success').length)
 const totalDuration = computed(() =>
@@ -63,8 +51,47 @@ const totalDuration = computed(() =>
 const isRunning = computed(() => props.streaming || runningCount.value > 0)
 const hasError = computed(() => errorCount.value > 0)
 
+// ===== 视图模式：决定过程块的展开策略 =====
+const isVerbose = computed(() => props.viewMode === 'verbose')
+const isSummary = computed(() => props.viewMode === 'summary')
+
+// 未手动干预时的目标展开状态
+//   verbose：常展开（完整展示工具调用过程）
+//   normal ：执行中展开、完成后折叠（原有行为）
+//   summary：默认收起；工具报错时展开，避免失败被一行摘要掩盖
+function autoExpanded() {
+  if (isVerbose.value) return true
+  if (isSummary.value) return hasError.value
+  return props.streaming
+}
+
+// 用户是否手动切换过折叠状态（手动操作后不再自动跟随）
+const userToggled = ref(false)
+const expanded = ref(autoExpanded())
+
+watch([() => props.streaming, () => props.viewMode, hasError], () => {
+  if (!userToggled.value) {
+    expanded.value = autoExpanded()
+  }
+})
+
+// summary 模式下没有可展开的内容，标题行不提供展开操作，
+// 避免出现「点了没反应」的死按钮；例外是工具报错时必须能展开看细节
+const headerInteractive = computed(() => !isSummary.value || hasError.value)
+const bodyVisible = computed(() => headerInteractive.value && expanded.value)
+
+function toggle() {
+  if (!headerInteractive.value) return
+  userToggled.value = true
+  expanded.value = !expanded.value
+}
+
 // 折叠态摘要
 const summary = computed(() => {
+  // 有人在等用户授权：这是最需要被看见的状态，优先展示
+  if (pendingCount.value > 0) {
+    return `等待授权确认（${pendingCount.value} 个操作）`
+  }
   if (isRunning.value) {
     return runningCount.value > 0
       ? `正在执行 ${runningCount.value} 个工具…`
@@ -102,7 +129,8 @@ const hiddenLabelCount = computed(() => {
     <button
       type="button"
       class="process-header"
-      :aria-expanded="expanded"
+      :aria-expanded="bodyVisible"
+      :disabled="!headerInteractive"
       @click="toggle"
     >
       <span class="process-status-icon">
@@ -119,21 +147,22 @@ const hiddenLabelCount = computed(() => {
 
       <span class="process-summary">{{ summary }}</span>
 
-      <!-- 工具标签 -->
-      <span v-if="!isRunning && labels.length" class="process-labels">
+      <!-- 工具标签（summary 模式只留一行摘要，不出标签） -->
+      <span v-if="!isRunning && !isSummary && labels.length" class="process-labels">
         <span v-for="(label, i) in labels" :key="i" class="process-label">{{ label }}</span>
         <span v-if="hiddenLabelCount > 0" class="process-label process-label-more">
           +{{ hiddenLabelCount }}
         </span>
       </span>
 
-      <span v-if="!isRunning && totalDuration > 0" class="process-duration">
+      <span v-if="!isRunning && !isSummary && totalDuration > 0" class="process-duration">
         {{ totalDuration >= 1 ? totalDuration.toFixed(1) + 's' : Math.round(totalDuration * 1000) + 'ms' }}
       </span>
 
       <svg
+        v-if="headerInteractive"
         class="chevron"
-        :class="{ open: expanded }"
+        :class="{ open: bodyVisible }"
         width="12"
         height="12"
         viewBox="0 0 12 12"
@@ -143,8 +172,9 @@ const hiddenLabelCount = computed(() => {
       </svg>
     </button>
 
-    <!-- 展开内容（grid 高度动画） -->
-    <div class="process-body" :class="{ open: expanded }">
+    <!-- 展开内容（grid 高度动画）
+         summary 模式不渲染细节 DOM（只留一行摘要），工具报错时例外 -->
+    <div v-if="!isSummary || hasError" class="process-body" :class="{ open: bodyVisible }">
       <div class="process-body-inner">
         <div
           v-for="(tc, i) in toolCalls"
@@ -152,7 +182,11 @@ const hiddenLabelCount = computed(() => {
           class="process-step"
         >
           <span class="step-index">{{ i + 1 }}</span>
-          <ToolCallCard :tool-call="tc" class="step-card" />
+          <ToolCallCard
+            :tool-call="tc"
+            :default-expanded="isVerbose"
+            class="step-card"
+          />
         </div>
       </div>
     </div>
@@ -194,9 +228,14 @@ const hiddenLabelCount = computed(() => {
   font-size: $font-size-xs;
   color: $color-text-secondary;
 
-  &:hover {
+  &:hover:not(:disabled) {
     background-color: rgba(255, 255, 255, 0.03);
     color: $color-text-primary;
+  }
+
+  // summary 模式下标题行只是摘要展示，不可展开
+  &:disabled {
+    cursor: default;
   }
 
   &:focus-visible {

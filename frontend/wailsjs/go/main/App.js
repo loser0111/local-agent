@@ -6,6 +6,10 @@ export function AddModel(arg1) {
   return window['go']['main']['App']['AddModel'](arg1);
 }
 
+export function AddPermissionRule(arg1, arg2, arg3, arg4) {
+  return window['go']['main']['App']['AddPermissionRule'](arg1, arg2, arg3, arg4);
+}
+
 export function AppendConversation(arg1, arg2) {
   return window['go']['main']['App']['AppendConversation'](arg1, arg2);
 }
@@ -14,8 +18,32 @@ export function AppendMessage(arg1, arg2) {
   return window['go']['main']['App']['AppendMessage'](arg1, arg2);
 }
 
-export function Chat(arg1, arg2) {
-  return window['go']['main']['App']['Chat'](arg1, arg2);
+export function CancelAskUser(arg1) {
+  return window['go']['main']['App']['CancelAskUser'](arg1);
+}
+
+export function CancelPermissionWait(arg1) {
+  return window['go']['main']['App']['CancelPermissionWait'](arg1);
+}
+
+export function CancelPlan(arg1) {
+  return window['go']['main']['App']['CancelPlan'](arg1);
+}
+
+export function Chat(arg1, arg2, arg3, arg4) {
+  return window['go']['main']['App']['Chat'](arg1, arg2, arg3, arg4);
+}
+
+export function ChatPlan(arg1, arg2, arg3) {
+  return window['go']['main']['App']['ChatPlan'](arg1, arg2, arg3);
+}
+
+export function ClearPermissionGrants(arg1) {
+  return window['go']['main']['App']['ClearPermissionGrants'](arg1);
+}
+
+export function ClearToolFileChanges(arg1) {
+  return window['go']['main']['App']['ClearToolFileChanges'](arg1);
 }
 
 export function CreateSession(arg1) {
@@ -30,6 +58,26 @@ export function DeleteSession(arg1) {
   return window['go']['main']['App']['DeleteSession'](arg1);
 }
 
+export function DeleteSkill(arg1) {
+  return window['go']['main']['App']['DeleteSkill'](arg1);
+}
+
+export function DeleteTool(arg1) {
+  return window['go']['main']['App']['DeleteTool'](arg1);
+}
+
+export function ExecutePlan(arg1, arg2) {
+  return window['go']['main']['App']['ExecutePlan'](arg1, arg2);
+}
+
+export function ExportMCPServers(arg1) {
+  return window['go']['main']['App']['ExportMCPServers'](arg1);
+}
+
+export function GetContextStat(arg1) {
+  return window['go']['main']['App']['GetContextStat'](arg1);
+}
+
 export function GetDiff(arg1) {
   return window['go']['main']['App']['GetDiff'](arg1);
 }
@@ -38,8 +86,16 @@ export function GetDiffTurns(arg1) {
   return window['go']['main']['App']['GetDiffTurns'](arg1);
 }
 
+export function GetLastLLMRequest(arg1) {
+  return window['go']['main']['App']['GetLastLLMRequest'](arg1);
+}
+
 export function GetModel(arg1) {
   return window['go']['main']['App']['GetModel'](arg1);
+}
+
+export function GetModelFull(arg1) {
+  return window['go']['main']['App']['GetModelFull'](arg1);
 }
 
 export function GetModelNames() {
@@ -50,18 +106,174 @@ export function GetModels() {
   return window['go']['main']['App']['GetModels']();
 }
 
+export function GetPendingAsk(arg1) {
+  return window['go']['main']['App']['GetPendingAsk'](arg1);
+}
+
+export function GetPendingInteraction(arg1) {
+  return window['go']['main']['App']['GetPendingInteraction'](arg1);
+}
+
+export function GetPermissionAudit(arg1) {
+  return window['go']['main']['App']['GetPermissionAudit'](arg1);
+}
+
+export function GetPermissionState(arg1) {
+  return window['go']['main']['App']['GetPermissionState'](arg1);
+}
+
 export function GetSession(arg1) {
   return window['go']['main']['App']['GetSession'](arg1);
+}
+
+export function GetSessionPlan(arg1) {
+  return window['go']['main']['App']['GetSessionPlan'](arg1);
+}
+
+export function GetSkill(arg1) {
+  return window['go']['main']['App']['GetSkill'](arg1);
+}
+
+export function GetToolFileChanges(arg1) {
+  return window['go']['main']['App']['GetToolFileChanges'](arg1);
 }
 
 export function Greet(arg1) {
   return window['go']['main']['App']['Greet'](arg1);
 }
 
+export function ImportMCPServers(arg1) {
+  return window['go']['main']['App']['ImportMCPServers'](arg1);
+}
+
+export function InstallSkillFromFolder(arg1) {
+  return window['go']['main']['App']['InstallSkillFromFolder'](arg1);
+}
+
+export function InstallSkillFromGit(arg1, arg2, arg3) {
+  return window['go']['main']['App']['InstallSkillFromGit'](arg1, arg2, arg3);
+}
+
+export function InstallSkillFromZip(arg1) {
+  return window['go']['main']['App']['InstallSkillFromZip'](arg1);
+}
+
+export function ListCheckpoints(arg1) {
+  return window['go']['main']['App']['ListCheckpoints'](arg1);
+}
+
+export function ListPlans(arg1) {
+  return window['go']['main']['App']['ListPlans'](arg1);
+}
+
 export function ListSessions() {
   return window['go']['main']['App']['ListSessions']();
 }
 
+export function ListSkillResources(arg1) {
+  return window['go']['main']['App']['ListSkillResources'](arg1);
+}
+
+export function ListSkills() {
+  return window['go']['main']['App']['ListSkills']();
+}
+
+export function ListTools() {
+  return window['go']['main']['App']['ListTools']();
+}
+
+export function PickDirectory() {
+  return window['go']['main']['App']['PickDirectory']();
+}
+
+export function PickSkillFolder() {
+  return window['go']['main']['App']['PickSkillFolder']();
+}
+
+export function PickSkillZip() {
+  return window['go']['main']['App']['PickSkillZip']();
+}
+
+export function RefreshSkills() {
+  return window['go']['main']['App']['RefreshSkills']();
+}
+
+export function RemovePermissionRule(arg1, arg2, arg3, arg4) {
+  return window['go']['main']['App']['RemovePermissionRule'](arg1, arg2, arg3, arg4);
+}
+
+export function ReopenPlan(arg1) {
+  return window['go']['main']['App']['ReopenPlan'](arg1);
+}
+
+export function ResolveAskUser(arg1) {
+  return window['go']['main']['App']['ResolveAskUser'](arg1);
+}
+
+export function ResolvePermission(arg1, arg2, arg3, arg4, arg5) {
+  return window['go']['main']['App']['ResolvePermission'](arg1, arg2, arg3, arg4, arg5);
+}
+
+export function SavePlan(arg1) {
+  return window['go']['main']['App']['SavePlan'](arg1);
+}
+
+export function SaveSkill(arg1, arg2) {
+  return window['go']['main']['App']['SaveSkill'](arg1, arg2);
+}
+
+export function SaveTool(arg1) {
+  return window['go']['main']['App']['SaveTool'](arg1);
+}
+
+export function SetExposure(arg1, arg2) {
+  return window['go']['main']['App']['SetExposure'](arg1, arg2);
+}
+
+export function SetSessionPermissionMode(arg1, arg2) {
+  return window['go']['main']['App']['SetSessionPermissionMode'](arg1, arg2);
+}
+
+export function SetSubToolEnabled(arg1, arg2, arg3) {
+  return window['go']['main']['App']['SetSubToolEnabled'](arg1, arg2, arg3);
+}
+
+export function SkillsDir() {
+  return window['go']['main']['App']['SkillsDir']();
+}
+
+export function StopChat(arg1, arg2) {
+  return window['go']['main']['App']['StopChat'](arg1, arg2);
+}
+
+export function TestModelConnection(arg1) {
+  return window['go']['main']['App']['TestModelConnection'](arg1);
+}
+
+export function TestToolConnection(arg1) {
+  return window['go']['main']['App']['TestToolConnection'](arg1);
+}
+
+export function ToggleSkill(arg1, arg2) {
+  return window['go']['main']['App']['ToggleSkill'](arg1, arg2);
+}
+
+export function ToggleTool(arg1, arg2) {
+  return window['go']['main']['App']['ToggleTool'](arg1, arg2);
+}
+
+export function UndoDiffTurn(arg1, arg2, arg3) {
+  return window['go']['main']['App']['UndoDiffTurn'](arg1, arg2, arg3);
+}
+
+export function UpdateModel(arg1, arg2) {
+  return window['go']['main']['App']['UpdateModel'](arg1, arg2);
+}
+
 export function UpdateSession(arg1, arg2) {
   return window['go']['main']['App']['UpdateSession'](arg1, arg2);
+}
+
+export function UpdateSkill(arg1) {
+  return window['go']['main']['App']['UpdateSkill'](arg1);
 }

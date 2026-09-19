@@ -4,11 +4,25 @@ import {main} from '../models';
 
 export function AddModel(arg1:main.Model):Promise<void>;
 
+export function AddPermissionRule(arg1:string,arg2:string,arg3:string,arg4:string):Promise<void>;
+
 export function AppendConversation(arg1:string,arg2:main.Conversation):Promise<void>;
 
 export function AppendMessage(arg1:string,arg2:main.Message):Promise<main.Message>;
 
-export function Chat(arg1:string,arg2:string):Promise<main.ChatResult>;
+export function CancelAskUser(arg1:string):Promise<void>;
+
+export function CancelPermissionWait(arg1:string):Promise<void>;
+
+export function CancelPlan(arg1:string):Promise<void>;
+
+export function Chat(arg1:string,arg2:string,arg3:boolean,arg4:boolean):Promise<main.ChatResult>;
+
+export function ChatPlan(arg1:string,arg2:string,arg3:boolean):Promise<main.ChatResult>;
+
+export function ClearPermissionGrants(arg1:string):Promise<void>;
+
+export function ClearToolFileChanges(arg1:string):Promise<void>;
 
 export function CreateSession(arg1:main.SessionConfig):Promise<main.Session>;
 
@@ -16,20 +30,112 @@ export function DeleteModel(arg1:string):Promise<void>;
 
 export function DeleteSession(arg1:string):Promise<void>;
 
+export function DeleteSkill(arg1:string):Promise<void>;
+
+export function DeleteTool(arg1:string):Promise<void>;
+
+export function ExecutePlan(arg1:string,arg2:boolean):Promise<main.ChatResult>;
+
+export function ExportMCPServers(arg1:Array<string>):Promise<string>;
+
+export function GetContextStat(arg1:string):Promise<main.ContextStat>;
+
 export function GetDiff(arg1:string):Promise<Array<main.DiffFile>>;
 
 export function GetDiffTurns(arg1:string):Promise<Array<main.DiffTurn>>;
 
+export function GetLastLLMRequest(arg1:string):Promise<main.LLMRequestSnapshot>;
+
 export function GetModel(arg1:string):Promise<main.Model>;
+
+export function GetModelFull(arg1:string):Promise<main.Model>;
 
 export function GetModelNames():Promise<Array<string>>;
 
 export function GetModels():Promise<Array<main.Model>>;
 
+export function GetPendingAsk(arg1:string):Promise<main.AskRequest>;
+
+export function GetPendingInteraction(arg1:string):Promise<main.PendingInteraction>;
+
+export function GetPermissionAudit(arg1:string):Promise<Array<main.AuditEntry>>;
+
+export function GetPermissionState(arg1:string):Promise<main.PermissionState>;
+
 export function GetSession(arg1:string):Promise<main.Session>;
+
+export function GetSessionPlan(arg1:string):Promise<main.Plan>;
+
+export function GetSkill(arg1:string):Promise<main.SkillDetail>;
+
+export function GetToolFileChanges(arg1:string):Promise<Array<main.ToolFileChange>>;
 
 export function Greet(arg1:string):Promise<string>;
 
+export function ImportMCPServers(arg1:string):Promise<main.MCPImportResult>;
+
+export function InstallSkillFromFolder(arg1:string):Promise<Array<main.SkillInstallResult>>;
+
+export function InstallSkillFromGit(arg1:string,arg2:string,arg3:string):Promise<Array<main.SkillInstallResult>>;
+
+export function InstallSkillFromZip(arg1:string):Promise<Array<main.SkillInstallResult>>;
+
+export function ListCheckpoints(arg1:string):Promise<Array<main.CheckpointInfo>>;
+
+export function ListPlans(arg1:string):Promise<Array<main.Plan>>;
+
 export function ListSessions():Promise<Array<main.Session>>;
 
+export function ListSkillResources(arg1:string):Promise<Array<main.SkillResource>>;
+
+export function ListSkills():Promise<Array<main.SkillMeta>>;
+
+export function ListTools():Promise<Array<main.ToolInfo>>;
+
+export function PickDirectory():Promise<string>;
+
+export function PickSkillFolder():Promise<string>;
+
+export function PickSkillZip():Promise<string>;
+
+export function RefreshSkills():Promise<Array<main.SkillMeta>>;
+
+export function RemovePermissionRule(arg1:string,arg2:string,arg3:string,arg4:string):Promise<void>;
+
+export function ReopenPlan(arg1:string):Promise<main.Plan>;
+
+export function ResolveAskUser(arg1:main.AskAnswer):Promise<void>;
+
+export function ResolvePermission(arg1:string,arg2:string,arg3:string,arg4:string,arg5:string):Promise<void>;
+
+export function SavePlan(arg1:main.Plan):Promise<void>;
+
+export function SaveSkill(arg1:string,arg2:main.SkillDraft):Promise<void>;
+
+export function SaveTool(arg1:main.ToolSource):Promise<main.ToolSource>;
+
+export function SetExposure(arg1:string,arg2:string):Promise<void>;
+
+export function SetSessionPermissionMode(arg1:string,arg2:string):Promise<main.Session>;
+
+export function SetSubToolEnabled(arg1:string,arg2:string,arg3:boolean):Promise<void>;
+
+export function SkillsDir():Promise<string>;
+
+export function StopChat(arg1:string,arg2:boolean):Promise<boolean>;
+
+export function TestModelConnection(arg1:main.Model):Promise<void>;
+
+export function TestToolConnection(arg1:main.ToolSource):Promise<Array<main.MCPToolMeta>>;
+
+export function ToggleSkill(arg1:string,arg2:boolean):Promise<void>;
+
+export function ToggleTool(arg1:string,arg2:boolean):Promise<void>;
+
+export function UndoDiffTurn(arg1:string,arg2:number,arg3:boolean):Promise<main.UndoResult>;
+
+export function UpdateModel(arg1:string,arg2:main.Model):Promise<void>;
+
 export function UpdateSession(arg1:string,arg2:main.SessionPatch):Promise<main.Session>;
+
+export function UpdateSkill(arg1:string):Promise<main.SkillInstallResult>;

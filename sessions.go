@@ -23,6 +23,9 @@ type ToolCall struct {
 	Status   string                 `json:"status"`
 	Duration float64                `json:"duration,omitempty"`
 	Result   string                 `json:"result,omitempty"`
+	// Files 本次调用改动的文件（相对工作区路径）。仅在文件工具产生写入时有值，
+	// 让差异可以归因到具体是哪次工具调用改的。
+	Files []string `json:"files,omitempty"`
 }
 
 // Message 会话中的一条聊天消息
@@ -45,29 +48,73 @@ type Conversation struct {
 	Error     string `json:"error,omitempty"`
 }
 
-// Session 一个完整会话，每个会话持久化为一个 JSON 文件
+// ===== 视图模式（会话级）=====
+//
+// 控制聊天流里「工具调用过程块」的展示粒度，取自 Claude Code 桌面端的视图模式设计：
+//   - verbose：完整展示工具调用过程（过程块常展开，每张工具卡片默认展开参数与输出）
+//   - normal ：平衡展示（默认）：执行中展开、完成后折叠，可手动展开
+//   - summary：仅保留一行摘要，隐藏工具调用细节（工具报错时强制展开，避免漏掉失败）
+const (
+	ViewModeVerbose = "verbose"
+	ViewModeNormal  = "normal"
+	ViewModeSummary = "summary"
+)
+
+// DefaultViewMode 新建会话的默认视图模式
+const DefaultViewMode = ViewModeNormal
+
+// normalizeViewMode 把空值或非法值兜底为默认模式。
+// 旧会话文件没有 viewMode 字段（反序列化为空串），走这里补齐为 normal。
+func normalizeViewMode(mode string) string {
+	switch mode {
+	case ViewModeVerbose, ViewModeNormal, ViewModeSummary:
+		return mode
+	default:
+		return DefaultViewMode
+	}
+}
+
+// Session 一个完整会话，每个会话持久化为一个 JSON 文件。
+//
+// DiffBaseline / DiffTouched 是会话级 diff 状态：基线 commit 与本会话触碰过的文件
+// （仓库相对路径）。落盘是为了重启后仍能算出「本会话改了哪些文件」，
+// 而不是把整个工作区的改动都算进来（详见 DiffService 的注释）。
 type Session struct {
 	ID             string          `json:"id"`
 	Title          string          `json:"title"`
 	Project        string          `json:"project"`
 	Model          string          `json:"model"`
 	PermissionMode string          `json:"permissionMode"`
+	ViewMode       string          `json:"viewMode"` // 视图模式：控制工具调用过程的展示粒度
 	Environment    string          `json:"environment"`
 	Status         string          `json:"status"` // active / completed / archived
 	StartAt        int64           `json:"startAt"`
 	EndAt          int64           `json:"endAt"`
 	Messages       []Message       `json:"messages"`
 	Conversations  []*Conversation `json:"conversations"`
-	Diffs          []DiffTurn      `json:"diffs,omitempty"` // 每轮对话产生的文件差异
+	Diffs          []DiffTurn      `json:"diffs,omitempty"`         // 每轮对话产生的文件差异
+	DiffBaseline   string          `json:"diffBaseline,omitempty"`
+	DiffTouched    []string        `json:"diffTouched,omitempty"`
+	EnabledTools   []string        `json:"enabledTools,omitempty"`  // 本会话可用的工具 ID 白名单（空=全部已启用工具）
+	EnabledSkills  []string        `json:"enabledSkills,omitempty"` // 本会话可用的技能 ID 白名单（空=全部已启用技能）
+
+	// 上下文压缩状态（P1-B）。摘要只在**构建请求时**生效，会话里的 Messages 一字不动——
+	// 因此压缩是可逆的：清空这三个字段就回到全量上下文。
+	ContextSummary     string `json:"contextSummary,omitempty"`     // 被摘要覆盖那部分的摘要正文
+	ContextCoveredUpTo int    `json:"contextCoveredUpTo,omitempty"` // 摘要覆盖到第几条消息（不含）
+	ContextSummaryAt   int64  `json:"contextSummaryAt,omitempty"`   // 摘要生成时间（Unix 毫秒）
 }
 
 // SessionConfig 创建会话时的配置
 type SessionConfig struct {
-	Title          string `json:"title"`
-	Project        string `json:"project"`
-	Model          string `json:"model"`
-	PermissionMode string `json:"permissionMode"`
-	Environment    string `json:"environment"`
+	Title          string   `json:"title"`
+	Project        string   `json:"project"`
+	Model          string   `json:"model"`
+	PermissionMode string   `json:"permissionMode"`
+	ViewMode       string   `json:"viewMode"` // 视图模式：控制工具调用过程的展示粒度
+	Environment    string   `json:"environment"`
+	EnabledTools   []string `json:"enabledTools"`  // 本会话可用的工具 ID 白名单（空=全部已启用工具）
+	EnabledSkills  []string `json:"enabledSkills"` // 本会话可用的技能 ID 白名单（空=全部已启用技能）
 }
 
 // SessionPatch 会话部分字段更新（指针为 nil 表示不更新）
@@ -75,6 +122,7 @@ type SessionPatch struct {
 	Title          *string `json:"title,omitempty"`
 	Model          *string `json:"model,omitempty"`
 	PermissionMode *string `json:"permissionMode,omitempty"`
+	ViewMode       *string `json:"viewMode,omitempty"`
 	Status         *string `json:"status,omitempty"`
 	Project        *string `json:"project,omitempty"`
 }
@@ -107,19 +155,22 @@ func (s *SessionStore) CreateSession(config SessionConfig) (*Session, error) {
 		Project:        config.Project,
 		Model:          config.Model,
 		PermissionMode: config.PermissionMode,
+		ViewMode:       config.ViewMode,
 		Environment:    config.Environment,
 		Status:         "active",
 		StartAt:        now,
 		EndAt:          now,
 		Messages:       []Message{},
 		Conversations:  []*Conversation{},
+		EnabledTools:   config.EnabledTools,
+		EnabledSkills:  config.EnabledSkills,
 	}
 	if session.Title == "" {
 		session.Title = "新会话"
 	}
-	if session.PermissionMode == "" {
-		session.PermissionMode = "manual"
-	}
+	// 权限模式：空值与非法值一律归一化到最严格的 manual（fail closed）
+	session.PermissionMode = string(NormalizeMode(session.PermissionMode))
+	session.ViewMode = normalizeViewMode(session.ViewMode)
 	if session.Environment == "" {
 		session.Environment = "local"
 	}
@@ -155,6 +206,10 @@ func (s *SessionStore) loadSession(id string) (*Session, error) {
 	if session.Conversations == nil {
 		session.Conversations = []*Conversation{}
 	}
+	// 旧会话文件没有 viewMode 字段，统一兜底，避免前端拿到空值
+	session.ViewMode = normalizeViewMode(session.ViewMode)
+	// 权限模式同样兜底：旧数据或手改过的文件可能是空值/脏值
+	session.PermissionMode = string(NormalizeMode(session.PermissionMode))
 	return &session, nil
 }
 
@@ -260,8 +315,22 @@ func (s *SessionStore) AppendConversation(id string, conv *Conversation) error {
 	return s.saveSession(session)
 }
 
-// AppendDiff 追加一轮差异并落盘，轮次号自动递增，返回本轮轮次号
-func (s *SessionStore) AppendDiff(id string, turn DiffTurn) (int, error) {
+// AppendDiff 追加一轮差异并落盘，轮次号自动递增，返回本轮轮次号。
+// 同时把会话级 diff 状态（基线 + 触碰过的路径）一并落盘——与 diff 同一次写入，
+// 避免为了同步状态再写一遍整个会话文件。
+// nextDiffTurn 下一轮的轮次号。
+//
+// 这个规则必须只有一处：AppendDiff 用它给 DiffTurn 编号，chat.go 取 checkpoint 时
+// 也用它——两处若各写一份 `len(Diffs)+1`，一旦有一边改了就会让 checkpoint 的 ref
+// 编号与 DiffTurn.Turn 错位，表现为"某几轮的回退按钮点了没反应"。
+func nextDiffTurn(session *Session) int {
+	if session == nil {
+		return 1
+	}
+	return len(session.Diffs) + 1
+}
+
+func (s *SessionStore) AppendDiff(id string, turn DiffTurn, baseline string, touched []string) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -269,15 +338,62 @@ func (s *SessionStore) AppendDiff(id string, turn DiffTurn) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	turn.Turn = len(session.Diffs) + 1
+	turn.Turn = nextDiffTurn(session)
 	if turn.Label == "" {
 		turn.Label = fmt.Sprintf("第 %d 轮", turn.Turn)
 	}
 	session.Diffs = append(session.Diffs, turn)
+	if baseline != "" {
+		session.DiffBaseline = baseline
+	}
+	if len(touched) > 0 {
+		session.DiffTouched = touched
+	}
 	if err := s.saveSession(session); err != nil {
 		return 0, err
 	}
 	return turn.Turn, nil
+}
+
+// SetContextSummary 写入上下文摘要（P1-B）。
+// coveredUpTo 之前（不含）的消息在构建请求时会被摘要替换；会话里的原文完整保留。
+func (s *SessionStore) SetContextSummary(id, summary string, coveredUpTo int, at int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	session, err := s.loadSession(id)
+	if err != nil {
+		return err
+	}
+	session.ContextSummary = summary
+	session.ContextCoveredUpTo = coveredUpTo
+	session.ContextSummaryAt = at
+	return s.saveSession(session)
+}
+
+// ClearContextSummary 清空摘要，让会话回到全量上下文。
+// 这是"压缩可逆"的落地点：出了任何问题，调它就能回到压缩前的状态。
+func (s *SessionStore) ClearContextSummary(id string) error {
+	return s.SetContextSummary(id, "", 0, 0)
+}
+
+// MarkDiffUndone 标记某轮已被回退。
+// 保留 DiffTurn 记录本身而不是删掉：用户可能回退后重新执行，历史应当留痕。
+func (s *SessionStore) MarkDiffUndone(id string, turn int, undone bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	session, err := s.loadSession(id)
+	if err != nil {
+		return err
+	}
+	for i := range session.Diffs {
+		if session.Diffs[i].Turn == turn {
+			session.Diffs[i].Undone = undone
+			return s.saveSession(session)
+		}
+	}
+	return fmt.Errorf("轮次不存在: %d", turn)
 }
 
 // UpdateSession 更新会话元数据
@@ -296,7 +412,11 @@ func (s *SessionStore) UpdateSession(id string, patch SessionPatch) (*Session, e
 		session.Model = *patch.Model
 	}
 	if patch.PermissionMode != nil {
-		session.PermissionMode = *patch.PermissionMode
+		// 归一化而非报错：前端下拉与旧数据都可能带上不可识别的值，回退到最严格模式
+		session.PermissionMode = string(NormalizeMode(*patch.PermissionMode))
+	}
+	if patch.ViewMode != nil {
+		session.ViewMode = normalizeViewMode(*patch.ViewMode)
 	}
 	if patch.Status != nil {
 		session.Status = *patch.Status
@@ -351,4 +471,68 @@ func truncateTitle(s string, max int) string {
 		return s
 	}
 	return string(runes[:max]) + "..."
+}
+
+// CountSessionsByModel 返回引用指定模型名称的会话数量
+func (s *SessionStore) CountSessionsByModel(modelName string) (int, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	entries, err := os.ReadDir(s.dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("读取会话目录失败: %w", err)
+	}
+
+	count := 0
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+			continue
+		}
+		id := strings.TrimSuffix(entry.Name(), ".json")
+		session, err := s.loadSession(id)
+		if err != nil {
+			continue
+		}
+		if session.Model == modelName {
+			count++
+		}
+	}
+	return count, nil
+}
+
+// RenameModelReference 将所有会话中引用 oldName 的 model 字段更新为 newName
+func (s *SessionStore) RenameModelReference(oldName, newName string) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	entries, err := os.ReadDir(s.dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("读取会话目录失败: %w", err)
+	}
+
+	updated := 0
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+			continue
+		}
+		id := strings.TrimSuffix(entry.Name(), ".json")
+		session, err := s.loadSession(id)
+		if err != nil {
+			continue
+		}
+		if session.Model == oldName {
+			session.Model = newName
+			if err := s.saveSession(session); err != nil {
+				return updated, err
+			}
+			updated++
+		}
+	}
+	return updated, nil
 }
