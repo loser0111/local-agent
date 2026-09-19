@@ -47,6 +47,11 @@ type agentRun struct {
 	// 子代理应当关掉它：多条运行同时去改同一份会话的摘要字段会互相打架。
 	Compactor func(ctx context.Context, session *Session, model *Model) (*CompactOutcome, error)
 
+	// TokenCalib 估算校准系数（真实 usage / 字符估算，按模型观测）。为 nil 时一律按 1.0，
+	// 即退化成纯字符估算——子代理的运行刻意不带它：校准是"这个模型这个分词器"的属性，
+	// 由主会话的观测流维护一份就够了，多条运行各自写同一份文件只会互相覆盖。
+	TokenCalib *TokenCalibStore
+
 	Recorder runRecorder
 }
 
@@ -147,6 +152,7 @@ func (a *App) newMainAgentRun(run *runControl, session *Session, dir, systemProm
 		Changes:      a.fileChanges,
 		ReqLog:       a.reqLog,
 		Compactor:    a.compactSession,
+		TokenCalib:   a.tokenCalib,
 		Recorder:     &appRecorder{app: a},
 	}
 }

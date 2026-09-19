@@ -332,6 +332,21 @@ async function sendMessage() {
           result: tc.result,
         })
       },
+      onContextCompacted: (ev) => {
+        // 上下文被自动压缩：用量会骤降，不解释一句用户会以为对话被截断了。
+        // 走事件而不是落库消息——它是解释，不是对话内容（/compact 才是用户主动、落库的那条）。
+        updateContextStat(ev?.context)
+        const c = ev?.compact || {}
+        const pct = ev?.context?.windowTokens
+          ? Math.round((ev.context.usedTokens / ev.context.windowTokens) * 100)
+          : null
+        ui.notify(
+          `上下文已自动压缩：前 ${c.coveredMsgs ?? 0} 条消息合并为摘要` +
+            (pct === null ? '' : `，用量降至 ${pct}%`) +
+            '，原文仍完整保留（输入 /context-stat 查看明细）',
+          'info'
+        )
+      },
       // 被用户停止：立刻收尾流式气泡，否则它会一直停在"正在输入"
       onCancelled: () => {
         if (streamingMessageId.value) {
@@ -674,6 +689,9 @@ function openDiff() {
           @click="requestCompact"
         >
           上下文 {{ contextPercent }}%
+          <!-- 压缩标记：用量骤降时，用户第一眼要能看出这是摘要压缩造成的，
+               而不是对话被截断了。常驻显示——它会一直影响后续每一轮。 -->
+          <span v-if="contextStat.coveredMsgs > 0" class="ctx-badge">已压缩</span>
         </button>
         <button
           v-if="chatStore.isGenerating"
@@ -861,6 +879,17 @@ function openDiff() {
   // 上下文用量指示：点击即压缩。等宽数字避免百分比变化时按钮宽度抖动。
   &.ctx-btn {
     font-variant-numeric: tabular-nums;
+
+    // "已压缩"标记：常驻小徽标，说明当前发出去的上下文里有摘要替换
+    .ctx-badge {
+      margin-left: 4px;
+      padding: 0 4px;
+      border-radius: 3px;
+      font-size: 10px;
+      line-height: 15px;
+      color: var(--color-text-muted);
+      background-color: var(--color-bg-tertiary);
+    }
 
     &.warn {
       color: $color-yellow;

@@ -9,6 +9,8 @@ import {
   Chat,
   StopChat,
   GetContextStat,
+  GetContextPrefs,
+  SetContextKeepRecentMsgs,
   GetLastLLMRequest,
   ListCheckpoints,
   UndoDiffTurn,
@@ -214,6 +216,7 @@ export async function chat(
     onToolCallEnd,
     onPlanUpdate,
     onCancelled,
+    onContextCompacted,
   } = {}
 ) {
   if (isWails()) {
@@ -232,6 +235,11 @@ export async function chat(
           break
         case 'plan_update':
           onPlanUpdate?.(eventData.plan)
+          break
+        // 自动摘要压缩刚生效：用量会立刻下降。这是设计内行为，但用户只看到数字掉了一半，
+// 不解释一句就会以为对话被截断了。
+        case 'context_compacted':
+          onContextCompacted?.(eventData)
           break
         // 被用户停止（软取消或硬取消）：立即通知调用方收尾流式气泡，
         // 否则它会一直停在"正在输入"的状态
@@ -447,6 +455,35 @@ export async function stopChat(sessionId, hard = false) {
  * @param {string} sessionId
  * @returns {Promise<import('@/types').ContextStat|null>} 会话不存在时返回 null
  */
+/**
+ * 查询上下文压缩偏好（压缩时保留最近多少条原文）。
+ *
+ * 它是**后端**配置（~/.local-agent/context.json），不是前端 localStorage：
+ * 压缩发生在后端，前端再存一份只会两边不一致。
+ *
+ * @returns {Promise<{keepRecentMsgs:number}|null>} 非 Wails 环境返回 null
+ */
+export async function getContextPrefs() {
+  if (!isWails()) return null
+  try {
+    return await GetContextPrefs()
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 更新"压缩时保留最近多少条原文"。
+ * 合法区间由后端校验（4–500），越界会抛错而不是被静默改掉。
+ *
+ * @param {number} keepRecentMsgs
+ * @returns {Promise<{keepRecentMsgs:number}>} 更新后的完整偏好
+ */
+export async function setContextKeepRecentMsgs(keepRecentMsgs) {
+  if (!isWails()) return { keepRecentMsgs }
+  return await SetContextKeepRecentMsgs(keepRecentMsgs)
+}
+
 export async function getContextStat(sessionId) {
   if (!isWails()) return null
   try {

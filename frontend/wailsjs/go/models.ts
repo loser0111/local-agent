@@ -194,6 +194,9 @@ export namespace main {
 	    coveredMsgs: number;
 	    summaryChars: number;
 	    summaryAt?: number;
+	    hasAnchor: boolean;
+	    savedTokens: number;
+	    calibRatio: number;
 	
 	    static createFrom(source: any = {}) {
 	        return new ContextStat(source);
@@ -209,6 +212,9 @@ export namespace main {
 	        this.coveredMsgs = source["coveredMsgs"];
 	        this.summaryChars = source["summaryChars"];
 	        this.summaryAt = source["summaryAt"];
+	        this.hasAnchor = source["hasAnchor"];
+	        this.savedTokens = source["savedTokens"];
+	        this.calibRatio = source["calibRatio"];
 	    }
 	}
 	export class PlanStep {
@@ -501,6 +507,18 @@ export namespace main {
 	        this.files = source["files"];
 	        this.conflicts = source["conflicts"];
 	        this.undone = source["undone"];
+	    }
+	}
+	export class ContextPrefs {
+	    keepRecentMsgs: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new ContextPrefs(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.keepRecentMsgs = source["keepRecentMsgs"];
 	    }
 	}
 	
