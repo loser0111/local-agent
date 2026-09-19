@@ -46,8 +46,16 @@ export function ClearToolFileChanges(arg1) {
   return window['go']['main']['App']['ClearToolFileChanges'](arg1);
 }
 
+export function CompleteTask(arg1) {
+  return window['go']['main']['App']['CompleteTask'](arg1);
+}
+
 export function CreateSession(arg1) {
   return window['go']['main']['App']['CreateSession'](arg1);
+}
+
+export function CreateTask(arg1) {
+  return window['go']['main']['App']['CreateTask'](arg1);
 }
 
 export function DeleteModel(arg1) {
@@ -60,6 +68,10 @@ export function DeleteSession(arg1) {
 
 export function DeleteSkill(arg1) {
   return window['go']['main']['App']['DeleteSkill'](arg1);
+}
+
+export function DeleteTask(arg1, arg2) {
+  return window['go']['main']['App']['DeleteTask'](arg1, arg2);
 }
 
 export function DeleteTool(arg1) {
@@ -134,6 +146,18 @@ export function GetSkill(arg1) {
   return window['go']['main']['App']['GetSkill'](arg1);
 }
 
+export function GetSubagentMessages(arg1) {
+  return window['go']['main']['App']['GetSubagentMessages'](arg1);
+}
+
+export function GetTask(arg1) {
+  return window['go']['main']['App']['GetTask'](arg1);
+}
+
+export function GetTaskSettings() {
+  return window['go']['main']['App']['GetTaskSettings']();
+}
+
 export function GetToolFileChanges(arg1) {
   return window['go']['main']['App']['GetToolFileChanges'](arg1);
 }
@@ -178,8 +202,24 @@ export function ListSkills() {
   return window['go']['main']['App']['ListSkills']();
 }
 
+export function ListSubagents(arg1) {
+  return window['go']['main']['App']['ListSubagents'](arg1);
+}
+
+export function ListTaskRuns(arg1, arg2) {
+  return window['go']['main']['App']['ListTaskRuns'](arg1, arg2);
+}
+
+export function ListTasks() {
+  return window['go']['main']['App']['ListTasks']();
+}
+
 export function ListTools() {
   return window['go']['main']['App']['ListTools']();
+}
+
+export function PauseAllTasks(arg1) {
+  return window['go']['main']['App']['PauseAllTasks'](arg1);
 }
 
 export function PickDirectory() {
@@ -192,6 +232,10 @@ export function PickSkillFolder() {
 
 export function PickSkillZip() {
   return window['go']['main']['App']['PickSkillZip']();
+}
+
+export function PreviewTaskTriggerTimes(arg1, arg2) {
+  return window['go']['main']['App']['PreviewTaskTriggerTimes'](arg1, arg2);
 }
 
 export function RefreshSkills() {
@@ -212,6 +256,10 @@ export function ResolveAskUser(arg1) {
 
 export function ResolvePermission(arg1, arg2, arg3, arg4, arg5) {
   return window['go']['main']['App']['ResolvePermission'](arg1, arg2, arg3, arg4, arg5);
+}
+
+export function RunTaskNow(arg1) {
+  return window['go']['main']['App']['RunTaskNow'](arg1);
 }
 
 export function SavePlan(arg1) {
@@ -238,12 +286,32 @@ export function SetSubToolEnabled(arg1, arg2, arg3) {
   return window['go']['main']['App']['SetSubToolEnabled'](arg1, arg2, arg3);
 }
 
+export function SetTaskEnabled(arg1, arg2) {
+  return window['go']['main']['App']['SetTaskEnabled'](arg1, arg2);
+}
+
 export function SkillsDir() {
   return window['go']['main']['App']['SkillsDir']();
 }
 
+export function SnoozeTask(arg1, arg2) {
+  return window['go']['main']['App']['SnoozeTask'](arg1, arg2);
+}
+
 export function StopChat(arg1, arg2) {
   return window['go']['main']['App']['StopChat'](arg1, arg2);
+}
+
+export function TaskCounts() {
+  return window['go']['main']['App']['TaskCounts']();
+}
+
+export function TaskPluginInfo() {
+  return window['go']['main']['App']['TaskPluginInfo']();
+}
+
+export function TaskPluginManifest() {
+  return window['go']['main']['App']['TaskPluginManifest']();
 }
 
 export function TestModelConnection(arg1) {
@@ -276,4 +344,12 @@ export function UpdateSession(arg1, arg2) {
 
 export function UpdateSkill(arg1) {
   return window['go']['main']['App']['UpdateSkill'](arg1);
+}
+
+export function UpdateTask(arg1, arg2) {
+  return window['go']['main']['App']['UpdateTask'](arg1, arg2);
+}
+
+export function UpdateTaskSettings(arg1) {
+  return window['go']['main']['App']['UpdateTaskSettings'](arg1);
 }

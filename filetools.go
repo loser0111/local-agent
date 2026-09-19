@@ -38,6 +38,11 @@ const (
 // 其余工具（MCP / 自定义 CLI / API）仍经 tool_router 发现，避免 prompt 膨胀。
 var directToolOrder = []string{
 	toolReadFile, toolWriteFile, toolEditFile, toolGlob, toolGrep, toolListDir, toolAskUser,
+	// spawn_agent 直出而不是经路由器：系统提示词里点名了它（buildBasePrompt 明确告诉模型
+	// "可以用 spawn_agent 派子代理"），若工具列表里没有它的 schema，模型只能先花一轮
+	// 去 tool_router 里 list/describe，否则就是照着名字瞎猜参数。
+	// **提示词里提到的工具必须直出**——两者不一致正是"模型报找不到某工具"这类问题的来源。
+	toolSpawnAgent,
 }
 
 // 各类上限：避免一次工具调用把上下文或内存撑爆
@@ -283,6 +288,7 @@ func runGitDiff(dir string, args ...string) (string, error) {
 
 	full := append([]string{"-C", dir, "--no-pager"}, args...)
 	cmd := exec.CommandContext(ctx, "git", full...)
+	hideConsoleWindow(cmd) // Windows 上不弹控制台窗口（见该函数说明）
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

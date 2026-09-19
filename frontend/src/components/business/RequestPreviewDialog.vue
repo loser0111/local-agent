@@ -184,7 +184,7 @@ async function copyJSON() {
 .dialog-mask {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.55);
+  background: $color-overlay;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -201,7 +201,7 @@ async function copyJSON() {
   max-height: 88vh;
   display: flex;
   flex-direction: column;
-  box-shadow: 0 12px 48px rgba(0, 0, 0, 0.5);
+  box-shadow: $shadow-lg;
 }
 
 .dialog-header {
@@ -272,9 +272,9 @@ async function copyJSON() {
   align-items: center;
   gap: 6px;
   font-size: $font-size-xs;
-  color: #c084fc;
-  background: rgba(124, 58, 237, 0.1);
-  border: 1px solid rgba(124, 58, 237, 0.3);
+  color: $color-primary;
+  background: rgb(var(--color-primary-rgb) / 0.1);
+  border: 1px solid rgb(var(--color-primary-rgb) / 0.3);
   border-radius: $radius-sm;
   padding: 6px 10px;
   margin-bottom: $space-md;
@@ -327,7 +327,7 @@ async function copyJSON() {
   background: $color-bg-primary;
 
   &.summary {
-    border-color: rgba(124, 58, 237, 0.5);
+    border-color: rgb(var(--color-primary-rgb) / 0.5);
   }
 }
 
@@ -348,16 +348,16 @@ async function copyJSON() {
   font-weight: $font-weight-medium;
 
   &.role-system {
-    color: #94a3b8;
+    color: $color-text-secondary;
   }
   &.role-user {
-    color: #38bdf8;
+    color: $color-info;
   }
   &.role-assistant {
-    color: #a78bfa;
+    color: $color-primary;
   }
   &.role-tool {
-    color: #22c55e;
+    color: $color-success;
   }
 }
 
@@ -376,12 +376,12 @@ async function copyJSON() {
   font-size: 10px;
   padding: 1px 6px;
   border-radius: 8px;
-  background: rgba(148, 163, 184, 0.15);
-  color: #94a3b8;
+  background: rgb(var(--color-text-secondary-rgb) / 0.15);
+  color: $color-text-secondary;
 
   &.tag-summary {
-    background: rgba(124, 58, 237, 0.18);
-    color: #c084fc;
+    background: rgb(var(--color-primary-rgb) / 0.18);
+    color: $color-primary;
   }
 }
 
@@ -414,8 +414,8 @@ async function copyJSON() {
 .error-banner {
   padding: $space-sm $space-md;
   margin-bottom: $space-md;
-  background-color: rgba(255, 85, 85, 0.12);
-  border: 1px solid rgba(255, 85, 85, 0.4);
+  background-color: rgb(var(--color-error-rgb) / 0.12);
+  border: 1px solid rgb(var(--color-error-rgb) / 0.4);
   border-radius: $radius-sm;
   color: $color-error;
   font-size: $font-size-xs;

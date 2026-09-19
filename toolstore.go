@@ -61,7 +61,7 @@ func NewToolStore(filePath string) *ToolStore {
 	return ts
 }
 
-// defaultSources 内置来源：终端命令 + 文件六件套 + 向用户提问。
+// defaultSources 内置来源：终端命令 + 文件六件套 + 向用户提问 + 派生代理。
 // 文件类工具让「文件操作」不必挤过 shell，权限判定因此能落到「工具 + 路径」上。
 func defaultSources() []*ToolSource {
 	return []*ToolSource{
@@ -138,6 +138,17 @@ func defaultSources() []*ToolSource {
 			Kind:        SourceBuiltin, Icon: "folder", Enabled: true, Builtin: true,
 			Parameters: []ToolParamConfig{
 				{Name: "path", Description: "要列出的目录（默认工作区根目录）"},
+			},
+		},
+		{
+			// 名字用常量而不是字面量：newBuiltinTool 是按 src.Name 分派的（case toolSpawnAgent），
+			// 两处一旦不一致，工具就会"注册了但认不出来"。
+			ID: toolSpawnAgent, Name: toolSpawnAgent, Label: "派生代理",
+			Description: "派生一个子代理独立完成一项任务，它有自己的上下文，只把结论回给你（中间过程不占用你的上下文）",
+			Kind:        SourceBuiltin, Icon: "users", Enabled: true, Builtin: true,
+			Parameters: []ToolParamConfig{
+				{Name: "task", Description: "要子代理做的事（它看不到你的对话历史，越具体越好）", Required: true},
+				{Name: "max_turns", Description: "可选：子代理最多跑几轮"},
 			},
 		},
 	}

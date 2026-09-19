@@ -99,7 +99,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
 .ui-overlay {
   position: fixed;
   inset: 0;
-  background-color: rgba(0, 0, 0, 0.45);
+  background-color: $color-overlay;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -111,7 +111,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
   background-color: $color-bg-secondary;
   border: 1px solid $color-border;
   border-radius: $radius-md;
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.4);
+  box-shadow: $shadow-lg;
   overflow: hidden;
 }
 
@@ -165,7 +165,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
   border-radius: $radius-sm;
   border: 1px solid $color-border;
   background-color: $color-bg-secondary;
-  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+  box-shadow: $shadow-lg;
   font-size: $font-size-xs;
   color: $color-text-primary;
   cursor: pointer;
@@ -190,7 +190,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
 }
 
 .ui-toast-success {
-  border-color: rgba(16, 185, 129, 0.5);
+  border-color: rgb(var(--color-success-rgb) / 0.5);
 
   .ui-toast-icon {
     color: $color-success;
@@ -198,7 +198,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
 }
 
 .ui-toast-error {
-  border-color: rgba(239, 68, 68, 0.55);
+  border-color: rgb(var(--color-error-rgb) / 0.55);
 
   .ui-toast-icon {
     color: $color-error;

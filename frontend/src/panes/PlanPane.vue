@@ -290,19 +290,19 @@ function backToChat() {
 
   &.warning {
     color: $color-warning;
-    background-color: rgba($color-warning, 0.12);
+    background-color: $color-warning-soft;
   }
   &.info {
     color: $color-info;
-    background-color: rgba($color-info, 0.12);
+    background-color: $color-info-soft;
   }
   &.success {
     color: $color-success;
-    background-color: rgba($color-success, 0.12);
+    background-color: $color-success-soft;
   }
   &.error {
     color: $color-error;
-    background-color: rgba($color-error, 0.12);
+    background-color: $color-error-soft;
   }
   &.muted {
     color: $color-text-muted;
@@ -425,7 +425,7 @@ function backToChat() {
 
   &:hover:not(:disabled) {
     color: $color-error;
-    background-color: rgba($color-error, 0.1);
+    background-color: $color-error-soft;
   }
 
   &:disabled {
@@ -479,7 +479,7 @@ function backToChat() {
   border-color: $color-error;
 
   &:hover {
-    background-color: rgba($color-error, 0.1);
+    background-color: $color-error-soft;
   }
 }
 

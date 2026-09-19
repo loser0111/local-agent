@@ -1,55 +1,98 @@
-// ===== 色彩系统（Dracula Dark 主题） =====
-// 参考：IntelliJ IDEA Dracula 主题配色
-$color-bg-primary: #282a36;     // Dracula Background
-$color-bg-secondary: #21222c;   // Dracula Darker Background
-$color-bg-tertiary: #44475a;    // Dracula Current Line / Selection
+// ===== 主题 Token 映射层 =====
+//
+// 真实取值在 assets/styles/tokens.css（CSS 自定义属性，运行时可切换：
+// <html data-theme="dark|light">）。
+//
+// 这里只做「$scss变量 → var(--token)」的映射，目的是：
+//   1. 30+ 个组件的 `@use variables.scss` 与 `$color-xxx` 写法**一个字都不用改**；
+//   2. 换主题实现（比如以后换成多套预置主题）只改 tokens.css + 这个文件。
+//
+// ⚠️ 注意：映射成 var() 之后，这些变量不能再参与 Sass 的颜色函数运算
+//    （rgba($color-x, .2) / lighten() / darken() / mix() 全部会编译失败）。
+//    需要透明度时用 `rgb(var(--color-x-rgb) / 0.2)` 或直接用 tokens.css 里的
+//    `--color-x-soft` 语义色；需要色相调整就加 token。
+//    —— 全项目原先只有 PlanPane.vue 3 处 rgba($color-*, .1x) 这类用法，已一并改造。
+//
+// 本文件由 vite.config.js 的 css.preprocessorOptions.scss.additionalData 自动注入
+// 到每个 <style lang="scss"> 里，因此**只能放变量声明**，不能放选择器规则
+// （否则每个组件都会重复输出一份 CSS）。
 
-$color-text-primary: #f8f8f2;   // Dracula Foreground
-$color-text-secondary: #bcc2cd; // 次级文本（基于前景色降低饱和度）
-$color-text-muted: #6272a4;     // Dracula Comment
+// ===== 色彩系统（深色为 Dracula 配色，浅色为同色相深色调） =====
+$color-bg-primary: var(--color-bg-primary);
+$color-bg-secondary: var(--color-bg-secondary);
+$color-bg-tertiary: var(--color-bg-tertiary);
 
-$color-primary: #bd93f9;        // Dracula Purple
-$color-primary-hover: #caa7ff;
-$color-primary-active: #a77bff;
+$color-text-primary: var(--color-text-primary);
+$color-text-secondary: var(--color-text-secondary);
+$color-text-muted: var(--color-text-muted);
 
-$color-success: #50fa7b;        // Dracula Green
-$color-warning: #ffb86c;        // Dracula Orange
-$color-error: #ff5555;          // Dracula Red
-$color-info: #8be9fd;           // Dracula Cyan
-$color-pink: #ff79c6;           // Dracula Pink
-$color-yellow: #f1fa8c;         // Dracula Yellow
+$color-primary: var(--color-primary);
+$color-primary-hover: var(--color-primary-hover);
+$color-primary-active: var(--color-primary-active);
 
-$color-diff-add: rgba(80, 250, 123, 0.15);   // Green tint
-$color-diff-add-text: #50fa7b;
-$color-diff-del: rgba(255, 85, 85, 0.15);    // Red tint
-$color-diff-del-text: #ff6e6e;
+$color-success: var(--color-success);
+$color-warning: var(--color-warning);
+$color-error: var(--color-error);
+$color-info: var(--color-info);
+$color-pink: var(--color-pink);
+$color-yellow: var(--color-yellow);
 
-$color-border: #44475a;
-$color-border-light: #565a78;
+// 低透明度底色（徽章 / 提示条 / 选中态）
+$color-primary-soft: var(--color-primary-soft);
+$color-success-soft: var(--color-success-soft);
+$color-warning-soft: var(--color-warning-soft);
+$color-error-soft: var(--color-error-soft);
+$color-info-soft: var(--color-info-soft);
+
+$color-diff-add: var(--color-diff-add-bg);
+$color-diff-add-text: var(--color-diff-add-text);
+$color-diff-del: var(--color-diff-del-bg);
+$color-diff-del-text: var(--color-diff-del-text);
+
+$color-border: var(--color-border);
+$color-border-light: var(--color-border-light);
+
+$color-surface-tint: var(--color-surface-tint);
+$color-overlay: var(--color-overlay);
+
+// 代码块与语法高亮
+$color-code-bg: var(--color-code-bg);
+$color-code-text: var(--color-code-text);
+$color-code-inline-bg: var(--color-code-inline-bg);
+$color-code-inline-text: var(--color-code-inline-text);
+$color-code-comment: var(--color-code-comment);
+$color-code-keyword: var(--color-code-keyword);
+$color-code-function: var(--color-code-function);
+$color-code-string: var(--color-code-string);
+$color-code-number: var(--color-code-number);
+$color-code-type: var(--color-code-type);
+$color-code-deletion: var(--color-code-deletion);
 
 // ===== 排版 =====
 $font-family-base: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
   'Microsoft YaHei', sans-serif;
 $font-family-mono: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
 
-$font-size-xs: 12px;
-$font-size-sm: 13px;
-$font-size-md: 14px;
-$font-size-lg: 16px;
-$font-size-xl: 20px;
- 
-$line-height-xs: 16px;
-$line-height-sm: 20px;
-$line-height-md: 20px;
-$line-height-lg: 24px;
-$line-height-xl: 28px;
+// 字号/行高全部由 --font-size-base 派生，默认 14px 时与原值完全一致（12/13/14/16/20、16/20/20/24/28）。
+// 设置页的「字体大小」滑块改的就是 --font-size-base。
+$font-size-xs: calc(var(--font-size-base) - 2px);
+$font-size-sm: calc(var(--font-size-base) - 1px);
+$font-size-md: var(--font-size-base);
+$font-size-lg: calc(var(--font-size-base) + 2px);
+$font-size-xl: calc(var(--font-size-base) + 6px);
+
+$line-height-xs: calc(var(--font-size-base) + 2px);
+$line-height-sm: calc(var(--font-size-base) + 6px);
+$line-height-md: calc(var(--font-size-base) + 6px);
+$line-height-lg: calc(var(--font-size-base) + 10px);
+$line-height-xl: calc(var(--font-size-base) + 14px);
 
 $font-weight-normal: 400;
 $font-weight-medium: 500;
 $font-weight-semibold: 600;
 $font-weight-bold: 700;
 
-// ===== 间距（4px 基准栅格） =====
+// ===== 间距（4px 基准栅格，不随主题变化） =====
 $space-xs: 4px;
 $space-sm: 8px;
 $space-md: 12px;
@@ -62,10 +105,10 @@ $radius-sm: 4px;
 $radius-md: 6px;
 $radius-lg: 8px;
 
-// ===== 阴影 =====
-$shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
-$shadow-md: 0 4px 12px rgba(0, 0, 0, 0.4);
-$shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.5);
+// ===== 阴影（深浅主题分别取值） =====
+$shadow-sm: var(--shadow-sm);
+$shadow-md: var(--shadow-md);
+$shadow-lg: var(--shadow-lg);
 
 // ===== 尺寸 =====
 $topbar-height: 48px;

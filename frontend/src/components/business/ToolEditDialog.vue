@@ -510,7 +510,7 @@ function toggleDiscoveredTool(name) {
 .dialog-mask {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.55);
+  background: $color-overlay;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -557,8 +557,8 @@ function toggleDiscoveredTool(name) {
 .error-banner {
   padding: $space-sm $space-md;
   margin-bottom: $space-md;
-  background-color: rgba(255, 85, 85, 0.12);
-  border: 1px solid rgba(255, 85, 85, 0.4);
+  background-color: rgb(var(--color-error-rgb) / 0.12);
+  border: 1px solid rgb(var(--color-error-rgb) / 0.4);
   border-radius: $radius-sm;
   color: $color-error;
   font-size: $font-size-sm;
@@ -634,7 +634,7 @@ function toggleDiscoveredTool(name) {
 
   &.active {
     border-color: $color-primary;
-    background: rgba(124, 58, 237, 0.1);
+    background: rgb(var(--color-primary-rgb) / 0.1);
     color: $color-primary;
   }
 
@@ -719,7 +719,7 @@ function toggleDiscoveredTool(name) {
   }
 
   &.active {
-    background: rgba(124, 58, 237, 0.18);
+    background: rgb(var(--color-primary-rgb) / 0.18);
     border-color: $color-primary;
     color: $color-primary;
   }
@@ -806,7 +806,7 @@ function toggleDiscoveredTool(name) {
     }
 
     &.active {
-      background: rgba(124, 58, 237, 0.15);
+      background: rgb(var(--color-primary-rgb) / 0.15);
       color: $color-primary;
     }
   }

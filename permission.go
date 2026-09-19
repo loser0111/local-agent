@@ -949,6 +949,10 @@ const (
 	StageDefault     = "mode-default"     // 模式默认
 	StageReadOnly    = "readonly-default" // 只读默认放行
 	StageFallback    = "fallback-ask"     // 兜底询问
+	// 子代理：这次操作本来需要询问用户，但子代理无法代为确认，于是降级成拒绝。
+	// 单列一个 stage 是为了让审计能区分"用户拒绝"与"子代理被系统挡下"——
+	// 不要把系统的自动行为记成用户的决定（同 P1-A 里硬取消不写拒绝记录的原则）。
+	StageSubagentDeclined = "subagent-declined"
 )
 
 // Verdict 一次判定的结果

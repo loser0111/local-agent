@@ -64,6 +64,7 @@ func (t *CLITool) Execute(ctx context.Context, args map[string]interface{}) (str
 	} else {
 		cmd = exec.CommandContext(ctx, "bash", "-c", cmdStr)
 	}
+	hideConsoleWindow(cmd) // Windows 上不弹控制台窗口（见该函数说明）
 	if t.Dir != "" {
 		cmd.Dir = t.Dir
 	}
@@ -311,6 +312,13 @@ type BuildOptions struct {
 	// Ask 用户提问回路（ask_user 工具）：发事件给前端并阻塞等待作答。
 	// 为 nil 时该工具仍会装配，但调用会返回"界面未就绪"——便于测试与降级。
 	Ask func(ctx context.Context, req AskRequest) (AskAnswer, error)
+	// ExcludeTools 显式排除的工具名（优先级高于白名单）。
+	// 子代理用它去掉 ask_user——它没有 UI 通道，留着一个永远失败的工具只会浪费模型一轮。
+	ExcludeTools []string
+	// SpawnAgent 派生代理的回路（spawn_agent 工具）。
+	// 为 nil 时该工具**不注册**——这正是"子代理不能再次派生"的实现方式：
+	// 不给它 spawner，工具就不存在，比注册后再拦截更干净。
+	SpawnAgent func(ctx context.Context, task string, maxTurns int) (*SubagentResult, error)
 }
 
 // buildContext 装配期传给内置工具构造函数的上下文
@@ -318,6 +326,8 @@ type buildContext struct {
 	dir     string                             // 工作区目录（命令类工具的工作目录）
 	fileCtx fileToolContext                    // 文件类工具的上下文（目录 + 归因记录）
 	asker   func(ctx context.Context, req AskRequest) (AskAnswer, error) // ask_user 的回路
+	// spawner 派生代理的回路；为 nil 时 spawn_agent 不注册（子代理因此无法再派生）
+	spawner func(ctx context.Context, task string, maxTurns int) (*SubagentResult, error)
 }
 
 // newBuiltinTool 构造内置工具。
@@ -345,6 +355,12 @@ func newBuiltinTool(src *ToolSource, bc buildContext) (ToolInterface, bool) {
 		return newListDirTool(bc), true
 	case toolAskUser:
 		return newAskUserTool(bc), true
+	case toolSpawnAgent:
+		// 没有 spawner 就不注册：子代理视图刻意不给它，于是它无法再次派生
+		if bc.spawner == nil {
+			return nil, false
+		}
+		return newSpawnAgentTool(bc), true
 	default:
 		return nil, false
 	}
@@ -448,9 +464,9 @@ func (tm *ToolManager) BuildView(ctx context.Context, opts BuildOptions) *Sessio
 			sessionID: opts.SessionID,
 			changes:   opts.Changes,
 		},
-		asker: opts.Ask,
+		asker:   opts.Ask,
+		spawner: opts.SpawnAgent,
 	}
-
 	// exposure：工具名 → 暴露策略（直出 / 经路由器 / 不可见）
 	exposure := map[string]Exposure{}
 	hidden := map[string]bool{}
@@ -469,7 +485,15 @@ func (tm *ToolManager) BuildView(ctx context.Context, opts BuildOptions) *Sessio
 		}
 	}
 	// 白名单按**工具名**判定：内置/CLI/HTTP 是工具名本身；MCP 子工具用完整名 mcp__server__tool
+	// 排除名单优先于白名单：子代理要用它剔掉 ask_user（详见 BuildOptions.ExcludeTools）
+	excluded := map[string]bool{}
+	for _, n := range opts.ExcludeTools {
+		excluded[n] = true
+	}
 	allowed := func(toolName string) bool {
+		if excluded[toolName] {
+			return false
+		}
 		return len(whitelist) == 0 || whitelist[toolName]
 	}
 	// 兼容 v2 之前的会话白名单：那时 MCP 是按来源 ID（= 服务器名）过滤的，

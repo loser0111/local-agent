@@ -222,6 +222,26 @@
  */
 
 /**
+ * 一个子代理的概况（运行中的进度 + 跑完的结论）
+ * @typedef {Object} SubagentInfo
+ * @property {string} runId 子代理会话 ID（看它的消息、回退它的改动都用这个）
+ * @property {string} parentId 派生它的主会话 ID
+ * @property {string} title
+ * @property {string} task 派给它的任务原文
+ * @property {'running'|'completed'|'failed'|'cancelled'|'interrupted'} status
+ *   interrupted = 应用在它跑动中被关掉，收尾没写完
+ * @property {string} [model]
+ * @property {number} step 已执行的工具调用数
+ * @property {string} [currentTool] 正在跑的工具（空闲时为空）
+ * @property {number} startedAt
+ * @property {number} [endedAt]
+ * @property {string} [summary] 结论（只有它会进入主会话的上下文）
+ * @property {string[]} [files] 它改过的文件
+ * @property {string[]} [declined] 因需要用户授权而被挡下的操作
+ * @property {string} [error]
+ */
+
+/**
  * 计划步骤
  * @typedef {Object} PlanStep
  * @property {number} index

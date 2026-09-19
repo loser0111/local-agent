@@ -13,8 +13,6 @@ import { usePermissionStore } from '@/stores/permissions'
 import { useAskStore } from '@/stores/asks'
 import { useSkillsStore } from '@/stores/skills'
 import { useUiStore } from '@/stores/ui'
-import PermissionDialog from '@/components/business/PermissionDialog.vue'
-import AskUserDialog from '@/components/business/AskUserDialog.vue'
 import RequestPreviewDialog from '@/components/business/RequestPreviewDialog.vue'
 import PaneHeader from '@/components/layout/PaneHeader.vue'
 import MessageBubble from '@/components/business/MessageBubble.vue'
@@ -323,6 +321,9 @@ async function sendMessage() {
       },
       onToolCallStart: (tc) => {
         chatStore.addToolCall(localMsg.id, tc)
+        // 派生子代理时自动打开子代理面板：子代理的中间过程不在聊天流里（它跑在自己
+        // 独立的上下文里，只有结论会回到聊天），不打开面板用户就完全看不到它在做什么
+        if (tc?.name === 'spawn_agent') paneStore.openPane(sid, 'subagent')
       },
       onToolCallEnd: (tc) => {
         chatStore.updateToolCall(localMsg.id, tc.id, {
@@ -572,11 +573,9 @@ function openDiff() {
   <div class="chat-pane">
     <PaneHeader type="chat" :closable="false" />
 
-    <!-- 授权弹窗：后端此刻阻塞等待答复，超时/取消按拒绝处理 -->
-    <PermissionDialog />
-
-    <!-- 模型提问弹窗（ask_user）：答复作为工具结果回到模型手里 -->
-    <AskUserDialog />
+    <!-- 授权弹窗 / 模型提问弹窗已上移到 App.vue：它们由进程级事件驱动，
+         必须和事件收口在同一层，否则在设置页（本组件未渲染）时弹不出来。
+         见 components/business/PermissionDialog.vue 顶部说明。 -->
 
     <!-- 实际发出的请求快照（排障用，按需拉取，不随每轮推送） -->
     <RequestPreviewDialog
@@ -627,20 +626,8 @@ function openDiff() {
 
     <div class="prompt-box">
       <div class="prompt-toolbar">
-        <button class="tool-btn" title="附件">
-          <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-            <path d="M12 4L4 12M4 4l8 8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" transform="rotate(45 8 8)" />
-            <path d="M5 11l-2 2 2 2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
-          </svg>
-        </button>
-        <button class="tool-btn" title="@提及文件">@</button>
-        <button class="tool-btn" title="更多">
-          <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-            <circle cx="3" cy="8" r="1.2" fill="currentColor" />
-            <circle cx="8" cy="8" r="1.2" fill="currentColor" />
-            <circle cx="13" cy="8" r="1.2" fill="currentColor" />
-          </svg>
-        </button>
+        <!-- 原先这里的「附件 / @提及文件 / 更多」三个图标按钮没有绑定任何事件，
+             点了没反应；后端也还没有对应能力，先移除，避免诱导点击。 -->
         <button class="tool-btn diff-btn" title="查看文件差异" @click="openDiff">
           <svg width="15" height="15" viewBox="0 0 16 16" fill="none">
             <path d="M8 2v12M2 8h12" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
@@ -781,7 +768,7 @@ function openDiff() {
 
 // 执行过程中头像轻微高亮
 .process-row.streaming .avatar {
-  box-shadow: 0 0 0 2px rgba(189, 147, 249, 0.25);
+  box-shadow: 0 0 0 2px rgb(var(--color-primary-rgb) / 0.25);
 }
 
 .loading-history {
@@ -838,7 +825,7 @@ function openDiff() {
 
   &:hover {
     border-color: $color-primary;
-    background-color: rgba(189, 147, 249, 0.1);
+    background-color: rgb(var(--color-primary-rgb) / 0.1);
   }
 }
 
@@ -876,14 +863,14 @@ function openDiff() {
     font-variant-numeric: tabular-nums;
 
     &.warn {
-      color: #facc15;
+      color: $color-yellow;
     }
   }
 
   &.stop-btn {
     color: $color-error;
     &:hover {
-      background-color: rgba(255, 85, 85, 0.1);
+      background-color: rgb(var(--color-error-rgb) / 0.1);
     }
     // 已在"停止中"：按钮文案变成"强制停止"，用实底强调再点一次会立即中断
     &.active {
@@ -898,7 +885,7 @@ function openDiff() {
   &.stream-btn.active,
   &.plan-btn.active {
     color: $color-primary;
-    background-color: rgba(124, 58, 237, 0.12);
+    background-color: rgb(var(--color-primary-rgb) / 0.12);
   }
 
   &:disabled {
@@ -924,7 +911,7 @@ function openDiff() {
 
   &:focus {
     border-color: $color-primary;
-    box-shadow: 0 0 0 2px rgba(189, 147, 249, 0.2);
+    box-shadow: 0 0 0 2px rgb(var(--color-primary-rgb) / 0.2);
   }
 
   &::placeholder {
@@ -974,7 +961,7 @@ function openDiff() {
 .skill-menu-id {
   font-family: monospace;
   font-size: $font-size-xs;
-  color: #a78bfa;
+  color: $color-primary;
   flex-shrink: 0;
 }
 

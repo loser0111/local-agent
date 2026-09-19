@@ -339,9 +339,9 @@ function sourceLabel(s) {
   align-items: center;
   gap: 6px;
   font-size: $font-size-xs;
-  color: #facc15;
-  background: rgba(250, 204, 21, 0.08);
-  border: 1px solid rgba(250, 204, 21, 0.3);
+  color: $color-yellow;
+  background: rgb(var(--color-warning-rgb) / 0.08);
+  border: 1px solid rgb(var(--color-warning-rgb) / 0.3);
   border-radius: $radius-sm;
   padding: 6px 10px;
   margin-bottom: $space-lg;
@@ -375,7 +375,7 @@ function sourceLabel(s) {
   }
 
   &.invalid {
-    border-color: rgba(255, 85, 85, 0.45);
+    border-color: rgb(var(--color-error-rgb) / 0.45);
   }
 }
 
@@ -394,11 +394,11 @@ function sourceLabel(s) {
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
-  background: rgba(124, 58, 237, 0.12);
-  color: #a78bfa;
+  background: rgb(var(--color-primary-rgb) / 0.12);
+  color: $color-primary;
 
   &.error {
-    background: rgba(255, 85, 85, 0.12);
+    background: rgb(var(--color-error-rgb) / 0.12);
     color: $color-error;
   }
 }
@@ -443,35 +443,35 @@ function sourceLabel(s) {
   font-weight: $font-weight-medium;
 
   &.tag-builtin {
-    background: rgba(250, 204, 21, 0.15);
-    color: #facc15;
+    background: rgb(var(--color-warning-rgb) / 0.15);
+    color: $color-yellow;
   }
   &.tag-version {
-    background: rgba(148, 163, 184, 0.15);
-    color: #94a3b8;
+    background: rgb(var(--color-text-secondary-rgb) / 0.15);
+    color: $color-text-secondary;
   }
   &.tag-source {
-    background: rgba(56, 189, 248, 0.15);
-    color: #38bdf8;
+    background: rgb(var(--color-info-rgb) / 0.15);
+    color: $color-info;
   }
   &.tag-scripts {
-    background: rgba(34, 197, 94, 0.15);
-    color: #22c55e;
+    background: rgb(var(--color-success-rgb) / 0.15);
+    color: $color-success;
   }
   &.tag-manual {
-    background: rgba(124, 58, 237, 0.18);
-    color: #c084fc;
+    background: rgb(var(--color-primary-rgb) / 0.18);
+    color: $color-primary;
   }
   &.tag-nouser {
-    background: rgba(148, 163, 184, 0.18);
-    color: #94a3b8;
+    background: rgb(var(--color-text-secondary-rgb) / 0.18);
+    color: $color-text-secondary;
   }
   &.tag-warn {
-    background: rgba(250, 204, 21, 0.15);
-    color: #facc15;
+    background: rgb(var(--color-warning-rgb) / 0.15);
+    color: $color-yellow;
   }
   &.tag-error {
-    background: rgba(255, 85, 85, 0.15);
+    background: rgb(var(--color-error-rgb) / 0.15);
     color: $color-error;
     max-width: 200px;
     overflow: hidden;
@@ -561,7 +561,7 @@ function sourceLabel(s) {
   }
 
   input:checked + .slider {
-    background: rgba(124, 58, 237, 0.35);
+    background: rgb(var(--color-primary-rgb) / 0.35);
     border-color: $color-primary;
 
     &::before {
@@ -599,7 +599,7 @@ function sourceLabel(s) {
   }
 
   &.warn {
-    color: #facc15;
+    color: $color-yellow;
   }
 }
 
@@ -635,7 +635,7 @@ function sourceLabel(s) {
 }
 
 .resource-kind {
-  color: #38bdf8;
+  color: $color-info;
 }
 
 .resource-size {

@@ -1,12 +1,14 @@
 <script setup>
-import { ref, reactive, onMounted } from 'vue'
+import { computed, ref, reactive, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useSettingStore } from '@/stores/setting'
 import { useUiStore } from '@/stores/ui'
+import { FONT_SIZE_MAX, FONT_SIZE_MIN, THEME_OPTIONS, resolveTheme } from '@/utils/theme'
 import { fetchModels, addModel, deleteModel, updateModel, getModelFull, testModelConnection } from '@/api/model'
 import { fetchModelNames } from '@/api/model'
 import ToolSettings from '@/components/business/ToolSettings.vue'
 import SkillSettings from '@/components/business/SkillSettings.vue'
+import TaskSettings from '@/components/business/TaskSettings.vue'
 import PermissionSettings from '@/components/business/PermissionSettings.vue'
 
 const router = useRouter()
@@ -15,11 +17,17 @@ const ui = useUiStore()
 
 const activeTab = ref('general')
 
+// 通用设置：主题当前实际生效的明暗（选「跟随系统」时由系统偏好决定）
+const resolvedThemeLabel = computed(() =>
+  resolveTheme(settingStore.settings.theme) === 'light' ? '浅色' : '深色'
+)
+
 const tabs = [
   { key: 'general', label: '通用设置' },
   { key: 'model', label: '模型配置' },
   { key: 'tool', label: '工具配置' },
   { key: 'skill', label: '技能配置' },
+  { key: 'task', label: '定时任务' },
   { key: 'permission', label: '权限配置' },
   { key: 'about', label: '关于' },
 ]
@@ -284,37 +292,23 @@ onMounted(() => {
           <div class="form-group">
             <label>主题</label>
             <select v-model="settingStore.settings.theme" class="input" style="max-width: 240px">
-              <option value="dark">深色</option>
-              <option value="light">浅色</option>
+              <option v-for="o in THEME_OPTIONS" :key="o.value" :value="o.value">
+                {{ o.label }}
+              </option>
             </select>
-          </div>
-          <div class="form-group">
-            <label>语言</label>
-            <select v-model="settingStore.settings.language" class="input" style="max-width: 240px">
-              <option value="zh-CN">简体中文</option>
-              <option value="en-US">English</option>
-            </select>
+            <div class="checkbox-hint">
+              当前实际生效：{{ resolvedThemeLabel }}。「跟随系统」会随系统外观自动切换。
+            </div>
           </div>
           <div class="form-group">
             <label>字体大小：{{ settingStore.settings.fontSize }}px</label>
             <input
               type="range"
-              min="12"
-              max="20"
+              :min="FONT_SIZE_MIN"
+              :max="FONT_SIZE_MAX"
               v-model.number="settingStore.settings.fontSize"
             />
-          </div>
-          <div class="form-group checkbox-group">
-            <label>
-              <input type="checkbox" v-model="settingStore.settings.autoSave" />
-              自动保存
-            </label>
-          </div>
-          <div class="form-group checkbox-group">
-            <label>
-              <input type="checkbox" v-model="settingStore.settings.autoArchive" />
-              PR 合并后自动归档会话
-            </label>
+            <div class="checkbox-hint">调整界面整体字号，立即生效。</div>
           </div>
           <div class="form-group checkbox-group">
             <label>
@@ -524,6 +518,9 @@ onMounted(() => {
         <!-- 技能配置 -->
         <SkillSettings v-if="activeTab === 'skill'" />
 
+        <!-- 定时任务（桌面插件） -->
+        <TaskSettings v-if="activeTab === 'task'" />
+
         <!-- 权限配置 -->
         <div v-if="activeTab === 'permission'" class="settings-panel">
           <PermissionSettings />
@@ -607,7 +604,7 @@ onMounted(() => {
   &.active {
     color: $color-primary;
     border-left-color: $color-primary;
-    background-color: rgba(124, 58, 237, 0.08);
+    background-color: rgb(var(--color-primary-rgb) / 0.08);
   }
 }
 
@@ -694,8 +691,8 @@ input[type='range'] {
 .error-banner {
   padding: $space-sm $space-md;
   margin-bottom: $space-lg;
-  background-color: rgba(255, 85, 85, 0.12);
-  border: 1px solid rgba(255, 85, 85, 0.4);
+  background-color: rgb(var(--color-error-rgb) / 0.12);
+  border: 1px solid rgb(var(--color-error-rgb) / 0.4);
   border-radius: $radius-sm;
   color: $color-error;
   font-size: $font-size-sm;
@@ -827,14 +824,14 @@ input[type='range'] {
   font-size: $font-size-sm;
   
   &.test-success {
-    background-color: rgba(34, 197, 94, 0.12);
-    border: 1px solid rgba(34, 197, 94, 0.4);
-    color: #22c55e;
+    background-color: rgb(var(--color-success-rgb) / 0.12);
+    border: 1px solid rgb(var(--color-success-rgb) / 0.4);
+    color: $color-success;
   }
   
   &.test-error {
-    background-color: rgba(255, 85, 85, 0.12);
-    border: 1px solid rgba(255, 85, 85, 0.4);
+    background-color: rgb(var(--color-error-rgb) / 0.12);
+    border: 1px solid rgb(var(--color-error-rgb) / 0.4);
     color: $color-error;
   }
 }
@@ -852,7 +849,7 @@ input[type='range'] {
   left: 0;
   right: 0;
   bottom: 0;
-  background-color: rgba(0, 0, 0, 0.5);
+  background-color: $color-overlay;
   display: flex;
   align-items: center;
   justify-content: center;

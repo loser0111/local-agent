@@ -36,15 +36,15 @@ const statusText = computed(() => {
 const statusColor = computed(() => {
   switch (props.toolCall.status) {
     case 'running':
-      return '#ffb86c'
+      return 'var(--color-warning)'
     case 'pending':
-      return '#f5a623'
+      return 'var(--color-warning)'
     case 'success':
-      return '#50fa7b'
+      return 'var(--color-success)'
     case 'error':
-      return '#ff5555'
+      return 'var(--color-error)'
     default:
-      return '#6272a4'
+      return 'var(--color-text-muted)'
   }
 })
 
@@ -133,18 +133,18 @@ const argSummary = computed(() => {
   transition: border-color $transition-fast;
 
   &.running {
-    border-color: rgba(245, 158, 11, 0.5);
+    border-color: rgb(var(--color-warning-rgb) / 0.5);
   }
   // 等待用户授权：与运行中区分（更醒目的橙色描边）
   &.pending {
-    border-color: rgba(245, 166, 35, 0.75);
-    box-shadow: 0 0 0 1px rgba(245, 166, 35, 0.25);
+    border-color: rgb(var(--color-warning-rgb) / 0.75);
+    box-shadow: 0 0 0 1px rgb(var(--color-warning-rgb) / 0.25);
   }
   &.success {
-    border-color: rgba(16, 185, 129, 0.3);
+    border-color: rgb(var(--color-success-rgb) / 0.3);
   }
   &.error {
-    border-color: rgba(239, 68, 68, 0.5);
+    border-color: rgb(var(--color-error-rgb) / 0.5);
   }
 }
 
@@ -168,7 +168,7 @@ const argSummary = computed(() => {
   }
 
   &:focus-visible {
-    outline: 2px solid rgba(189, 147, 249, 0.6);
+    outline: 2px solid rgb(var(--color-primary-rgb) / 0.6);
     outline-offset: -2px;
   }
 }
@@ -204,7 +204,7 @@ const argSummary = computed(() => {
 .mini-spinner {
   width: 9px;
   height: 9px;
-  border: 1.5px solid rgba(255, 184, 108, 0.3);
+  border: 1.5px solid rgb(var(--color-warning-rgb) / 0.3);
   border-top-color: $color-warning;
   border-radius: 50%;
   animation: spin 0.7s linear infinite;
@@ -213,7 +213,7 @@ const argSummary = computed(() => {
 
 // 等待授权：转得慢一些，暗示"卡在等人"而不是"正在干活"
 .pending-spinner {
-  border-top-color: #f5a623;
+  border-top-color: $color-warning;
   animation-duration: 1.6s;
 }
 

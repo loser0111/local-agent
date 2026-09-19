@@ -151,7 +151,7 @@ async function allowWithRule() {
   display: flex;
   align-items: center;
   justify-content: center;
-  background-color: rgba(0, 0, 0, 0.55);
+  background-color: $color-overlay;
 }
 
 .permission-dialog {
@@ -160,9 +160,9 @@ async function allowWithRule() {
   display: flex;
   flex-direction: column;
   background-color: $color-bg-secondary;
-  border: 1px solid rgba(255, 85, 85, 0.35);
+  border: 1px solid rgb(var(--color-error-rgb) / 0.35);
   border-radius: $radius-md;
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+  box-shadow: $shadow-lg;
   overflow: hidden;
 }
 
@@ -245,7 +245,7 @@ async function allowWithRule() {
 .subject {
   margin: 0;
   padding: 8px 10px;
-  background-color: rgba(68, 71, 90, 0.5);
+  background-color: rgb(var(--color-bg-tertiary-rgb) / 0.5);
   border: 1px solid $color-border;
   border-radius: $radius-sm;
   font-size: 12px;
@@ -257,15 +257,15 @@ async function allowWithRule() {
 }
 
 .units {
-  border: 1px solid rgba(255, 184, 108, 0.35);
+  border: 1px solid rgb(var(--color-warning-rgb) / 0.35);
   border-radius: $radius-sm;
   padding: 8px 10px;
-  background-color: rgba(255, 184, 108, 0.06);
+  background-color: rgb(var(--color-warning-rgb) / 0.06);
 }
 
 .units-hint {
   font-size: 11px;
-  color: #ffb86c;
+  color: $color-warning;
   margin-bottom: 6px;
 }
 
@@ -285,7 +285,7 @@ async function allowWithRule() {
   color: $color-text-muted;
 
   strong {
-    color: #ff5555;
+    color: $color-error;
   }
 }
 
@@ -304,7 +304,7 @@ async function allowWithRule() {
 
   code {
     padding: 0 4px;
-    background-color: rgba(68, 71, 90, 0.6);
+    background-color: rgb(var(--color-bg-tertiary-rgb) / 0.6);
     border-radius: 3px;
   }
 }
@@ -324,7 +324,7 @@ async function allowWithRule() {
 .dialog-error {
   padding: 8px 16px;
   font-size: 11px;
-  color: #ff5555;
+  color: $color-error;
   border-top: 1px solid $color-border;
 }
 </style>

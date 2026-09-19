@@ -103,6 +103,16 @@ type Session struct {
 	ContextSummary     string `json:"contextSummary,omitempty"`     // 被摘要覆盖那部分的摘要正文
 	ContextCoveredUpTo int    `json:"contextCoveredUpTo,omitempty"` // 摘要覆盖到第几条消息（不含）
 	ContextSummaryAt   int64  `json:"contextSummaryAt,omitempty"`   // 摘要生成时间（Unix 毫秒）
+
+	// ParentID 非空表示这是子代理的会话（由某个主会话派生）。
+	// 它**不出现在会话列表里**——子代理是主会话的工作产物，不是用户的会话。
+	ParentID string `json:"parentId,omitempty"`
+
+	// Subagent 子代理会话专有：派给它的任务、跑完的结论与状态。
+	// 落盘而不是只放内存：重启后面板仍要能列出跑过的子代理，而"回退它改过的文件"
+	// 也必须靠这个会话（diff 轮次与 checkpoint ref 都按会话 ID 键控）。
+	// 主会话的会话里它恒为 nil。
+	Subagent *SubagentInfo `json:"subagent,omitempty"`
 }
 
 // SessionConfig 创建会话时的配置
@@ -115,6 +125,7 @@ type SessionConfig struct {
 	Environment    string   `json:"environment"`
 	EnabledTools   []string `json:"enabledTools"`  // 本会话可用的工具 ID 白名单（空=全部已启用工具）
 	EnabledSkills  []string `json:"enabledSkills"` // 本会话可用的技能 ID 白名单（空=全部已启用技能）
+	ParentID       string   `json:"parentId,omitempty"` // 非空=子代理会话（不出现在会话列表里）
 }
 
 // SessionPatch 会话部分字段更新（指针为 nil 表示不更新）
@@ -164,6 +175,7 @@ func (s *SessionStore) CreateSession(config SessionConfig) (*Session, error) {
 		Conversations:  []*Conversation{},
 		EnabledTools:   config.EnabledTools,
 		EnabledSkills:  config.EnabledSkills,
+		ParentID:       config.ParentID,
 	}
 	if session.Title == "" {
 		session.Title = "新会话"
@@ -236,6 +248,11 @@ func (s *SessionStore) ListSessions() ([]*Session, error) {
 		if err != nil {
 			continue // 跳过损坏文件
 		}
+		// 子代理的会话不进列表：它们是主会话的工作产物，不是用户的会话。
+		// 直接引用它们会让会话列表被子代理任务塞满（一次对话可能派生好几个）。
+		if session.ParentID != "" {
+			continue
+		}
 		// 列表不携带消息，减小数据量
 		session.Messages = []Message{}
 		session.Conversations = []*Conversation{}
@@ -247,6 +264,66 @@ func (s *SessionStore) ListSessions() ([]*Session, error) {
 		return sessions[i].EndAt > sessions[j].EndAt
 	})
 	return sessions, nil
+}
+
+// ListSubagentSessions 列出某个主会话派生出的全部子代理会话（不含消息与 diff，减小数据量）。
+//
+// 单独一个方法而不是复用 ListSessions：后者**刻意**把子代理过滤掉了（它们不该出现在
+// 用户的会话列表里），而面板恰恰要列出它们。两边的过滤条件相反，不能共用一处实现。
+func (s *SessionStore) ListSubagentSessions(parentID string) ([]*Session, error) {
+	if parentID == "" {
+		return []*Session{}, nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	entries, err := os.ReadDir(s.dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return []*Session{}, nil
+		}
+		return nil, fmt.Errorf("读取会话目录失败: %w", err)
+	}
+
+	out := make([]*Session, 0, 4)
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+			continue
+		}
+		id := strings.TrimSuffix(entry.Name(), ".json")
+		session, err := s.loadSession(id)
+		if err != nil {
+			continue // 跳过损坏文件
+		}
+		if session.ParentID != parentID {
+			continue
+		}
+		session.Messages = []Message{}
+		session.Conversations = []*Conversation{}
+		session.Diffs = nil
+		out = append(out, session)
+	}
+	return out, nil
+}
+
+// SetSubagentInfo 写入/更新子代理会话的概况（任务、状态、结论）。
+// 只对子代理会话有意义；主会话调用会被拒绝，避免把两份数据搞混。
+func (s *SessionStore) SetSubagentInfo(id string, info *SubagentInfo) error {
+	if info == nil {
+		return fmt.Errorf("子代理概况不能为空")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	session, err := s.loadSession(id)
+	if err != nil {
+		return err
+	}
+	if session.ParentID == "" {
+		return fmt.Errorf("会话 %s 不是子代理会话", id)
+	}
+	session.Subagent = info
+	return s.saveSession(session)
 }
 
 // DeleteSession 删除会话文件

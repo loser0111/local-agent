@@ -52,9 +52,14 @@ type runControl struct {
 	ctx    context.Context
 	cancel context.CancelCauseFunc
 
-	mu   sync.Mutex
-	soft chan struct{}
-	kind string
+	mu        sync.Mutex
+	soft      chan struct{}
+	kind      string
+	subagents int // 本次运行已派生的子代理数（上限见 subagentMaxTotal）
+	// excluded 本次运行期间"不该归因给某会话"的路径，按会话 ID 分组。
+	// 唯一的来源是子代理：它跑动期间改的文件会落在父会话的工具执行窗口里，
+	// 被 DiffService.NoteActivity 顺手记到父会话账上（见 noteExcludedPaths）。
+	excluded map[string][]string
 }
 
 // Ctx 返回运行 ctx。LLM 请求、工具执行、权限与提问等待都应基于它，
@@ -118,6 +123,60 @@ func (r *runControl) markHard() bool {
 	// cancel 放在锁外：cancel cause 会触发下游的 Done() 回调，持锁调用有死锁风险
 	r.cancel(errRunCancelled)
 	return true
+}
+
+// claimSubagent 尝试占用一个子代理派生名额；超出上限返回 false。
+//
+// 上限是硬要求：没有它，一个跑飞的模型可以派生无限个子代理，成本与耗时都不可控。
+// 计数放在 runControl 上而不是某个闭包里——计划执行是**按步骤**重建工具视图的，
+// 放在闭包里会在每一步重置，"总数上限"就形同虚设。
+func (r *runControl) claimSubagent(limit int) bool {
+	if r == nil {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.subagents >= limit {
+		return false
+	}
+	r.subagents++
+	return true
+}
+
+// noteExcludedPaths 记下"这些路径不该归因给该会话"。
+//
+// 用途只有一个：子代理改过的文件不能算父会话的改动。归因是按**时间窗口扫全工作区**
+// （DiffService.NoteActivity），子代理整个跑动都发生在父会话那次 spawn_agent 调用的
+// 窗口之内，所以它的文件会被记到父会话账上——后果是父会话的 diff 面板里出现不是它改的
+// 文件，回退父会话那一轮时还会连带把这些文件也回退掉。
+//
+// 剔除动作必须发生在窗口**结束之后**（那时归因才写入），所以这里只登记，由工具循环取走。
+func (r *runControl) noteExcludedPaths(sessionID string, paths []string) {
+	if r == nil || sessionID == "" || len(paths) == 0 {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.excluded == nil {
+		r.excluded = map[string][]string{}
+	}
+	r.excluded[sessionID] = append(r.excluded[sessionID], paths...)
+}
+
+// takeExcludedPaths 取出并清空某会话的待剔除路径。
+//
+// 按会话分组而不是用一个全局队列：子代理与父会话**共用同一个 runControl**
+// （取消要级联，见 runSubagent），它自己每轮也会调用本方法；若做成一个共享队列，
+// 子代理会先把父会话的那份取走，父会话就永远拿不到，而且这种丢失是静默的。
+func (r *runControl) takeExcludedPaths(sessionID string) []string {
+	if r == nil || sessionID == "" {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	paths := r.excluded[sessionID]
+	delete(r.excluded, sessionID)
+	return paths
 }
 
 // ===== 注册表 =====

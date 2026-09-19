@@ -1,5 +1,7 @@
 <script setup>
 import { PANE_TITLES } from '@/types'
+import { usePaneStore } from '@/stores/pane'
+import { useSessionStore } from '@/stores/session'
 
 const props = defineProps({
   type: { type: String, required: true },
@@ -8,10 +10,21 @@ const props = defineProps({
   extra: { type: String, default: '' },
 })
 
-const emit = defineEmits(['close'])
+const paneStore = usePaneStore()
+const sessionStore = useSessionStore()
 
+/**
+ * 关闭当前面板
+ *
+ * 这里直接由 PaneHeader 收口、不走父组件的 @close 事件：
+ * 修复前它只 emit('close')，而 7 个面板（diff / terminal / file-editor / plan /
+ * tasks / subagent / preview）都没有监听，导致 ✕ 看得见、点了没反应。
+ * 每个面板都渲染 PaneHeader 且都传了 type，因此在这一处关闭能一次修好全部面板，
+ * 也免得将来新增面板再漏掉一次接线。
+ */
 function handleClose() {
-  emit('close')
+  const sid = sessionStore.currentSessionId
+  if (sid) paneStore.closePane(sid, props.type)
 }
 </script>
 
@@ -23,7 +36,7 @@ function handleClose() {
     </div>
     <div class="pane-actions">
       <slot name="extra"></slot>
-      <button v-if="closable" class="pane-btn" title="关闭" @click="handleClose">
+      <button v-if="closable" class="pane-btn" title="关闭面板" @click="handleClose">
         <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
           <path d="M1 1L13 13M13 1L1 13" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
         </svg>

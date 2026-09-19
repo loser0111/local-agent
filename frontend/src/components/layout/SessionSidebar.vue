@@ -183,7 +183,7 @@ async function handleDelete(e, id) {
   }
 
   &.active {
-    background-color: rgba(124, 58, 237, 0.15);
+    background-color: rgb(var(--color-primary-rgb) / 0.15);
   }
 }
 

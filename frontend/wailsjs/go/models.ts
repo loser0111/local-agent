@@ -21,7 +21,7 @@ export namespace main {
 	    sessionId?: string;
 	    answers: AskItem[];
 	    cancelled?: boolean;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new AskAnswer(source);
 	    }
@@ -1010,6 +1010,44 @@ export namespace main {
 	
 	
 	
+	export class SubagentInfo {
+	    runId: string;
+	    parentId: string;
+	    title: string;
+	    task: string;
+	    status: string;
+	    model?: string;
+	    step: number;
+	    currentTool?: string;
+	    startedAt: number;
+	    endedAt?: number;
+	    summary?: string;
+	    files?: string[];
+	    declined?: string[];
+	    error?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new SubagentInfo(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.runId = source["runId"];
+	        this.parentId = source["parentId"];
+	        this.title = source["title"];
+	        this.task = source["task"];
+	        this.status = source["status"];
+	        this.model = source["model"];
+	        this.step = source["step"];
+	        this.currentTool = source["currentTool"];
+	        this.startedAt = source["startedAt"];
+	        this.endedAt = source["endedAt"];
+	        this.summary = source["summary"];
+	        this.files = source["files"];
+	        this.declined = source["declined"];
+	        this.error = source["error"];
+	    }
+	}
 	export class Session {
 	    id: string;
 	    title: string;
@@ -1031,6 +1069,8 @@ export namespace main {
 	    contextSummary?: string;
 	    contextCoveredUpTo?: number;
 	    contextSummaryAt?: number;
+	    parentId?: string;
+	    subagent?: SubagentInfo;
 	
 	    static createFrom(source: any = {}) {
 	        return new Session(source);
@@ -1058,6 +1098,8 @@ export namespace main {
 	        this.contextSummary = source["contextSummary"];
 	        this.contextCoveredUpTo = source["contextCoveredUpTo"];
 	        this.contextSummaryAt = source["contextSummaryAt"];
+	        this.parentId = source["parentId"];
+	        this.subagent = this.convertValues(source["subagent"], SubagentInfo);
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -1087,6 +1129,7 @@ export namespace main {
 	    environment: string;
 	    enabledTools: string[];
 	    enabledSkills: string[];
+	    parentId?: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new SessionConfig(source);
@@ -1102,6 +1145,7 @@ export namespace main {
 	        this.environment = source["environment"];
 	        this.enabledTools = source["enabledTools"];
 	        this.enabledSkills = source["enabledSkills"];
+	        this.parentId = source["parentId"];
 	    }
 	}
 	export class SessionPatch {
@@ -1374,6 +1418,7 @@ export namespace main {
 	}
 	
 	
+	
 	export class ToolFileChange {
 	    time: number;
 	    tool: string;
@@ -1602,6 +1647,565 @@ export namespace main {
 	        this.files = this.convertValues(source["files"], UndoFileResult);
 	        this.failed = source["failed"];
 	        this.skipped = source["skipped"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+
+}
+
+export namespace plugin {
+	
+	export class CronTrigger {
+	    expr: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new CronTrigger(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.expr = source["expr"];
+	    }
+	}
+	export class DNDConfig {
+	    enabled: boolean;
+	    start: string;
+	    end: string;
+	    weekdays?: number[];
+	
+	    static createFrom(source: any = {}) {
+	        return new DNDConfig(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.enabled = source["enabled"];
+	        this.start = source["start"];
+	        this.end = source["end"];
+	        this.weekdays = source["weekdays"];
+	    }
+	}
+	export class ExecConf {
+	    prompt?: string;
+	    model?: string;
+	    workDir?: string;
+	    timeoutSeconds?: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new ExecConf(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.prompt = source["prompt"];
+	        this.model = source["model"];
+	        this.workDir = source["workDir"];
+	        this.timeoutSeconds = source["timeoutSeconds"];
+	    }
+	}
+	export class GlobalConfig {
+	    enabled: boolean;
+	    paused: boolean;
+	    defaultSnoozeMinutes?: number;
+	    missedPolicy?: string;
+	    dnd?: DNDConfig;
+	    maxConcurrency?: number;
+	    notifyEnabled: boolean;
+	    rateLimitPerTaskPerMinute?: number;
+	    rateLimitGlobalPer5Minutes?: number;
+	    foregroundOnlyInApp?: boolean;
+	    keepHistoryDays?: number;
+	    deleteHistoryWithTask?: boolean;
+	    taskSoftLimit?: number;
+	    unhandledWindowMinutes?: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new GlobalConfig(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.enabled = source["enabled"];
+	        this.paused = source["paused"];
+	        this.defaultSnoozeMinutes = source["defaultSnoozeMinutes"];
+	        this.missedPolicy = source["missedPolicy"];
+	        this.dnd = this.convertValues(source["dnd"], DNDConfig);
+	        this.maxConcurrency = source["maxConcurrency"];
+	        this.notifyEnabled = source["notifyEnabled"];
+	        this.rateLimitPerTaskPerMinute = source["rateLimitPerTaskPerMinute"];
+	        this.rateLimitGlobalPer5Minutes = source["rateLimitGlobalPer5Minutes"];
+	        this.foregroundOnlyInApp = source["foregroundOnlyInApp"];
+	        this.keepHistoryDays = source["keepHistoryDays"];
+	        this.deleteHistoryWithTask = source["deleteHistoryWithTask"];
+	        this.taskSoftLimit = source["taskSoftLimit"];
+	        this.unhandledWindowMinutes = source["unhandledWindowMinutes"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class Info {
+	    id: string;
+	    name: string;
+	    version: string;
+	    hostAPIVersion: string;
+	    kind: string;
+	    state: string;
+	    dataDir: string;
+	    appVersion: string;
+	    capabilities: string[];
+	    startedAt?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new Info(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.name = source["name"];
+	        this.version = source["version"];
+	        this.hostAPIVersion = source["hostAPIVersion"];
+	        this.kind = source["kind"];
+	        this.state = source["state"];
+	        this.dataDir = source["dataDir"];
+	        this.appVersion = source["appVersion"];
+	        this.capabilities = source["capabilities"];
+	        this.startedAt = source["startedAt"];
+	    }
+	}
+	export class IntervalTrigger {
+	    everyMinutes: number;
+	    startAt?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new IntervalTrigger(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.everyMinutes = source["everyMinutes"];
+	        this.startAt = source["startAt"];
+	    }
+	}
+	export class Manifest {
+	    id: string;
+	    name: string;
+	    version: string;
+	    hostAPIVersion: string;
+	    kind: string;
+	    entry: string;
+	    capabilities?: string[];
+	    dataFiles?: string[];
+	    emits?: string[];
+	    hostMethods?: string[];
+	    docs?: string[];
+	    notes?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new Manifest(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.name = source["name"];
+	        this.version = source["version"];
+	        this.hostAPIVersion = source["hostAPIVersion"];
+	        this.kind = source["kind"];
+	        this.entry = source["entry"];
+	        this.capabilities = source["capabilities"];
+	        this.dataFiles = source["dataFiles"];
+	        this.emits = source["emits"];
+	        this.hostMethods = source["hostMethods"];
+	        this.docs = source["docs"];
+	        this.notes = source["notes"];
+	    }
+	}
+	export class MissedEntry {
+	    at: string;
+	    handled?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new MissedEntry(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.at = source["at"];
+	        this.handled = source["handled"];
+	    }
+	}
+	export class NotifyConf {
+	    level?: string;
+	    inAppOnly?: boolean;
+	    titleTemplate?: string;
+	    bodyTemplate?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new NotifyConf(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.level = source["level"];
+	        this.inAppOnly = source["inAppOnly"];
+	        this.titleTemplate = source["titleTemplate"];
+	        this.bodyTemplate = source["bodyTemplate"];
+	    }
+	}
+	export class OnceTrigger {
+	    at: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new OnceTrigger(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.at = source["at"];
+	    }
+	}
+	export class Policy {
+	    missedOverride?: string;
+	    dndOverride?: DNDConfig;
+	    maxRetries?: number;
+	    retryBackoffMinutes?: number;
+	    disableAfterFailures?: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new Policy(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.missedOverride = source["missedOverride"];
+	        this.dndOverride = this.convertValues(source["dndOverride"], DNDConfig);
+	        this.maxRetries = source["maxRetries"];
+	        this.retryBackoffMinutes = source["retryBackoffMinutes"];
+	        this.disableAfterFailures = source["disableAfterFailures"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class RecurringTrigger {
+	    period: string;
+	    timeOfDay: string;
+	    weekdays?: number[];
+	    dayOfMonth?: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new RecurringTrigger(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.period = source["period"];
+	        this.timeOfDay = source["timeOfDay"];
+	        this.weekdays = source["weekdays"];
+	        this.dayOfMonth = source["dayOfMonth"];
+	    }
+	}
+	export class ReminderConf {
+	    snoozeMinutes?: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new ReminderConf(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.snoozeMinutes = source["snoozeMinutes"];
+	    }
+	}
+	export class RunRecord {
+	    runID: string;
+	    taskID: string;
+	    taskTitle?: string;
+	    kind: string;
+	    source: string;
+	    triggeredAt: string;
+	    scheduledAt?: string;
+	    status: string;
+	    startedAt?: string;
+	    finishedAt?: string;
+	    durationMS?: number;
+	    summary?: string;
+	    error?: string;
+	    outputPath?: string;
+	    runSessionID?: string;
+	    declined?: string[];
+	    notifiedAt?: string;
+	    notifyFallback?: string;
+	    retryOf?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new RunRecord(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.runID = source["runID"];
+	        this.taskID = source["taskID"];
+	        this.taskTitle = source["taskTitle"];
+	        this.kind = source["kind"];
+	        this.source = source["source"];
+	        this.triggeredAt = source["triggeredAt"];
+	        this.scheduledAt = source["scheduledAt"];
+	        this.status = source["status"];
+	        this.startedAt = source["startedAt"];
+	        this.finishedAt = source["finishedAt"];
+	        this.durationMS = source["durationMS"];
+	        this.summary = source["summary"];
+	        this.error = source["error"];
+	        this.outputPath = source["outputPath"];
+	        this.runSessionID = source["runSessionID"];
+	        this.declined = source["declined"];
+	        this.notifiedAt = source["notifiedAt"];
+	        this.notifyFallback = source["notifyFallback"];
+	        this.retryOf = source["retryOf"];
+	    }
+	}
+	export class SnoozeState {
+	    until: string;
+	    original: string;
+	    count: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new SnoozeState(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.until = source["until"];
+	        this.original = source["original"];
+	        this.count = source["count"];
+	    }
+	}
+	export class Trigger {
+	    kind: string;
+	    once?: OnceTrigger;
+	    interval?: IntervalTrigger;
+	    recurring?: RecurringTrigger;
+	    cron?: CronTrigger;
+	    until?: string;
+	    maxFires?: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new Trigger(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.kind = source["kind"];
+	        this.once = this.convertValues(source["once"], OnceTrigger);
+	        this.interval = this.convertValues(source["interval"], IntervalTrigger);
+	        this.recurring = this.convertValues(source["recurring"], RecurringTrigger);
+	        this.cron = this.convertValues(source["cron"], CronTrigger);
+	        this.until = source["until"];
+	        this.maxFires = source["maxFires"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class TaskInput {
+	    title: string;
+	    note?: string;
+	    kind: string;
+	    trigger: Trigger;
+	    enabled?: boolean;
+	    reminder?: ReminderConf;
+	    exec?: ExecConf;
+	    notify?: NotifyConf;
+	    policy?: Policy;
+	
+	    static createFrom(source: any = {}) {
+	        return new TaskInput(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.title = source["title"];
+	        this.note = source["note"];
+	        this.kind = source["kind"];
+	        this.trigger = this.convertValues(source["trigger"], Trigger);
+	        this.enabled = source["enabled"];
+	        this.reminder = this.convertValues(source["reminder"], ReminderConf);
+	        this.exec = this.convertValues(source["exec"], ExecConf);
+	        this.notify = this.convertValues(source["notify"], NotifyConf);
+	        this.policy = this.convertValues(source["policy"], Policy);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class TaskState {
+	    lastFiredAt?: string;
+	    lastResult?: string;
+	    lastError?: string;
+	    lastRunID?: string;
+	    firedCount?: number;
+	    consecutiveFailures?: number;
+	    nextRetryAt?: string;
+	    snooze?: SnoozeState;
+	    missedPending?: MissedEntry[];
+	    notified?: Record<string, string>;
+	    finished?: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new TaskState(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.lastFiredAt = source["lastFiredAt"];
+	        this.lastResult = source["lastResult"];
+	        this.lastError = source["lastError"];
+	        this.lastRunID = source["lastRunID"];
+	        this.firedCount = source["firedCount"];
+	        this.consecutiveFailures = source["consecutiveFailures"];
+	        this.nextRetryAt = source["nextRetryAt"];
+	        this.snooze = this.convertValues(source["snooze"], SnoozeState);
+	        this.missedPending = this.convertValues(source["missedPending"], MissedEntry);
+	        this.notified = source["notified"];
+	        this.finished = source["finished"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class TaskView {
+	    id: string;
+	    title: string;
+	    note?: string;
+	    kind: string;
+	    trigger: Trigger;
+	    enabled: boolean;
+	    reminder?: ReminderConf;
+	    exec?: ExecConf;
+	    notify?: NotifyConf;
+	    policy?: Policy;
+	    state: TaskState;
+	    createdAt: string;
+	    updatedAt: string;
+	    nextFireAt?: string;
+	    snoozeUntil?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new TaskView(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.title = source["title"];
+	        this.note = source["note"];
+	        this.kind = source["kind"];
+	        this.trigger = this.convertValues(source["trigger"], Trigger);
+	        this.enabled = source["enabled"];
+	        this.reminder = this.convertValues(source["reminder"], ReminderConf);
+	        this.exec = this.convertValues(source["exec"], ExecConf);
+	        this.notify = this.convertValues(source["notify"], NotifyConf);
+	        this.policy = this.convertValues(source["policy"], Policy);
+	        this.state = this.convertValues(source["state"], TaskState);
+	        this.createdAt = source["createdAt"];
+	        this.updatedAt = source["updatedAt"];
+	        this.nextFireAt = source["nextFireAt"];
+	        this.snoozeUntil = source["snoozeUntil"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {

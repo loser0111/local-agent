@@ -261,7 +261,7 @@ function reviewCode() {
   }
 
   &.active {
-    background-color: rgba(124, 58, 237, 0.1);
+    background-color: rgb(var(--color-primary-rgb) / 0.1);
     border-left-color: $color-primary;
   }
 }
@@ -283,15 +283,15 @@ function reviewCode() {
 
   &.badge-added {
     color: $color-success;
-    background-color: rgba(16, 185, 129, 0.15);
+    background-color: rgb(var(--color-success-rgb) / 0.15);
   }
   &.badge-deleted {
     color: $color-error;
-    background-color: rgba(239, 68, 68, 0.15);
+    background-color: rgb(var(--color-error-rgb) / 0.15);
   }
   &.badge-renamed {
     color: $color-warning;
-    background-color: rgba(245, 158, 11, 0.15);
+    background-color: rgb(var(--color-warning-rgb) / 0.15);
   }
 }
 
@@ -373,7 +373,7 @@ function reviewCode() {
 }
 
 .line-hunk {
-  background-color: rgba(189, 147, 249, 0.1);
+  background-color: rgb(var(--color-primary-rgb) / 0.1);
 
   .line-content {
     color: $color-primary;

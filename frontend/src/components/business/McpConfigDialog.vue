@@ -163,7 +163,7 @@ async function copyExport() {
 .mcp-overlay {
   position: fixed;
   inset: 0;
-  background-color: rgba(0, 0, 0, 0.45);
+  background-color: $color-overlay;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -178,7 +178,7 @@ async function copyExport() {
   background-color: $color-bg-secondary;
   border: 1px solid $color-border;
   border-radius: $radius-md;
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.4);
+  box-shadow: $shadow-lg;
 }
 
 .dialog-header {
@@ -212,7 +212,7 @@ async function copyExport() {
 
   code {
     font-family: $font-family-mono;
-    background-color: rgba(68, 71, 90, 0.6);
+    background-color: rgb(var(--color-bg-tertiary-rgb) / 0.6);
     padding: 0 4px;
     border-radius: 3px;
   }
