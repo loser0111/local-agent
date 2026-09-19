@@ -208,9 +208,13 @@ func TestBuiltinCannotDelete(t *testing.T) {
 // ===== 曝光策略：exec_shell 消失事故的回归防线 =====
 //
 // 背景：v2 期的 DefaultExposure 把「内置但不在 directToolOrder 里」判成 ExposureInternal，
-// 而 exec_shell 是 defaultSources() 里唯一这样的工具，于是它被标记为对模型不可见
+// 而 exec_shell 当时是 defaultSources() 里唯一这样的工具，于是它被标记为对模型不可见
 // （list 不列出、describe/execute 当"未找到"），模型只能报"找不到 exec_shell"。
 // 下面三个测试分别守住：默认值不再产生 internal、全新安装的推导正确、存量错误值能被修复。
+//
+// 后续 exec_shell 被加进了 directToolOrder（buildBasePrompt 点名了它，直出才对得上），
+// 于是这里的期望值从 router 变成 direct——防线只增强不减弱：router 是"模型要先发现"，
+// direct 是"模型直接看得见"，两者都远好于曾经事故里的 internal。
 
 // 默认曝光绝不能把任何内置工具判成 internal
 func TestDefaultExposureNeverHidesBuiltins(t *testing.T) {
@@ -219,8 +223,8 @@ func TestDefaultExposureNeverHidesBuiltins(t *testing.T) {
 			t.Fatalf("内置工具 %s 的默认曝光不应是 internal——那会让它对模型彻底消失", src.Name)
 		}
 	}
-	if got := DefaultExposure(SourceBuiltin, "exec_shell"); got != ExposureRouter {
-		t.Fatalf("exec_shell 默认应经路由器发现，实际 %q", got)
+	if got := DefaultExposure(SourceBuiltin, toolExecShell); got != ExposureDirect {
+		t.Fatalf("exec_shell 默认应直出（buildBasePrompt 点名了它），实际 %q", got)
 	}
 	if got := DefaultExposure(SourceCLI, "whatever"); got != ExposureRouter {
 		t.Fatalf("非内置来源默认应经路由器，实际 %q", got)
@@ -228,7 +232,7 @@ func TestDefaultExposureNeverHidesBuiltins(t *testing.T) {
 }
 
 // 全新安装（配置里没有 exposure 字段）时，运行期必须按 DefaultExposure 推断：
-// 文件工具直出、exec_shell 经路由器可见。此前运行期对空值一律降级成 router，
+// 文件工具与 exec_shell 都直出。此前运行期对空值一律降级成 router，
 // 结果连文件工具也退回了"要先经路由器发现"。
 func TestFreshInstallExposureMatchesDefaults(t *testing.T) {
 	tm, _ := newTestToolManager(t) // 无配置文件 → defaultSources()
@@ -241,8 +245,8 @@ func TestFreshInstallExposureMatchesDefaults(t *testing.T) {
 	if !direct[toolReadFile] {
 		t.Fatalf("全新安装时 read_file 应直出，实际直出名录: %v", view.direct)
 	}
-	if direct["exec_shell"] {
-		t.Fatal("exec_shell 不应直出（它经路由器发现）")
+	if !direct[toolExecShell] {
+		t.Fatal("exec_shell 应直出（buildBasePrompt 点名了它）")
 	}
 
 	// 关键回归点：exec_shell 必须能被模型发现
@@ -274,8 +278,8 @@ func TestRepairBuiltinExposureScope(t *testing.T) {
 	if len(fixed) != 1 || fixed[0] != "exec_shell" {
 		t.Fatalf("只应修复「内置 + internal」的条目，实际修复: %v", fixed)
 	}
-	if sources[0].Exposure != ExposureRouter {
-		t.Fatalf("exec_shell 应被修复为 router，实际 %q", sources[0].Exposure)
+	if sources[0].Exposure != ExposureDirect {
+		t.Fatalf("exec_shell 应被修复为直出，实际 %q", sources[0].Exposure)
 	}
 	if sources[1].Exposure != ExposureRouter {
 		t.Fatal("已配好的内置条目不应被改动")
@@ -304,8 +308,8 @@ func TestRepairHiddenBuiltinOnLoad(t *testing.T) {
 	if !ok {
 		t.Fatal("加载后应存在 exec_shell")
 	}
-	if src.Exposure != ExposureRouter {
-		t.Fatalf("被误判为 internal 的 exec_shell 应修复为 router，实际 %q", src.Exposure)
+	if src.Exposure != ExposureDirect {
+		t.Fatalf("被误判为 internal 的 exec_shell 应修复为直出，实际 %q", src.Exposure)
 	}
 
 	// 文件应已被重写为当前版本

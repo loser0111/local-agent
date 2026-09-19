@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -483,9 +484,17 @@ func TestFileToolsAssembledAndDirectExposed(t *testing.T) {
 		ProjectDir: dir,
 		SessionID:  "s1",
 		Enforcer:   AllowAllEnforcer{},
+		// 给一个 spawner：directToolOrder 里有 spawn_agent，而没有 spawner 时它按设计
+		// 根本不注册（子代理正是靠这个不注册来防止再派生）。此处传桩只为让它存在，
+		// 下面的断言才能覆盖完整名录——否则失败原因是"工具没装上"，而不是"没直出"。
+		SpawnAgent: func(context.Context, string, int) (*SubagentResult, error) {
+			return &SubagentResult{}, nil
+		},
 	})
 
-	// 六个文件工具 + tool_router 都直出给模型
+	// 直出名录里的工具 + tool_router 都必须真的出现在发给模型的定义里。
+	// 这是"直出就一定要让模型看得见"的守卫：任何新增进 directToolOrder 的工具，
+	// 只要装配成功，就不能对模型隐形（历史事故：exec_shell 曾整个消失）。
 	defs := view.GetToolsForLLM()
 	names := map[string]bool{}
 	for _, d := range defs {
@@ -522,6 +531,76 @@ func TestFileToolsAssembledAndDirectExposed(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("经 tool_router 调 glob 失败: %v", err)
 	}
+}
+
+// 直出给模型的工具，其必填参数必须真的出现在 schema 里。
+//
+// 这道防线针对的是一类静默缺陷：装配期会给每个工具包一层 guardedTool，而 schemaForTool
+// 是对装饰后的对象做接口断言（RequiredParams / SchemaProvider）。装饰器少转发一个方法，
+// 断言就失败，required 静默变空——模型看不到哪个参数必填，只能从描述里猜，猜错就吃一个
+// 参数校验错误、白烧一轮。exec_shell 还额外绕过一层：它的 cmd 必填来自来源配置的
+// Required 标记，必须经 requiredFromConfig 单独传导，光有 paramsFromConfig 会丢掉。
+// 因此这里逐个钉死期望值：新增直出工具若忘了实现 RequiredParams()，本测试立刻失败。
+func TestDirectToolsCarryRequiredParams(t *testing.T) {
+	tm, dir := newTestToolManager(t)
+	view := tm.BuildView(context.Background(), BuildOptions{
+		ProjectDir: dir,
+		SessionID:  "s1",
+		Enforcer:   AllowAllEnforcer{},
+		SpawnAgent: func(context.Context, string, int) (*SubagentResult, error) {
+			return &SubagentResult{}, nil
+		},
+	})
+
+	want := map[string][]string{
+		toolReadFile:  {"path"},
+		toolWriteFile: {"path", "content"},
+		toolEditFile:  {"path", "old_string", "new_string"},
+		toolGlob:      {"pattern"},
+		toolGrep:      {"pattern"},
+		toolAskUser:   {"questions"},
+		toolExecShell: {"cmd"},
+	}
+	got := map[string][]string{}
+	for _, d := range view.GetToolsForLLM() {
+		got[d.Function.Name] = schemaRequired(t, d.Function.Parameters)
+	}
+	for name, exp := range want {
+		req, ok := got[name]
+		if !ok {
+			t.Errorf("%s 应直出给模型，实际工具列表 %v", name, keysOf(got))
+			continue
+		}
+		if !sameStrings(req, exp) {
+			t.Errorf("%s 的 required 应为 %v，实际 %v（装饰器必须透传 RequiredParams）", name, exp, req)
+		}
+	}
+}
+
+// sameStrings 比较两个字符串集合（忽略顺序）
+func sameStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	x := append([]string(nil), a...)
+	y := append([]string(nil), b...)
+	sort.Strings(x)
+	sort.Strings(y)
+	for i := range x {
+		if x[i] != y[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func keysOf(m map[string][]string) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // 文件工具也必须过权限网关（两条路径都不能绕过）
@@ -564,8 +643,8 @@ func TestToolStoreEnsureBuiltins(t *testing.T) {
 		}
 	}
 	// 已存在的配置不应被重复追加
-	if len(store.GetAll()) != 1+len(directToolOrder) {
-		t.Fatalf("工具数应为 %d，实际 %d", 1+len(directToolOrder), len(store.GetAll()))
+	if len(store.GetAll()) != len(defaultSources()) {
+		t.Fatalf("工具数应为 %d，实际 %d", len(defaultSources()), len(store.GetAll()))
 	}
 	// 补齐结果应落盘（再次加载不再变化）
 	again := NewToolStore(filePath)

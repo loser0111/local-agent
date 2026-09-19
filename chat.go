@@ -429,6 +429,13 @@ type ChatEvent struct {
 	// Ask 模型主动提问（type=ask_user）：前端应弹出提问弹窗，用户作答后经 ResolveAskUser 回传。
 	// 等待期间后端阻塞；超时/取消会以"用户未作答"回给模型，让它自行决策而不是让整轮失败。
 	Ask *AskRequest `json:"ask,omitempty"`
+	// Compact 自动摘要压缩的产物（type=context_compacted）。
+	// 压缩会让用量**突然下降**，这是设计内行为；但用户只看到数字掉了一半，
+	// 很容易以为对话被截断了。所以压缩一发生就主动推一次，把"原文没丢"讲清楚。
+	Compact *CompactOutcome `json:"compact,omitempty"`
+	// Context 事件发生后的上下文用量。前端据此就地刷新指示，
+	// 不必等这一轮结束的 ChatResult 回来。
+	Context *ContextStat `json:"context,omitempty"`
 }
 
 // 事件类型常量（前端按同名分支分发）
@@ -440,6 +447,9 @@ const (
 	// ChatEventCancelled 本轮被用户停止（软取消或硬取消）。前端据此把流式气泡
 	// 收尾成"已停止"，而不是留着它永远转圈。
 	ChatEventCancelled = "cancelled"
+	// ChatEventContextCompacted 自动摘要压缩已生效（事件携带压缩结果与新的用量）。
+	// 前端用它弹一次提示：用量下降是压缩造成的，原文仍在会话记录里。
+	ChatEventContextCompacted = "context_compacted"
 )
 
 // emitChatEvent 向前端推送一个聊天事件（无 Wails 上下文时静默跳过）
@@ -558,6 +568,21 @@ func (a *App) buildBasePrompt(session *Session, dir string) string {
 		"遇到会产生大量中间过程、且与当前主线关系不大的任务（把一个模块摸清楚、独立调研一个问题），" +
 		"可以用 spawn_agent 派一个子代理去做：它有自己独立的上下文，你只收到一份结论，" +
 		"那些中间过程不会占用你的上下文。一两步就能做完的事不必派。"
+
+	// 效率约定：引导模型一轮批量调用、避免重复读数与无谓的工具发现往返。
+	// 执行层本就支持一轮返回多个 tool_calls（runToolLoop 串行执行、整体只算一轮），
+	// 但此前的提示词从未提及，模型只会一个一个来，探索类任务因此多耗一倍以上轮次。
+	prompt += "\n\n## 效率约定\n" +
+		"轮次很宝贵，请用下面这些方式减少往返：\n" +
+		"1. 一轮可以发起多个互不依赖的工具调用：在同一次响应里返回多个 tool_call，它们只算一轮、按先后顺序执行。" +
+		"调研阶段（读多个文件、搜多处代码、列目录）请尽量合并到同一轮，不要一个个来。\n" +
+		"2. 有副作用的操作（write_file / edit_file / exec_shell）一次只发一个，确认结果无误再发下一个：" +
+		"批量发出会让权限确认连续弹窗，出错了也更难定位是哪一个。\n" +
+		"3. 同一个文件不要反复读：读完记住内容，要改就直接 edit_file；" +
+		"已经确认过的命令也不要再跑一遍去'再验证'。\n" +
+		"4. 先用 glob / grep 定位到具体文件与行，再 read_file 精读；不要盲目通读整个目录。\n" +
+		"5. 上面「工具使用偏好」里已点名的工具都可直接调用，不必先经 tool_router 去 list / describe；" +
+		"只有不确定有哪些工具、或不确定某工具的完整参数时，才用 tool_router 发现。"
 
 	if a.skillStore != nil {
 		enabled := a.enabledSkillsForSession(session)
@@ -689,6 +714,12 @@ func runToolLoop(ar *agentRun) *ChatResult {
 	//    锚点由响应里回传的真实 input token 建立，把估算误差限制在两条锚点之间。
 	window := contextWindowOf(model)
 	toolTokens := toolSchemaTokens(tools)
+	// 估算校准系数：本次运行全程不变（按会话模型查一次）。ar.TokenCalib 为 nil
+	// （子代理，以及只手工构造了 agentRun 的测试）时按 1.0，即退化成纯字符估算。
+	calib := 1.0
+	if ar.TokenCalib != nil {
+		calib = ar.TokenCalib.Ratio(session.Model)
+	}
 	var anchor *tokenAnchor
 	var ctxStat *ContextStat
 	overflowRetried := false
@@ -721,7 +752,7 @@ func runToolLoop(ar *agentRun) *ChatResult {
 		// 上下文接近窗口就先压缩再发请求——这是"敢让 agent 跑长任务"的关键一步。
 		// 压缩改的是存储（会话三个摘要字段），所以序列必须跟着重建、用量锚点必须作废。
 		// 压缩失败不阻断本轮：compactSession 内部已降级，这里只记一笔日志。
-		ctxStat = contextStatOf(session, messages, window, anchor, toolTokens)
+		ctxStat = contextStatOf(session, messages, window, anchor, toolTokens, calib)
 		compactedThisTurn := false
 		if ar.Compactor != nil && needCompact(ctxStat.UsedTokens, window) && !summaryBroken && !compact {
 			out, cerr := ar.Compactor(run.Ctx(), session, model)
@@ -733,7 +764,7 @@ func runToolLoop(ar *agentRun) *ChatResult {
 				fmt.Printf("[context] 摘要不可用，本run改用确定性截断: %s\n", out.Reason)
 				summaryBroken = true
 				messages = buildRunMessages(session, systemPrompt, true)
-				ctxStat = contextStatOf(session, messages, window, nil, toolTokens)
+				ctxStat = contextStatOf(session, messages, window, nil, toolTokens, calib)
 			case !out.Compressed:
 				fmt.Printf("[context] 未压缩: %s\n", out.Reason)
 			default:
@@ -741,8 +772,15 @@ func runToolLoop(ar *agentRun) *ChatResult {
 					session = s2
 					messages = buildRunMessages(session, systemPrompt, compact)
 					anchor = nil
-					ctxStat = contextStatOf(session, messages, window, nil, toolTokens)
+					ctxStat = contextStatOf(session, messages, window, nil, toolTokens, calib)
 					compactedThisTurn = true
+					// 主动告知：前缀被换成摘要之后用量会立刻下降。走事件而不落库——
+					// 它是解释而不是对话内容，不该在会话记录里留一串噪声。
+					ar.Recorder.Emit(ChatEvent{
+						Type:    ChatEventContextCompacted,
+						Compact: out,
+						Context: ctxStat,
+					})
 				}
 			}
 		}
@@ -798,6 +836,14 @@ func runToolLoop(ar *agentRun) *ChatResult {
 							messages = buildRunMessages(session, systemPrompt, compact)
 							anchor = nil
 							fmt.Printf("[context] 上下文超限，已摘要压缩（覆盖 %d 条消息）后重试\n", out.CoveredMsgs)
+							// 超限才压缩说明前面的阈值判断没兜住，用户更该知道
+							// 这次"用量突然下降"是怎么来的——同样只发事件不落库。
+							ctxStat = contextStatOf(session, messages, window, nil, toolTokens, calib)
+							ar.Recorder.Emit(ChatEvent{
+								Type:    ChatEventContextCompacted,
+								Compact: out,
+								Context: ctxStat,
+							})
 							continue
 						}
 					}
@@ -831,6 +877,14 @@ func runToolLoop(ar *agentRun) *ChatResult {
 		// 这是整套估算敢用粗略字符系数的前提。
 		if resp.Usage.PromptTokens > 0 {
 			anchor = &tokenAnchor{InputTokens: resp.Usage.PromptTokens, MsgCount: len(messages)}
+
+			// 顺手做一次校准观测：同一段序列，真实用量与字符估算此刻都在手上。
+			// 估算那侧刻意用**未缩放**的口径（estimateSeqTokens 不乘 calib），否则观测值
+			// 会被现有系数拉向 1.0，校准自己把自己抹平。
+			if ar.TokenCalib != nil {
+				ar.TokenCalib.Observe(session.Model, resp.Usage.PromptTokens,
+					estimateSeqTokens(messages, nil)+toolTokens)
+			}
 		}
 
 		choice := resp.Choices[0]

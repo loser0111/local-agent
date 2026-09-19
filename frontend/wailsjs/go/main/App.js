@@ -86,6 +86,10 @@ export function ExportMCPServers(arg1) {
   return window['go']['main']['App']['ExportMCPServers'](arg1);
 }
 
+export function GetContextPrefs() {
+  return window['go']['main']['App']['GetContextPrefs']();
+}
+
 export function GetContextStat(arg1) {
   return window['go']['main']['App']['GetContextStat'](arg1);
 }
@@ -272,6 +276,10 @@ export function SaveSkill(arg1, arg2) {
 
 export function SaveTool(arg1) {
   return window['go']['main']['App']['SaveTool'](arg1);
+}
+
+export function SetContextKeepRecentMsgs(arg1) {
+  return window['go']['main']['App']['SetContextKeepRecentMsgs'](arg1);
 }
 
 export function SetExposure(arg1, arg2) {

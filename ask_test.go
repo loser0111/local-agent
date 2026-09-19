@@ -86,7 +86,7 @@ func TestAskBrokerResolveAndCancel(t *testing.T) {
 	}
 	done := make(chan AskAnswer, 1)
 	go func() {
-		ans, _ := b.Wait(id, ch)
+		ans, _ := b.Wait(context.Background(), id, ch)
 		done <- ans
 	}()
 	if err := b.Resolve(AskAnswer{ID: id, Answers: []AskItem{{Selected: []string{"A"}}}}); err != nil {
@@ -116,7 +116,7 @@ func TestAskBrokerResolveAndCancel(t *testing.T) {
 	id2, ch2 := b.register("s2", AskRequest{Questions: []AskQuestion{{Question: "q2"}}})
 	done2 := make(chan AskAnswer, 1)
 	go func() {
-		ans, _ := b.Wait(id2, ch2)
+		ans, _ := b.Wait(context.Background(), id2, ch2)
 		done2 <- ans
 	}()
 	time.Sleep(20 * time.Millisecond)
@@ -135,7 +135,7 @@ func TestAskBrokerResolveAndCancel(t *testing.T) {
 	// 超时 → 同样返回 Cancelled，而不是让整轮失败
 	tiny := newAskBroker(30 * time.Millisecond)
 	id3, ch3 := tiny.register("s3", AskRequest{})
-	ans3, err := tiny.Wait(id3, ch3)
+	ans3, err := tiny.Wait(context.Background(), id3, ch3)
 	if err != nil {
 		t.Fatalf("超时不应返回 error（否则整轮会失败）: %v", err)
 	}
@@ -317,7 +317,7 @@ func TestCancelAskUser(t *testing.T) {
 	_ = id
 	done := make(chan AskAnswer, 1)
 	go func() {
-		ans, _ := app.askBroker.Wait(id, ch)
+		ans, _ := app.askBroker.Wait(context.Background(), id, ch)
 		done <- ans
 	}()
 	time.Sleep(20 * time.Millisecond)

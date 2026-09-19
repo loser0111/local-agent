@@ -46,7 +46,14 @@ type CLITool struct {
 	// Dir 工作目录（会话项目目录）。为空时继承进程工作目录。
 	// 设定它的意义：让相对路径有确定含义，权限判定的"项目目录内/外"才有依据。
 	Dir string
+	// required 来源配置里标了 Required 的参数名（exec_shell 的 cmd 就在其中）。
+	// 必须实现 RequiredParams() 把它交给 schemaForTool，模型才知道哪个参数必填；
+	// 否则 Execute 里那句"cmd 参数是必需的"只有代码自己知道，模型只能靠猜。
+	required []string
 }
+
+// RequiredParams 透传来源配置声明的必填参数
+func (t *CLITool) RequiredParams() []string { return t.required }
 
 func (t *CLITool) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
 	cmdStr, ok := args["cmd"].(string)
@@ -97,7 +104,9 @@ func NewMetaTool(registry map[string]ToolInterface, typeMap map[string]string, h
 			Description: "工具路由器。通过此工具发现和执行所有已启用的工具。" +
 				"工具较多时用 action=\"list\" 配合 query 按关键字搜索；" +
 				"用 action=\"describe\" 查看目标工具的完整参数定义；" +
-				"最后用 action=\"execute\" 执行指定工具。",
+				"最后用 action=\"execute\" 执行指定工具。" +
+				"注意：工具列表里已直接给出的工具（如 read_file、exec_shell）无需先经此路由器，" +
+				"直接调用即可；只有目标工具未出现在工具列表中时，才需要用本工具去发现。",
 			Parameters: map[string]*ToolArgDef{
 				"action":    {Type: "string", Description: "操作类型：list=列出/搜索可用工具；describe=查看工具参数定义；execute=执行指定工具"},
 				"query":     {Type: "string", Description: "当 action=list 时可选，按工具名或描述的关键字过滤（如 文件、天气、mcp）"},
@@ -323,8 +332,8 @@ type BuildOptions struct {
 
 // buildContext 装配期传给内置工具构造函数的上下文
 type buildContext struct {
-	dir     string                             // 工作区目录（命令类工具的工作目录）
-	fileCtx fileToolContext                    // 文件类工具的上下文（目录 + 归因记录）
+	dir     string                                                       // 工作区目录（命令类工具的工作目录）
+	fileCtx fileToolContext                                              // 文件类工具的上下文（目录 + 归因记录）
 	asker   func(ctx context.Context, req AskRequest) (AskAnswer, error) // ask_user 的回路
 	// spawner 派生代理的回路；为 nil 时 spawn_agent 不注册（子代理因此无法再派生）
 	spawner func(ctx context.Context, task string, maxTurns int) (*SubagentResult, error)
@@ -334,12 +343,13 @@ type buildContext struct {
 // 返回 ok=false 表示该内置工具尚未实现（例如用户自定义的非内置项混进来）。
 func newBuiltinTool(src *ToolSource, bc buildContext) (ToolInterface, bool) {
 	switch src.Name {
-	case "exec_shell":
+	case toolExecShell:
 		return &CLITool{
 			BaseTool: &BaseTool{
 				Name: src.Name, Description: src.Description, Parameters: paramsFromConfig(src.Parameters),
 			},
-			Dir: bc.dir,
+			Dir:      bc.dir,
+			required: requiredFromConfig(src.Parameters),
 		}, true
 	case toolReadFile:
 		return newReadFileTool(bc), true

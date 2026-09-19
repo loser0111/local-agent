@@ -10,6 +10,7 @@ import ToolSettings from '@/components/business/ToolSettings.vue'
 import SkillSettings from '@/components/business/SkillSettings.vue'
 import TaskSettings from '@/components/business/TaskSettings.vue'
 import PermissionSettings from '@/components/business/PermissionSettings.vue'
+import { getContextPrefs, setContextKeepRecentMsgs } from '@/api/session'
 
 const router = useRouter()
 const settingStore = useSettingStore()
@@ -34,6 +35,37 @@ const tabs = [
 
 function goBack() {
   router.push('/')
+}
+
+// ===== 通用设置：上下文压缩策略 =====
+//
+// 它是**后端**配置（~/.local-agent/context.json），不是前端本地状态：
+// 压缩发生在后端，前端再存一份只会两边不一致。所以进页面读、改完写回。
+const keepRecentMsgs = ref(null)
+const keepRecentSaving = ref(false)
+
+async function loadContextPrefs() {
+  const p = await getContextPrefs()
+  if (p) keepRecentMsgs.value = p.keepRecentMsgs
+}
+
+async function saveKeepRecentMsgs() {
+  const n = Number(keepRecentMsgs.value)
+  if (!Number.isInteger(n)) {
+    ui.notify('请输入整数条数', 'error')
+    return
+  }
+  keepRecentSaving.value = true
+  try {
+    const p = await setContextKeepRecentMsgs(n)
+    keepRecentMsgs.value = p.keepRecentMsgs
+    ui.notify(`已更新：压缩时保留最近 ${p.keepRecentMsgs} 条原文`, 'success')
+  } catch (e) {
+    // 越界由后端拒绝（4–500），这里如实转达，不偷偷改成合法值
+    ui.notify(`保存失败：${e.message || e}`, 'error')
+  } finally {
+    keepRecentSaving.value = false
+  }
 }
 
 // ===== 通用设置：默认模型 =====
@@ -258,6 +290,7 @@ async function handleEditTestConnection() {
 onMounted(() => {
   loadModels()
   loadModelNamesForDefault()
+  loadContextPrefs()
 })
 </script>
 
@@ -327,6 +360,31 @@ onMounted(() => {
               <option value="">不设默认</option>
               <option v-for="m in modelNamesForDefault" :key="m" :value="m">{{ m }}</option>
             </select>
+          </div>
+
+          <div class="form-group">
+            <label>上下文压缩：保留最近原文条数</label>
+            <div style="display: flex; gap: 8px; align-items: center">
+              <input
+                type="number"
+                class="input"
+                style="max-width: 140px"
+                min="4"
+                max="500"
+                v-model.number="keepRecentMsgs"
+              />
+              <button
+                class="btn btn-ghost"
+                :disabled="keepRecentSaving || keepRecentMsgs === null"
+                @click="saveKeepRecentMsgs"
+              >
+                {{ keepRecentSaving ? '保存中…' : '保存' }}
+              </button>
+            </div>
+            <div class="checkbox-hint">
+              自动压缩触发时，最近这么多条消息保持原文，更早的合并成摘要（4–500）。调小压得更狠、省更多；
+              调大保留更多细节。原文始终完整保留在会话记录里，清空摘要即可回到全量。
+            </div>
           </div>
         </div>
 
