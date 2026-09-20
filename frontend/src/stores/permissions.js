@@ -82,6 +82,9 @@ export const usePermissionStore = defineStore('permissions', () => {
       await resolvePermission({ id: req.id, decision, scope, rule, layer })
       clearPending()
     } catch (e) {
+      // 应答失败多半是请求已超时/被取消（后端报"不存在"）：此时弹窗已无意义，
+      // 一并关掉，只留错误提示——否则弹窗会永久悬挂。
+      clearPending()
       error.value = `应答失败：${e.message || e}`
     } finally {
       answering.value = false

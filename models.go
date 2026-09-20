@@ -198,12 +198,13 @@ func (ms *ModelStore) UpdateModel(name string, newModel Model) error {
 
 	old := ms.models[idx]
 	ms.models[idx] = Model{
-		Name:     newName,
-		Alias:    newModel.Alias,
-		ModelID:  newModel.ModelID,
-		APIKey:   newModel.APIKey,
-		URL:      newModel.URL,
-		Protocol: newModel.Protocol,
+		Name:          newName,
+		Alias:         newModel.Alias,
+		ModelID:       newModel.ModelID,
+		APIKey:        newModel.APIKey,
+		URL:           newModel.URL,
+		Protocol:      newModel.Protocol,
+		ContextWindow: newModel.ContextWindow,
 	}
 	// 若 APIKey 为空，表示前端未修改（脱敏后回填的占位值），保留旧值
 	if ms.models[idx].APIKey == "" {

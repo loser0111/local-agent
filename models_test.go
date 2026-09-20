@@ -179,6 +179,35 @@ func TestModelStore_UpdatePreservesAPIKey(t *testing.T) {
 	}
 }
 
+func TestModelStore_UpdateContextWindow(t *testing.T) {
+	tmpDir := t.TempDir()
+	storePath := filepath.Join(tmpDir, "models.json")
+	store := NewModelStore(storePath)
+
+	if err := store.AddModel(Model{Name: "m1", APIKey: "sk-1", ContextWindow: 200000}); err != nil {
+		t.Fatalf("添加失败: %v", err)
+	}
+
+	// 更新时编辑上下文窗口：新值应生效
+	if err := store.UpdateModel("m1", Model{Name: "m1", APIKey: "sk-1", ContextWindow: 128000}); err != nil {
+		t.Fatalf("更新失败: %v", err)
+	}
+	got, _ := store.GetModelFull("m1")
+	if got.ContextWindow != 128000 {
+		t.Fatalf("编辑后 ContextWindow 应更新为 128000，实际: %d", got.ContextWindow)
+	}
+
+	// 更新时未填上下文窗口（表单里被清空）：显式清空 = 回落默认窗口，
+	// 与 contextWindowOf 的 ">0 才用配置值" 回退设计一致
+	if err := store.UpdateModel("m1", Model{Name: "m1", Alias: "x", APIKey: "sk-1"}); err != nil {
+		t.Fatalf("二次更新失败: %v", err)
+	}
+	got2, _ := store.GetModelFull("m1")
+	if got2.ContextWindow != 0 {
+		t.Fatalf("清空后 ContextWindow 应为 0（回落默认窗口），实际: %d", got2.ContextWindow)
+	}
+}
+
 func TestMaskAPIKey(t *testing.T) {
 	tests := []struct {
 		input    string

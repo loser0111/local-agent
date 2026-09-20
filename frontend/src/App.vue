@@ -20,6 +20,16 @@ onMounted(() => {
       permissionStore.setPending(ev.permission)
     } else if (ev.type === 'ask_user' && ev.ask) {
       askStore.setPending(ev.ask)
+    } else if (ev.type === 'permission_expired' && ev.permission) {
+      // 后端已终结该请求（超时/取消）：只清理 id 匹配的弹窗，
+      // 避免迟到的事件误清掉新一轮请求。
+      if (permissionStore.pending && permissionStore.pending.id === ev.permission.id) {
+        permissionStore.clearPending()
+      }
+    } else if (ev.type === 'ask_expired' && ev.ask) {
+      if (askStore.pending && askStore.pending.id === ev.ask.id) {
+        askStore.clearPending()
+      }
     }
   })
 })

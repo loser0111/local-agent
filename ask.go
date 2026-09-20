@@ -354,7 +354,16 @@ func (a *App) askUser(ctx context.Context, sessionID string, req AskRequest) (As
 	a.askBroker.setRequest(id, req)
 
 	a.emitInteraction(ChatEvent{Type: "ask_user", Ask: &req})
-	return a.askBroker.Wait(ctx, id, ch)
+	ans, err := a.askBroker.Wait(ctx, id, ch)
+	if err != nil {
+		return AskAnswer{}, err
+	}
+	// 跳过 / 超时 / 取消都走 Cancelled：广播终结事件让前端把弹窗关掉
+	// （用户主动跳过时前端已自清，这里按 ID 比对为无操作，无副作用）。
+	if ans.Cancelled {
+		a.emitInteraction(ChatEvent{Type: ChatEventAskExpired, Ask: &req})
+	}
+	return ans, nil
 }
 
 // ResolveAskUser 前端提交答复（bound 方法）

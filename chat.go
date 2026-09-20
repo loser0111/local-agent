@@ -450,6 +450,11 @@ const (
 	// ChatEventContextCompacted 自动摘要压缩已生效（事件携带压缩结果与新的用量）。
 	// 前端用它弹一次提示：用量下降是压缩造成的，原文仍在会话记录里。
 	ChatEventContextCompacted = "context_compacted"
+	// ChatEventPermissionExpired / ChatEventAskExpired 后端已终结的挂起请求（超时、
+	// 取消或跳过）。前端据此关掉对应弹窗：pending 状态只认"已答复/已终结"两个方向，
+	// 若只发请求不发终结通知，弹窗会在超时后永久悬挂（悬空全屏遮罩挡住整个应用）。
+	ChatEventPermissionExpired = "permission_expired"
+	ChatEventAskExpired        = "ask_expired"
 )
 
 // emitChatEvent 向前端推送一个聊天事件（无 Wails 上下文时静默跳过）

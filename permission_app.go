@@ -404,7 +404,10 @@ func (e *permissionEnforcer) askAndApply(ctx context.Context, subject Subject, v
 
 	ans, err := e.app.permissionBroker.Wait(id, ch, ctx)
 	if err != nil {
-		// 超时 / 取消 / 无人应答：一律按拒绝处理（fail closed）
+		// 超时 / 取消 / 无人应答：一律按拒绝处理（fail closed）。
+		// 同时把"该请求已终结"广播给前端：弹窗由 pending 状态驱动，
+		// 后端这里已 forget 掉请求，若不通知，前端弹窗会永久悬挂关不掉。
+		e.app.emitInteraction(ChatEvent{Type: ChatEventPermissionExpired, Permission: &req})
 		e.app.permissionAudit.Append(AuditEntry{
 			SessionID: e.sessionID,
 			Tool:      subject.Tool,

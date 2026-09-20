@@ -118,14 +118,14 @@ type anthropicContentBlock struct {
 	Content   string          `json:"content,omitempty"`
 }
 
-// anthropicStreamDelta 流式帧的 delta 字段。它承载两类内容：
-// content_block_delta 里的文本/工具参数分片，以及 message_delta 里的 stop_reason 与 output_tokens。
+// anthropicStreamDelta 流式帧的 delta 字段。它承载 content_block_delta 里的
+// 文本/工具参数分片，以及 message_delta 里的 stop_reason。
+// 注意：message_delta 的 usage 在事件顶层而非 delta 里，用量别挂到这里。
 type anthropicStreamDelta struct {
-	Type        string         `json:"type"`
-	Text        string         `json:"text"`
-	PartialJSON string         `json:"partial_json"`
-	StopReason  string         `json:"stop_reason"`
-	Usage       anthropicUsage `json:"usage"`
+	Type        string `json:"type"`
+	Text        string `json:"text"`
+	PartialJSON string `json:"partial_json"`
+	StopReason  string `json:"stop_reason"`
 }
 
 // anthropicStreamError 流式帧里的错误对象
@@ -437,6 +437,8 @@ func callAnthropicStream(ctx context.Context, url, token string, req *LLMReq, on
 		Error        *anthropicStreamError  `json:"error"`
 		// Message 只在 message_start 出现，其中带 input_tokens
 		Message *anthropicStreamMessage `json:"message"`
+		// Usage 在 message_delta 帧的事件顶层（与 delta 平级），带累计的 output_tokens
+		Usage anthropicUsage `json:"usage"`
 	}
 
 	// usage 流式用量：input_tokens 来自 message_start，output_tokens 来自 message_delta，
@@ -504,9 +506,11 @@ func callAnthropicStream(ctx context.Context, url, token string, req *LLMReq, on
 				if ev.Delta.StopReason != "" {
 					stopReason = ev.Delta.StopReason
 				}
-				if ev.Delta.Usage.OutputTokens > 0 {
-					usage.OutputTokens = ev.Delta.Usage.OutputTokens
-				}
+			}
+			// usage 在 message_delta 帧的事件顶层（Anthropic 实际帧形状），
+			// 不在 delta 里——读错位置会恒得 0，压缩时机判断随之失真。
+			if ev.Usage.OutputTokens > 0 {
+				usage.OutputTokens = ev.Usage.OutputTokens
 			}
 		case "error":
 			msg := "未知错误"

@@ -459,6 +459,13 @@ func TestPermissionBrokerTimeout(t *testing.T) {
 	if err := b.Resolve(PermissionAnswer{ID: id, Decision: "allow"}); err == nil {
 		t.Fatal("超时后的迟到答复应返回错误")
 	}
+	// 超时请求已被注销，同一 broker 应能继续受理新请求（弹窗终结后应用恢复正常流转）
+	id2, _ := b.register("s1")
+	b.setRequest(id2, PermissionAskRequest{ID: id2, SessionID: "s1"})
+	if p := b.Pending("s1"); p == nil || p.ID != id2 {
+		t.Fatalf("超时后应能登记新请求，实际 %+v", p)
+	}
+	b.forget(id2)
 }
 
 func TestPermissionBrokerCancelSession(t *testing.T) {
