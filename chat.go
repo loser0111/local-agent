@@ -582,7 +582,9 @@ func (a *App) buildBasePrompt(session *Session, dir string) string {
 		"已经确认过的命令也不要再跑一遍去'再验证'。\n" +
 		"4. 先用 glob / grep 定位到具体文件与行，再 read_file 精读；不要盲目通读整个目录。\n" +
 		"5. 上面「工具使用偏好」里已点名的工具都可直接调用，不必先经 tool_router 去 list / describe；" +
-		"只有不确定有哪些工具、或不确定某工具的完整参数时，才用 tool_router 发现。"
+		"只有不确定有哪些工具、或不确定某工具的完整参数时，才用 tool_router 发现。\n" +
+		"跨会话偏好与项目事实用 memory_search 查阅、memory_save 写入、memory_forget 删除；" +
+		"不要用 write_file 去改记忆目录。"
 
 	if a.skillStore != nil {
 		enabled := a.enabledSkillsForSession(session)
@@ -591,6 +593,9 @@ func (a *App) buildBasePrompt(session *Session, dir string) string {
 				"当请求与下列技能的描述匹配时，先调用 read_skill 取回该技能的完整说明，再按说明执行；" +
 				"技能自带的 references/ 文档用 read_skill_file 读取，scripts/ 下的脚本用 exec_shell 执行：\n" + idx
 		}
+	}
+	if mem := a.memoryIndexBlock(session); mem != "" {
+		prompt += "\n\n" + mem
 	}
 	return prompt
 }
@@ -602,14 +607,14 @@ func (a *App) buildBasePrompt(session *Session, dir string) string {
 func (a *App) buildBasePromptWithSkill(session *Session, dir, query string) (string, error) {
 	prompt := a.buildBasePrompt(session, dir)
 	if a.skillStore == nil {
-		return prompt, nil
+		return a.attachMemoryRecall(session, query, prompt), nil
 	}
 	res := a.skillStore.ResolveSkillCommand(query)
 	if res.Reason != "" {
 		return "", fmt.Errorf("%s", res.Reason)
 	}
 	if !res.Ok || res.Skill == nil {
-		return prompt, nil
+		return a.attachMemoryRecall(session, query, prompt), nil
 	}
 	// 会话白名单同样约束显式调用：本会话没开放的技能不该被 /名称 绕过
 	if !a.skillAllowedInSession(session, res.Skill.ID) {
@@ -619,7 +624,7 @@ func (a *App) buildBasePromptWithSkill(session *Session, dir, query string) (str
 	if err != nil {
 		return "", err
 	}
-	return prompt + BuildExplicitSkillBlock(res.Skill, body), nil
+	return a.attachMemoryRecall(session, query, prompt+BuildExplicitSkillBlock(res.Skill, body)), nil
 }
 
 // skillAllowedInSession 会话技能白名单是否放行该技能（白名单为空=全部放行）
@@ -1290,7 +1295,7 @@ func (a *App) executePlan(planID string, useStream bool) (result *ChatResult) {
 			return &ChatResult{Plan: plan, Error: step.Error}
 		}
 
-		sys := buildPlanSystemPrompt(basePrompt, plan, step)
+		sys := buildPlanSystemPrompt(a.attachMemoryRecall(session, buildPlanStepQuery(plan, step), basePrompt), plan, step)
 		res := runToolLoop(a.newMainAgentRun(run, session, dir, sys, &model, useStream, true /*compact*/))
 
 		// 步骤中途取消：按本步实际结果落状态，计划置 cancelled

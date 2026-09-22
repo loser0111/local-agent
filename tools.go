@@ -9,6 +9,8 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+
+	"wails-tmp/memory"
 )
 
 // ===== 工具接口定义（借鉴 01agent 的 ToolInterface）=====
@@ -328,6 +330,11 @@ type BuildOptions struct {
 	// 为 nil 时该工具**不注册**——这正是"子代理不能再次派生"的实现方式：
 	// 不给它 spawner，工具就不存在，比注册后再拦截更干净。
 	SpawnAgent func(ctx context.Context, task string, maxTurns int) (*SubagentResult, error)
+	// Memory 长期记忆库；为 nil 时不注册 memory_* 工具。
+	Memory        *memory.MemoryStore
+	MemoryProject string
+	IgnoreMemory  bool
+	OnMemoryTouch func([]string)
 }
 
 // buildContext 装配期传给内置工具构造函数的上下文
@@ -337,6 +344,7 @@ type buildContext struct {
 	asker   func(ctx context.Context, req AskRequest) (AskAnswer, error) // ask_user 的回路
 	// spawner 派生代理的回路；为 nil 时 spawn_agent 不注册（子代理因此无法再派生）
 	spawner func(ctx context.Context, task string, maxTurns int) (*SubagentResult, error)
+	memory  memoryToolContext
 }
 
 // newBuiltinTool 构造内置工具。
@@ -371,6 +379,12 @@ func newBuiltinTool(src *ToolSource, bc buildContext) (ToolInterface, bool) {
 			return nil, false
 		}
 		return newSpawnAgentTool(bc), true
+	case toolMemorySearch:
+		return newMemorySearchTool(bc.memory), true
+	case toolMemorySave:
+		return newMemorySaveTool(bc.memory), true
+	case toolMemoryForget:
+		return newMemoryForgetTool(bc.memory), true
 	default:
 		return nil, false
 	}
@@ -476,6 +490,13 @@ func (tm *ToolManager) BuildView(ctx context.Context, opts BuildOptions) *Sessio
 		},
 		asker:   opts.Ask,
 		spawner: opts.SpawnAgent,
+		memory: memoryToolContext{
+			store:   opts.Memory,
+			project: opts.MemoryProject,
+			source:  opts.SessionID,
+			ignore:  opts.IgnoreMemory,
+			onTouch: opts.OnMemoryTouch,
+		},
 	}
 	// exposure：工具名 → 暴露策略（直出 / 经路由器 / 不可见）
 	exposure := map[string]Exposure{}

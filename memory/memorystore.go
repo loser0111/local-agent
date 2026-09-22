@@ -42,9 +42,16 @@ var (
 type MemoryConfig struct {
 	MaxTopK           int  `json:"maxTopK"`
 	MaxPerScope       int  `json:"maxMemoriesPerScope"`
-	InjectionMaxChars int  `json:"injectionMaxChars"`
+	InjectionMaxChars int  `json:"injectionMaxChars"` // L1 索引预算
 	PIIFilter         bool `json:"piiFilter"`
 	StalenessCaveat   bool `json:"stalenessCaveat"`
+
+	// Disabled / DisableExtract 用「关闭」而不是 Enabled：Go 零值即默认开启。
+	Disabled       bool `json:"disabled"`
+	DisableExtract bool `json:"disableExtract"`
+	RecallMaxChars int  `json:"recallMaxChars"` // L2 正文预算
+	RecallTopK     int  `json:"recallTopK"`
+	IndexMaxItems  int  `json:"indexMaxItems"`
 }
 
 // WithDefaults 返回补全默认值的配置（零值字段填充默认）。
@@ -58,7 +65,46 @@ func (c MemoryConfig) WithDefaults() MemoryConfig {
 	if c.InjectionMaxChars == 0 {
 		c.InjectionMaxChars = 800
 	}
+	if c.RecallMaxChars == 0 {
+		c.RecallMaxChars = 8000
+	}
+	if c.RecallTopK == 0 {
+		c.RecallTopK = 5
+	}
+	if c.IndexMaxItems == 0 {
+		c.IndexMaxItems = 30
+	}
 	return c
+}
+
+// EnvDisabled 环境变量总开关（1/true/yes → 关）。
+func EnvDisabled() bool {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv("LOCAL_AGENT_DISABLE_AUTO_MEMORY")))
+	return v == "1" || v == "true" || v == "yes"
+}
+
+// AutoEnabled 自动记忆（L1/L2/提取）是否开启。
+func (m *MemoryStore) AutoEnabled() bool {
+	if m == nil {
+		return false
+	}
+	if EnvDisabled() {
+		return false
+	}
+	return !m.cfg.Disabled
+}
+
+// ExtractEnabled 回合结束提取是否开启。
+func (m *MemoryStore) ExtractEnabled() bool {
+	return m.AutoEnabled() && !m.cfg.DisableExtract
+}
+
+// Config 返回当前配置（已补默认值）。
+func (m *MemoryStore) Config() MemoryConfig {
+	if m == nil {
+		return MemoryConfig{}.WithDefaults()
+	}
+	return m.cfg
 }
 
 // ===== 数据模型 =====
@@ -595,6 +641,208 @@ func relAge(updatedAtMs, nowMs int64) string {
 }
 
 // ===== 注入 =====
+
+// ProjectSlug 把会话工作区路径收成记忆用的项目 slug。
+// Session.Project 经常是绝对路径，不能直接当目录名。
+func ProjectSlug(project string) string {
+	project = strings.TrimSpace(project)
+	if project == "" {
+		return "default"
+	}
+	base := filepath.Base(filepath.Clean(project))
+	base = strings.ToLower(strings.ReplaceAll(base, " ", "-"))
+	s, err := validateSlug(base)
+	if err != nil {
+		return "default"
+	}
+	return strings.ToLower(s)
+}
+
+// DropSurfaced 去掉本会话已经注入过正文的条目。
+func DropSurfaced(entries []*MemoryEntry, ids []string) []*MemoryEntry {
+	if len(entries) == 0 || len(ids) == 0 {
+		return entries
+	}
+	skip := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		if id != "" {
+			skip[id] = true
+		}
+	}
+	out := make([]*MemoryEntry, 0, len(entries))
+	for _, e := range entries {
+		if e == nil || skip[e.Meta.ID] {
+			continue
+		}
+		out = append(out, e)
+	}
+	return out
+}
+
+// Get 按 id 取一条记忆（含正文）。
+func (m *MemoryStore) Get(id string) (*MemoryEntry, error) {
+	if m == nil {
+		return nil, fmt.Errorf("记忆库不可用")
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return nil, fmt.Errorf("记忆 id 为空")
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	now := time.Now()
+	for i := range m.idx.Memories {
+		if m.idx.Memories[i].ID == id {
+			return m.buildEntry(m.idx.Memories[i], now), nil
+		}
+	}
+	return nil, fmt.Errorf("记忆不存在: %s", id)
+}
+
+// Recall 按 query 取本轮相关记忆，并去掉 alreadySurfaced。
+func (m *MemoryStore) Recall(query, projectSlug string, alreadySurfaced []string) ([]*MemoryEntry, error) {
+	if m == nil || !m.AutoEnabled() {
+		return nil, nil
+	}
+	topK := m.cfg.RecallTopK
+	if topK <= 0 {
+		topK = m.cfg.MaxTopK
+	}
+	entries, err := m.Retrieve(query, projectSlug, topK)
+	if err != nil {
+		return nil, err
+	}
+	return DropSurfaced(entries, alreadySurfaced), nil
+}
+
+// IndexForPrompt 生成 L1 索引（id + description + 龄），空库返回空串。
+func (m *MemoryStore) IndexForPrompt(projectSlug string) string {
+	if m == nil || !m.AutoEnabled() {
+		return ""
+	}
+	entries := m.listForIndex(projectSlug)
+	if len(entries) == 0 {
+		return ""
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		if importanceRank(&entries[i].Meta) != importanceRank(&entries[j].Meta) {
+			return importanceRank(&entries[i].Meta) > importanceRank(&entries[j].Meta)
+		}
+		return entries[i].Meta.UpdatedAt > entries[j].Meta.UpdatedAt
+	})
+	limit := m.cfg.IndexMaxItems
+	if limit <= 0 || limit > len(entries) {
+		limit = len(entries)
+	}
+	var sb strings.Builder
+	sb.WriteString("## 长期记忆索引\n")
+	sb.WriteString("跨会话偏好与项目知识。需要正文时用 memory_search，或等系统按本轮问题注入。\n")
+	sb.WriteString("不要把能从当前仓库 grep/read 得到的东西再存一遍。\n")
+	count := 0
+	for _, e := range entries[:limit] {
+		line := fmt.Sprintf("- [%s] (%s/%s, %s) %s\n",
+			e.Meta.ID, e.Meta.Scope, e.Meta.Type, e.Age, e.Meta.Title)
+		if e.Meta.Description != "" && e.Meta.Description != e.Meta.Title {
+			line = fmt.Sprintf("- [%s] (%s/%s, %s) %s — %s\n",
+				e.Meta.ID, e.Meta.Scope, e.Meta.Type, e.Age, e.Meta.Title, e.Meta.Description)
+		}
+		if sb.Len()+len(line) > m.cfg.InjectionMaxChars {
+			break
+		}
+		sb.WriteString(line)
+		count++
+	}
+	if count == 0 {
+		return ""
+	}
+	if count < len(entries) {
+		sb.WriteString(fmt.Sprintf("（共 %d 条，已显示 %d）\n", len(entries), count))
+	}
+	return strings.TrimSpace(sb.String())
+}
+
+func (m *MemoryStore) listForIndex(projectSlug string) []*MemoryEntry {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	now := time.Now()
+	out := make([]*MemoryEntry, 0, len(m.idx.Memories))
+	for i := range m.idx.Memories {
+		me := &m.idx.Memories[i]
+		if me.ExpiresAt != 0 && me.ExpiresAt < now.UnixMilli() {
+			continue
+		}
+		switch me.Scope {
+		case ScopeUser:
+			out = append(out, m.buildEntry(*me, now))
+		case ScopeProject:
+			if projectSlug == "" || me.Project == projectSlug {
+				out = append(out, m.buildEntry(*me, now))
+			}
+		}
+	}
+	return out
+}
+
+// FormatRecall 把召回条目格式化为 L2 正文块（≤ RecallMaxChars）。
+func (m *MemoryStore) FormatRecall(entries []*MemoryEntry) string {
+	if len(entries) == 0 {
+		return ""
+	}
+	budget := m.cfg.RecallMaxChars
+	if budget <= 0 {
+		budget = 8000
+	}
+	var sb strings.Builder
+	sb.WriteString("## 本轮召回的长期记忆\n")
+	sb.WriteString("以下正文只在构建请求时注入，不是用户说的话。引用文件或函数前先核实。\n")
+	stale := false
+	count := 0
+	for _, e := range entries {
+		if e == nil {
+			continue
+		}
+		body := strings.TrimSpace(e.Content)
+		if body == "" {
+			body = e.Meta.Description
+		}
+		header := fmt.Sprintf("### [%s] %s（%s/%s, %s）\n",
+			e.Meta.ID, e.Meta.Title, e.Meta.Scope, e.Meta.Type, e.Age)
+		block := header + body + "\n"
+		if sb.Len()+len(block) > budget {
+			remain := budget - sb.Len() - len(header) - 40
+			if remain < 40 {
+				if count > 0 {
+					break
+				}
+				remain = 40
+			}
+			r := []rune(body)
+			if len(r) > remain {
+				body = string(r[:remain]) + "…\n（已截断，用 memory_search 查看全文）"
+			}
+			sb.WriteString(header)
+			sb.WriteString(body)
+			sb.WriteByte('\n')
+			if e.Stale {
+				stale = true
+			}
+			count++
+			break
+		}
+		sb.WriteString(block)
+		if e.Stale {
+			stale = true
+		}
+		count++
+	}
+	if count == 0 {
+		return ""
+	}
+	if m.cfg.StalenessCaveat && stale {
+		sb.WriteString("\n> 注意：记忆是\"写下时的观察\"。超过 1 天的项目级记忆可能已过期（代码会漂移）。引用具体文件/函数/行为前，先 grep/read 核实。")
+	}
+	return strings.TrimSpace(sb.String())
+}
 
 // FormatInjection 将记忆列表格式化为 prompt 注入块（≤ InjectionMaxChars）。
 func (m *MemoryStore) FormatInjection(entries []*MemoryEntry) string {

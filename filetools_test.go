@@ -553,13 +553,16 @@ func TestDirectToolsCarryRequiredParams(t *testing.T) {
 	})
 
 	want := map[string][]string{
-		toolReadFile:  {"path"},
-		toolWriteFile: {"path", "content"},
-		toolEditFile:  {"path", "old_string", "new_string"},
-		toolGlob:      {"pattern"},
-		toolGrep:      {"pattern"},
-		toolAskUser:   {"questions"},
-		toolExecShell: {"cmd"},
+		toolReadFile:     {"path"},
+		toolWriteFile:    {"path", "content"},
+		toolEditFile:     {"path", "old_string", "new_string"},
+		toolGlob:         {"pattern"},
+		toolGrep:         {"pattern"},
+		toolAskUser:      {"questions"},
+		toolExecShell:    {"cmd"},
+		toolMemorySearch: {"query"},
+		toolMemorySave:   {"content"},
+		toolMemoryForget: {"target"},
 	}
 	got := map[string][]string{}
 	for _, d := range view.GetToolsForLLM() {

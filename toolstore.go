@@ -141,6 +141,34 @@ func defaultSources() []*ToolSource {
 			},
 		},
 		{
+			ID: toolMemorySearch, Name: toolMemorySearch, Label: "检索记忆",
+			Description: "检索跨会话长期记忆。query 可以是自然语言或记忆 id。",
+			Kind:        SourceBuiltin, Icon: "book", Enabled: true, Builtin: true,
+			Parameters: []ToolParamConfig{
+				{Name: "query", Description: "检索词或记忆 id", Required: true},
+			},
+		},
+		{
+			ID: toolMemorySave, Name: toolMemorySave, Label: "保存记忆",
+			Description: "把对未来会话仍有用的事实写入长期记忆",
+			Kind:        SourceBuiltin, Icon: "bookmark", Enabled: true, Builtin: true,
+			Parameters: []ToolParamConfig{
+				{Name: "content", Description: "记忆正文", Required: true},
+				{Name: "title", Description: "短标题"},
+				{Name: "type", Description: "user / feedback / project / reference"},
+				{Name: "scope", Description: "user 或 project"},
+				{Name: "tags", Description: "逗号分隔标签"},
+			},
+		},
+		{
+			ID: toolMemoryForget, Name: toolMemoryForget, Label: "删除记忆",
+			Description: "删除一条长期记忆。优先传记忆 id。",
+			Kind:        SourceBuiltin, Icon: "eraser", Enabled: true, Builtin: true,
+			Parameters: []ToolParamConfig{
+				{Name: "target", Description: "记忆 id 或检索词", Required: true},
+			},
+		},
+		{
 			// 名字用常量而不是字面量：newBuiltinTool 是按 src.Name 分派的（case toolSpawnAgent），
 			// 两处一旦不一致，工具就会"注册了但认不出来"。
 			ID: toolSpawnAgent, Name: toolSpawnAgent, Label: "派生代理",

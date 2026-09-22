@@ -1087,6 +1087,11 @@ export namespace main {
 	    contextSummary?: string;
 	    contextCoveredUpTo?: number;
 	    contextSummaryAt?: number;
+	    workingMemory?: string;
+	    workingMemoryUpTo?: number;
+	    surfacedMemoryIDs?: string[];
+	    ignoreMemory?: boolean;
+	    lastExtractMessageID?: string;
 	    parentId?: string;
 	    subagent?: SubagentInfo;
 	
@@ -1116,6 +1121,11 @@ export namespace main {
 	        this.contextSummary = source["contextSummary"];
 	        this.contextCoveredUpTo = source["contextCoveredUpTo"];
 	        this.contextSummaryAt = source["contextSummaryAt"];
+	        this.workingMemory = source["workingMemory"];
+	        this.workingMemoryUpTo = source["workingMemoryUpTo"];
+	        this.surfacedMemoryIDs = source["surfacedMemoryIDs"];
+	        this.ignoreMemory = source["ignoreMemory"];
+	        this.lastExtractMessageID = source["lastExtractMessageID"];
 	        this.parentId = source["parentId"];
 	        this.subagent = this.convertValues(source["subagent"], SubagentInfo);
 	    }

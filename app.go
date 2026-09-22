@@ -3,11 +3,13 @@ package main
 import (
 	"context"
 	"fmt"
-	wailsRuntime "github.com/wailsapp/wails/v2/pkg/runtime"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
+
+	wailsRuntime "github.com/wailsapp/wails/v2/pkg/runtime"
+	"wails-tmp/memory"
 )
 
 // App struct
@@ -21,6 +23,7 @@ type App struct {
 	skillInstall *SkillInstaller
 	diffService  *DiffService
 	planStore    *PlanStore
+	memory       *memory.MemoryStore
 
 	// baseDir 本地数据目录（~/.local-agent）：权限配置的用户全局层也放在这里
 	baseDir string
@@ -91,6 +94,12 @@ func (a *App) startup(ctx context.Context) {
 	a.subagents = newSubagentTracker()
 	a.ensurePermissionState()
 	a.fileChanges = NewFileChangeLog(500)
+	// 初始化长期记忆：~/.local-agent/memory/（失败不阻断启动）
+	if store, err := memory.NewMemoryStore(filepath.Join(baseDir, "memory"), memory.MemoryConfig{}); err != nil {
+		fmt.Printf("[App] 初始化记忆库失败: %v\n", err)
+	} else {
+		a.memory = store
+	}
 	// 初始化上下文压缩策略：~/.local-agent/context.json（不存在则全用内置默认值）
 	a.contextPrefs = NewContextPrefsStore(filepath.Join(baseDir, "context.json"))
 	// 估算校准系数：不存在 = 还没观测过，一律按 1.0（纯字符估算）
@@ -617,6 +626,9 @@ func (a *App) Chat(sessionID string, query string, useStream bool, usePlan bool)
 	// 放在最前面拦截——内置命令的优先级高于同名技能，技能不该能覆盖掉它。
 	if cmd, _, ok := ParseSkillCommand(query); ok && cmd == contextCompactCmd {
 		return a.handleCompactCommand(sessionID)
+	}
+	if cmd, rest, ok := ParseSkillCommand(query); ok && isMemoryCommand(cmd) {
+		return a.handleMemoryCommand(sessionID, cmd, rest)
 	}
 	var result *ChatResult
 	if usePlan {

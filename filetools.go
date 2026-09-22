@@ -54,6 +54,8 @@ var directToolOrder = []string{
 	// "可以用 spawn_agent 派子代理"），若工具列表里没有它的 schema，模型只能先花一轮
 	// 去 tool_router 里 list/describe，否则就是照着名字瞎猜参数。
 	toolSpawnAgent,
+	// 记忆工具直出：buildBasePrompt 点名 memory_search / memory_save / memory_forget。
+	toolMemorySearch, toolMemorySave, toolMemoryForget,
 }
 
 // 各类上限：避免一次工具调用把上下文或内存撑爆

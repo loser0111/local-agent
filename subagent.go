@@ -248,7 +248,10 @@ func (a *App) runSubagent(parentRun *runControl, parent *Session, dir string, mo
 		SessionID:     child.ID,
 		Changes:       a.fileChanges,
 		Enforcer:      sub,
-		ExcludeTools:  []string{toolAskUser},
+		ExcludeTools:  []string{toolAskUser, toolMemorySave, toolMemoryForget},
+		Memory:        a.memory,
+		MemoryProject: memoryProjectSlug(child.Project),
+		IgnoreMemory:  child.IgnoreMemory || !a.memoryEnabled(),
 	})
 
 	res := runToolLoop(&agentRun{

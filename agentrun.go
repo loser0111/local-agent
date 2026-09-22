@@ -133,6 +133,12 @@ func (a *App) newMainAgentRun(run *runControl, session *Session, dir, systemProm
 		SpawnAgent: func(ctx context.Context, task string, maxTurns int) (*SubagentResult, error) {
 			return a.runSubagent(run, session, dir, model, task, maxTurns)
 		},
+		Memory:        a.memory,
+		MemoryProject: memoryProjectSlug(session.Project),
+		IgnoreMemory:  session.IgnoreMemory || !a.memoryEnabled(),
+		OnMemoryTouch: func(ids []string) {
+			_ = a.sessionStore.AddSurfacedMemoryIDs(sessionID, ids)
+		},
 	})
 
 	return &agentRun{

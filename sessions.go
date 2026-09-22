@@ -104,6 +104,13 @@ type Session struct {
 	ContextCoveredUpTo int    `json:"contextCoveredUpTo,omitempty"` // 摘要覆盖到第几条消息（不含）
 	ContextSummaryAt   int64  `json:"contextSummaryAt,omitempty"`   // 摘要生成时间（Unix 毫秒）
 
+	// 长期记忆闭环（跨会话知识）。召回块只在构建请求时注入，不写进 Messages。
+	WorkingMemory        string   `json:"workingMemory,omitempty"`
+	WorkingMemoryUpTo    int      `json:"workingMemoryUpTo,omitempty"`
+	SurfacedMemoryIDs    []string `json:"surfacedMemoryIDs,omitempty"`
+	IgnoreMemory         bool     `json:"ignoreMemory,omitempty"`
+	LastExtractMessageID string   `json:"lastExtractMessageID,omitempty"`
+
 	// ParentID 非空表示这是子代理的会话（由某个主会话派生）。
 	// 它**不出现在会话列表里**——子代理是主会话的工作产物，不是用户的会话。
 	ParentID string `json:"parentId,omitempty"`
@@ -445,6 +452,60 @@ func (s *SessionStore) SetContextSummary(id, summary string, coveredUpTo int, at
 	session.ContextSummary = summary
 	session.ContextCoveredUpTo = coveredUpTo
 	session.ContextSummaryAt = at
+	// 压缩成功后旧召回已不在请求里，允许再召回（对标 Claude Code 扫附件：压缩后 naturally reset）。
+	if strings.TrimSpace(summary) != "" {
+		session.SurfacedMemoryIDs = nil
+	}
+	return s.saveSession(session)
+}
+
+// SetIgnoreMemory 本会话是否跳过记忆注入与提取。
+func (s *SessionStore) SetIgnoreMemory(id string, ignore bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	session, err := s.loadSession(id)
+	if err != nil {
+		return err
+	}
+	session.IgnoreMemory = ignore
+	return s.saveSession(session)
+}
+
+// AddSurfacedMemoryIDs 记下本会话已注入/读过正文的记忆，避免下一圈再灌一遍。
+func (s *SessionStore) AddSurfacedMemoryIDs(id string, ids []string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	session, err := s.loadSession(id)
+	if err != nil {
+		return err
+	}
+	seen := make(map[string]bool, len(session.SurfacedMemoryIDs)+len(ids))
+	for _, existing := range session.SurfacedMemoryIDs {
+		seen[existing] = true
+	}
+	for _, add := range ids {
+		add = strings.TrimSpace(add)
+		if add == "" || seen[add] {
+			continue
+		}
+		session.SurfacedMemoryIDs = append(session.SurfacedMemoryIDs, add)
+		seen[add] = true
+	}
+	return s.saveSession(session)
+}
+
+// ClearSurfacedMemoryIDs 清空已展示集合（测试与手动重置用）。
+func (s *SessionStore) ClearSurfacedMemoryIDs(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	session, err := s.loadSession(id)
+	if err != nil {
+		return err
+	}
+	session.SurfacedMemoryIDs = nil
 	return s.saveSession(session)
 }
 
