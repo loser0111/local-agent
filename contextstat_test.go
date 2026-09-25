@@ -131,7 +131,7 @@ func TestContextStatReportReportsCompaction(t *testing.T) {
 		ContextCoveredUpTo: 1,
 		ContextSummaryAt:   1700000000000,
 	}
-	st := contextStatOf(sess, buildRunMessages(sess, "", false), 10000, nil, 0, 1.0)
+	st := contextStatOf(sess, buildRunMessages(sess, "", false, nil), 10000, nil, 0, 1.0)
 	if st.SavedTokens <= 0 {
 		t.Fatalf("覆盖了 100 字原文却算不出省下的 token：%+v", st)
 	}

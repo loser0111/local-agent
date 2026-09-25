@@ -1,11 +1,16 @@
 <script setup>
-import { computed } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { formatClock } from '@/utils/format'
 import { renderMarkdown } from '@/utils/markdown'
+import { useSessionStore } from '@/stores/session'
+import { useChatStore } from '@/stores/chat'
 
 const props = defineProps({
   message: { type: Object, required: true },
 })
+
+const sessionStore = useSessionStore()
+const chatStore = useChatStore()
 
 const isUser = computed(() => props.message.role === 'user')
 const isSystem = computed(() => props.message.role === 'system')
@@ -13,6 +18,52 @@ const hasContent = computed(() => !!(props.message.content && props.message.cont
 
 // AI 消息按 Markdown 渲染；用户消息保持纯文本
 const renderedHtml = computed(() => renderMarkdown(props.message.content || ''))
+
+// ===== 附件（图片）=====
+//
+// 图**不在**消息里（那会让会话 JSON 每次追加消息都重写几十 MB），消息只存引用；
+// 字节按需向后端要，由 chat store 按 `${会话ID}:${附件ID}` 缓存。
+//
+// urls 的三种取值必须有区分，否则会闪一下"图片已丢失"：
+//   undefined → 还在加载（显示占位）
+//   ''        → 确实取不到（附件目录被清理过），显示"图片已丢失"
+//   非空串    → data URL
+const attachments = computed(() => props.message.attachments || [])
+const urls = ref({})
+const previewUrl = ref('')
+
+function urlFor(id) {
+  return urls.value[id] || ''
+}
+
+function isLoaded(id) {
+  return urls.value[id] !== undefined
+}
+
+async function loadImages() {
+  const sid = sessionStore.currentSessionId
+  if (!sid) return
+  let changed = false
+  const next = { ...urls.value }
+  for (const a of attachments.value) {
+    if (next[a.id] !== undefined) continue
+    next[a.id] = await chatStore.loadAttachmentUrl(sid, a.id)
+    changed = true
+  }
+  if (changed) urls.value = next
+}
+
+watch(
+  () => [sessionStore.currentSessionId, attachments.value.map((a) => a.id).join(',')],
+  loadImages,
+  { immediate: true }
+)
+
+// 点击放大：截图里的报错信息往往在缩略图里看不清
+function openPreview(id) {
+  const u = urlFor(id)
+  if (u) previewUrl.value = u
+}
 </script>
 
 <template>
@@ -32,18 +83,41 @@ const renderedHtml = computed(() => renderMarkdown(props.message.content || ''))
         <span class="time">{{ formatClock(message.createdAt) }}</span>
       </div>
 
+      <!-- 图片附件（用户贴的图挂在自己的消息上） -->
+      <div v-if="attachments.length" class="attachment-list">
+        <div v-for="a in attachments" :key="a.id" class="attachment">
+          <img
+            v-if="urlFor(a.id)"
+            :src="urlFor(a.id)"
+            :alt="a.name"
+            :title="`${a.name}（点击放大）`"
+            @click="openPreview(a.id)"
+          />
+          <div v-else-if="isLoaded(a.id)" class="attachment-missing" :title="a.name">
+            图片已丢失
+          </div>
+          <div v-else class="attachment-loading">图片加载中…</div>
+        </div>
+      </div>
+
       <!-- 用户消息：纯文本展示 -->
-      <div v-if="isUser && message.content" class="message-content">
+      <div v-if="isUser && hasContent" class="message-content">
         <pre class="content-text">{{ message.content }}</pre>
       </div>
 
       <!-- AI 消息：Markdown 渲染 -->
-      <div v-else-if="hasContent" class="message-content markdown-body" v-html="renderedHtml"></div>
+      <div v-else-if="!isUser && hasContent" class="message-content markdown-body" v-html="renderedHtml"></div>
 
       <!-- 流式等待光标 -->
       <span v-if="message.streaming && !hasContent" class="cursor">▊</span>
       <span v-else-if="message.streaming" class="cursor cursor-inline">▊</span>
     </div>
+  </div>
+
+  <!-- 点击放大：fixed 定位，脱离聊天流的滚动容器 -->
+  <div v-if="previewUrl" class="image-preview" @click="previewUrl = ''">
+    <img :src="previewUrl" alt="预览" @click.stop />
+    <button class="preview-close" title="关闭" @click="previewUrl = ''">×</button>
   </div>
 </template>
 
@@ -116,6 +190,77 @@ const renderedHtml = computed(() => renderMarkdown(props.message.content || ''))
   white-space: pre-wrap;
   word-break: break-word;
   margin: 0;
+}
+
+/* ===== 图片附件 ===== */
+.attachment-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: $space-sm;
+  margin-bottom: $space-sm;
+}
+
+.attachment img {
+  display: block;
+  max-width: 260px;
+  max-height: 200px;
+  border-radius: $radius-md;
+  border: 1px solid $color-border;
+  cursor: zoom-in;
+  background-color: $color-bg-tertiary;
+}
+
+.attachment-missing,
+.attachment-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 120px;
+  height: 72px;
+  padding: 0 $space-md;
+  font-size: $font-size-xs;
+  border: 1px dashed $color-border;
+  border-radius: $radius-md;
+  color: $color-text-muted;
+  background-color: $color-bg-secondary;
+}
+
+/* 点击放大的遮罩：fixed 定位，不受聊天流滚动容器裁剪 */
+.image-preview {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: $space-xl;
+  background-color: rgba(0, 0, 0, 0.72);
+  cursor: zoom-out;
+
+  img {
+    max-width: 100%;
+    max-height: 100%;
+    border-radius: $radius-md;
+    box-shadow: 0 8px 40px rgba(0, 0, 0, 0.5);
+    cursor: default;
+  }
+}
+
+.preview-close {
+  position: absolute;
+  top: $space-lg;
+  right: $space-lg;
+  width: 32px;
+  height: 32px;
+  font-size: 20px;
+  line-height: 1;
+  color: #fff;
+  background-color: rgba(255, 255, 255, 0.14);
+  border-radius: 50%;
+
+  &:hover {
+    background-color: rgba(255, 255, 255, 0.26);
+  }
 }
 
 .cursor {

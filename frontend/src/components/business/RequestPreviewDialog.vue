@@ -63,8 +63,34 @@ function roleLabel(role) {
   }
 }
 
+// 带图的消息，content 是一个**块数组**（文本块 + image_url 块）而不是字符串。
+// 这个对话框是排障视图，不能因此显示成 "[object Object]"，更不能把 base64 铺出来。
+// 后端在生成快照时已经把图片字节换成了"图片已省略：…"这样的说明，
+// 这里再做一层兜底：万一日后有人改动了脱敏，也只是看到一行说明而不是几 MB 文本。
+function contentText(content) {
+  if (typeof content === 'string') return content
+  if (Array.isArray(content)) return content.map(blockText).join('\n')
+  return content == null ? '' : JSON.stringify(content)
+}
+
+function blockText(block) {
+  if (!block || typeof block !== 'object') return String(block || '')
+  if (block.type === 'text') return block.text || ''
+  if (block.type === 'image_url') return `[图片] ${briefImageUrl(block.image_url && block.image_url.url)}`
+  return JSON.stringify(block)
+}
+
+function briefImageUrl(url) {
+  const s = String(url || '')
+  const comma = s.indexOf(',')
+  if (s.startsWith('data:') && comma > 0) {
+    return `${s.slice(0, comma + 1)}…（base64 已省略，共 ${s.length} 字符）`
+  }
+  return s
+}
+
 function preview(content) {
-  const s = content || ''
+  const s = contentText(content)
   return s.length > PREVIEW_CHARS ? s.slice(0, PREVIEW_CHARS) + `\n…（共 ${s.length} 字符）` : s
 }
 
@@ -157,11 +183,11 @@ async function copyJSON() {
                   <span v-if="i === snap.summaryIndex" class="tag tag-summary">摘要（替代原文）</span>
                   <span v-if="m.tool_calls?.length" class="tag">{{ m.tool_calls.length }} 个调用</span>
                   <span v-if="m.tool_call_id" class="tag mono">↩ {{ m.tool_call_id }}</span>
-                  <span class="size">{{ m.content.length }} 字符</span>
+                  <span class="size">{{ contentText(m.content).length }} 字符</span>
                   <ChevronDown v-if="expanded[i]" :size="12" class="expand" />
                   <ChevronRight v-else :size="12" class="expand" />
                 </div>
-                <pre class="block msg-body">{{ expanded[i] ? m.content : preview(m.content) }}</pre>
+                <pre class="block msg-body">{{ expanded[i] ? contentText(m.content) : preview(m.content) }}</pre>
               </div>
             </div>
           </div>

@@ -42,6 +42,14 @@ type agentRun struct {
 	Diff    *DiffService
 	Changes *FileChangeLog
 	ReqLog  *llmRequestLog
+	// Attachments 附件存储（会话里的图片）。循环用它把消息上的附件引用读成
+	// 发给模型的图片；为 nil 时图片会以"未能载入"的文字说明出现在消息里，
+	// 而不是静默消失（见 imageLoader 的说明）。
+	Attachments *AttachmentStore
+	// VisionUnsupported 该会话的模型**已被 /vision 证明**看不到图。
+	// 为 true 时循环会往系统提示词里补一句实话，避免模型在收不到图时去 curl 下载、
+	// 编造图片内容、或让用户另存文件（三种行为在真机上都出现过）。
+	VisionUnsupported bool
 
 	// Compactor 摘要式压缩。为 nil 表示本次运行不做摘要压缩——
 	// 子代理应当关掉它：多条运行同时去改同一份会话的摘要字段会互相打架。
@@ -123,6 +131,7 @@ func (a *App) newMainAgentRun(run *runControl, session *Session, dir, systemProm
 		ProjectDir:    dir,
 		SessionID:     sessionID,
 		Changes:       a.fileChanges,
+		Attachments:   a.attachments,
 		Enforcer:      a.newPermissionEnforcer(session, dir),
 		// ask_user 的回路：绑定当前会话（阻塞等待用户作答后把结果回填给模型）
 		Ask: func(ctx context.Context, req AskRequest) (AskAnswer, error) {
@@ -157,8 +166,12 @@ func (a *App) newMainAgentRun(run *runControl, session *Session, dir, systemProm
 		Diff:         a.diffService,
 		Changes:      a.fileChanges,
 		ReqLog:       a.reqLog,
-		Compactor:    a.compactSession,
-		TokenCalib:   a.tokenCalib,
-		Recorder:     &appRecorder{app: a},
+		Attachments:  a.attachments,
+		// "这个模型看不到图"是**已测出来的事实**（/vision），不是猜测；
+		// 且与端点绑定（换了 ModelID/URL 就自动失效，见 VisionVerdictStore.Get）。
+		VisionUnsupported: a.visionVerdicts.Unsupported(session.Model, modelCallID(model), model.URL),
+		Compactor:         a.compactSession,
+		TokenCalib:        a.tokenCalib,
+		Recorder:          &appRecorder{app: a},
 	}
 }

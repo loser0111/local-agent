@@ -6,7 +6,7 @@ import { usePaneStore } from '@/stores/pane'
 import { useDiffStore } from '@/stores/diff'
 import { useSettingStore } from '@/stores/setting'
 import { usePlanStore } from '@/stores/plan'
-import { appendMessage, appendConversation, chat, stopChat, getContextStat, onDiffUpdate } from '@/api/session'
+import { appendMessage, appendConversation, chat, stopChat, getContextStat, onDiffUpdate, saveAttachment, fetchImageURL, getAttachmentDataURL } from '@/api/session'
 import { fetchPendingInteraction } from '@/api/interaction'
 import { DEFAULT_VIEW_MODE } from '@/types'
 import { usePermissionStore } from '@/stores/permissions'
@@ -81,10 +81,271 @@ onMounted(() => {
 onUnmounted(() => {
   if (offDiff) offDiff()
   stopInteractionPolling()
+  // 还没发出去的图片预览用的是 object URL，组件销毁时要还回去，否则这一份内存不释放
+  clearPendingFiles()
 })
 const input = ref('')
 const messagesContainer = ref(null)
 const autoScroll = ref(true)
+
+// ===== 图片附件 =====
+//
+// 用户在本地挑好图、点发送时才上传。本地态只存"未落盘"的这一批：
+// 贴错了直接删掉，后端不会留下任何垃圾文件。
+//
+// 三个入口都收敛到 addFiles：粘贴（Ctrl+V，截图最常用的一条）、拖拽、点按钮选文件。
+// 这与项目里"宿主原生对话框不可用"的教训同一个方向——入口多没关系，
+// 但出口必须只有一个，否则三处各写一份读文件/校验/限额逻辑，必然漂移。
+const MAX_ATTACHMENTS = 6
+const pendingFiles = ref([])
+const fileInput = ref(null)
+const dragging = ref(false)
+
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => {
+      const r = String(reader.result || '')
+      const i = r.indexOf(',')
+      resolve(i >= 0 ? r.slice(i + 1) : r)
+    }
+    reader.onerror = () => reject(new Error('读取文件失败'))
+    reader.readAsDataURL(file)
+  })
+}
+
+// imageFilesFrom 从一个 DataTransfer 里取出图片文件。
+//
+// **必须同时看 items 与 files。** Chromium 系粘贴图片时填 files；而 macOS 上 Wails 用的是
+// WebKit（WKWebView），它经常**只填 items、files 是空的**。只读 files 的写法在浏览器里
+// 好使、在真机上失效——实测表现是"粘贴之后图没进来，输入框里却多出一串图片 URL"：
+// 因为没被 preventDefault，浏览器接着执行了默认粘贴，把剪贴板里的**文本表示**插了进来。
+function imageFilesFrom(dt) {
+  if (!dt) return []
+  const out = []
+  // hintType 是剪贴板项自己声明的 MIME：WebKit 交回来的 File 有时 type 为空，
+  // 这时只能靠它（或文件名后缀）判断——否则会被当成"非图片"静默丢掉。
+  const push = (f, hintType) => {
+    if (!f || out.indexOf(f) >= 0) return
+    const t = String(f.type || hintType || '').toLowerCase()
+    if (t.startsWith('image/') || looksLikeImage(f.name)) out.push(f)
+  }
+  if (dt.items) {
+    for (const item of dt.items) {
+      if (item.kind === 'file') push(item.getAsFile(), item.type)
+    }
+  }
+  for (const f of Array.from(dt.files || [])) push(f)
+  return out
+}
+
+// looksLikeImage 文件名后缀兜底。前端只是做体验过滤，**真伪由后端按内容嗅探判定**
+// （imageproc.go 的 sniffImageMediaType），所以这里宁可放宽：拦错了是把真图丢掉，
+// 放过了最多由后端回一句"不支持的图片格式"。
+function looksLikeImage(name) {
+  return /\.(png|jpe?g|gif|webp|bmp|tiff?)$/i.test(String(name || ''))
+}
+
+// clipboardClaimsImage 剪贴板是否**声称**有图片（items 里有 image/* 类型）。
+// 用于"拿不到字节但必须拦住默认粘贴"的场景。
+function clipboardClaimsImage(dt) {
+  if (!dt || !dt.items) return false
+  for (const item of dt.items) {
+    if (item.type && item.type.startsWith('image/')) return true
+  }
+  return false
+}
+
+// safeGetData 取剪贴板里的某一种表示；部分平台/类型会抛错，不该让它冒出来
+function safeGetData(dt, type) {
+  if (!dt || typeof dt.getData !== 'function') return ''
+  try {
+    return String(dt.getData(type) || '')
+  } catch {
+    return ''
+  }
+}
+
+// clipboardIsBareLink 剪贴板里**只有一串链接**（没有图片字节）。
+//
+// 这正是"以为贴了图、其实只发了链接"的那个场景：不少截图工具与内部平台复制图片时
+// 放进剪贴板的是一条 URL。这时前端拿不到任何 File，"粘贴图片"从源头就不成立。
+// 刻意**不** preventDefault——用户可能就是想发这个链接；只把话说清楚，
+// 并指向显式的「链接」入口（那条路要用户点一下，因为会从本机发起出站请求）。
+function clipboardIsBareLink(dt) {
+  const text = safeGetData(dt, 'text/plain').trim()
+  return /^https?:\/\/\S+$/i.test(text)
+}
+
+// clipboardSummary 把"剪贴板里到底有什么"说清楚。
+//
+// 这是排障用的：用户看到的现象（"我明明贴了图"）与剪贴板的真实内容经常对不上
+// ——有的工具复制的是链接、有的是 HTML、有的干脆是别的协议的载荷。
+// 真机上开控制台看 `clipboardData.items` 成本很高，不如让界面自己报出来。
+function clipboardSummary(dt) {
+  if (!dt) return '剪贴板为空'
+  const kinds = []
+  if (dt.items) {
+    for (const item of dt.items) kinds.push(`${item.kind}/${item.type || '未知类型'}`)
+  }
+  const text = safeGetData(dt, 'text/plain').trim().replace(/\s+/g, ' ')
+  const head = text ? `；文本开头：「${text.slice(0, 100)}${text.length > 100 ? '…' : ''}」` : ''
+  const parts = kinds.length ? `${kinds.join('、')}` : '没有可用的内容项'
+  return `剪贴板内容是 ${parts}${head}`
+}
+
+// addFromURL 从链接添加图片：**用户显式点按**才会走这条路。
+//
+// 为什么不做成"粘贴链接就自动下载"：那等于让任何一次粘贴都能触发本机的出站请求，
+// 用户既没看到目标地址、也没同意。这里先弹输入框收 URL（能看到完整地址），
+// 再交给后端下载；后端限定 http/https、重定向上限、超时、限长、内容必须是图片。
+async function addFromURL() {
+  const sid = sessionId.value
+  if (!sid || chatStore.isGenerating) return
+  const raw = await ui.askText({
+    title: '从链接添加图片',
+    message: '粘贴图片直链（http / https）。会从本机下载一次，内容必须是图片。',
+    placeholder: 'https://example.com/screenshot.png',
+    confirmText: '下载并添加',
+  })
+  const url = String(raw || '').trim()
+  if (!url) return
+  if (!/^https?:\/\//i.test(url)) {
+    ui.notify('只支持 http / https 链接', 'warn')
+    return
+  }
+  const tip = ui.notify('正在下载图片…', 'info', 0) // 0 = 不自动消失，结束时手动关掉
+  try {
+    const att = await fetchImageURL(sid, url)
+    // 预览用后端存下来的那一份（与模型看到的完全同一张图），不另存一份原始数据
+    const preview = await getAttachmentDataURL(sid, att.id)
+    pendingFiles.value.push({
+      key: `att-${Date.now()}-${Math.random().toString(16).slice(2, 6)}`,
+      name: att.name,
+      size: att.bytes,
+      attachment: att, // 已经落盘，发送时直接引用，不再上传一次
+      preview,
+    })
+    ui.notify(`已添加 ${att.name}（${att.width}×${att.height}）`, 'success')
+  } catch (e) {
+    ui.notify(`未能添加：${e.message || e}`, 'error')
+  } finally {
+    ui.dismiss(tip)
+  }
+}
+
+async function addFiles(files) {
+  // 与 imageFilesFrom 用同一套判据（MIME 或后缀），避免"入口放行、这里又拦掉"
+  const list = Array.from(files || []).filter(
+    (f) => f && (String(f.type || '').toLowerCase().startsWith('image/') || looksLikeImage(f.name))
+  )
+  if (!list.length) {
+    if (files && files.length) ui.notify('只支持图片（PNG / JPEG / GIF）', 'warn')
+    return
+  }
+  const room = MAX_ATTACHMENTS - pendingFiles.value.length
+  if (list.length > room) ui.notify(`单条消息最多 ${MAX_ATTACHMENTS} 张图片`, 'warn')
+  for (const f of list.slice(0, Math.max(0, room))) {
+    try {
+      const payload = await fileToBase64(f)
+      pendingFiles.value.push({
+        key: `att-${Date.now()}-${Math.random().toString(16).slice(2, 6)}`,
+        name: f.name || '粘贴的图片.png',
+        size: f.size,
+        payload,
+        // 本地预览用 object URL：发送前图还没落盘，没有 ID 可以去向后端要。
+        // 组件卸载/清空时要 revoke，否则这一份内存不会释放。
+        preview: URL.createObjectURL(f),
+      })
+    } catch (e) {
+      ui.notify(`读取图片失败：${e.message || e}`, 'error')
+    }
+  }
+}
+
+function removePending(key) {
+  const i = pendingFiles.value.findIndex((f) => f.key === key)
+  if (i < 0) return
+  const [removed] = pendingFiles.value.splice(i, 1)
+  if (removed && removed.preview) URL.revokeObjectURL(removed.preview)
+}
+
+function clearPendingFiles() {
+  for (const f of pendingFiles.value) {
+    if (f.preview) URL.revokeObjectURL(f.preview)
+  }
+  pendingFiles.value = []
+}
+
+function pickFiles() {
+  fileInput.value?.click()
+}
+
+function handleFilePicked(e) {
+  addFiles(e.target.files)
+  e.target.value = '' // 同一个文件连选两次也要能触发 change
+}
+
+function handlePaste(e) {
+  const dt = e.clipboardData
+  const files = imageFilesFrom(dt)
+  if (files.length) {
+    // 拦掉默认粘贴：否则剪贴板里的文本表示（往往就是那张图的 URL）会一起插进输入框，
+    // 用户以为图发出去了，模型却只看到一串链接。
+    e.preventDefault()
+    addFiles(files)
+    return
+  }
+  if (clipboardClaimsImage(dt)) {
+    // 有图却拿不到字节：同样不能放行默认粘贴（理由同上），并明确告诉用户怎么办
+    e.preventDefault()
+    ui.notify('这张图片读不出来，请先另存为文件再拖进来，或重新截一次图', 'warn')
+    return
+  }
+  if (clipboardIsBareLink(dt)) {
+    // 只带了链接：不拦默认粘贴（用户可能就是想发这个链接），但要说清楚它不是图片，
+    // 并指向「链接」入口——否则用户会以为图已经发出去了。
+    ui.notify('只检测到链接，不是图片内容。若是图片直链，请用上方「链接」按钮添加', 'warn', 7000)
+    return
+  }
+  // 既没有图片文件、也不是一条链接：把剪贴板里究竟有什么报出来。
+  // 与其猜"你贴的是什么"，不如让界面直接说明——这类问题用户与开发者看到的
+  // 现象往往一致（"我明明贴了图"），但对不上的正是剪贴板的真实内容。
+  if (safeGetData(dt, 'text/plain').trim() || safeGetData(dt, 'text/html').trim()) {
+    ui.notify(`粘贴进来的不是图片。${clipboardSummary(dt)}`, 'warn', 12000)
+  }
+}
+
+function handleDragOver(e) {
+  const dt = e.dataTransfer
+  if (!dt) return
+  // 必须 preventDefault，否则浏览器的默认行为是"用这个文件替换当前页面"
+  const types = Array.from(dt.types || [])
+  if (types.includes('Files') || imageFilesFrom(dt).length) {
+    e.preventDefault()
+    dragging.value = true
+  }
+}
+
+function handleDragLeave() {
+  dragging.value = false
+}
+
+function handleDrop(e) {
+  dragging.value = false
+  const files = imageFilesFrom(e.dataTransfer)
+  if (files.length) {
+    e.preventDefault()
+    addFiles(files)
+  }
+}
+
+function formatFileSize(n) {
+  if (!n) return ''
+  if (n < 1024) return `${n} B`
+  if (n < 1024 * 1024) return `${Math.round(n / 1024)} KB`
+  return `${(n / 1024 / 1024).toFixed(1)} MB`
+}
 
 const sessionId = computed(() => sessionStore.currentSessionId)
 const messages = computed(() => chatStore.messages)
@@ -246,7 +507,17 @@ function handleScroll() {
 async function sendMessage() {
   const text = input.value.trim()
   const sid = sessionId.value
-  if (!text || !sid || chatStore.isGenerating) return
+  const pending = pendingFiles.value.slice()
+  // 纯图片消息（不写一个字就发一张图）必须允许——"这张报错图怎么回事"是常见开场
+  if ((!text && !pending.length) || !sid || chatStore.isGenerating) return
+
+  // 计划模式走的是无工具的文本规划器（见 ChatPlan），图片到不了它那里：
+  // 与其发出一份"看不见图"的计划，不如说明白并改走普通对话。
+  let usePlan = planMode.value
+  if (usePlan && pending.length) {
+    ui.notify('计划模式暂不支持图片，本条已按普通对话发送', 'info')
+    usePlan = false
+  }
 
   input.value = ''
   chatStore.isGenerating = true
@@ -254,13 +525,37 @@ async function sendMessage() {
   const startAt = Date.now()
 
   try {
-    // 1. 持久化用户消息（后端补全 id/createdAt 后同步到本地）
-    const savedUserMsg = await appendMessage(sid, { role: 'user', content: text })
+    // 1. 先落附件、再落消息：消息里挂的引用因此一定是完整的，
+    //    不会出现"消息已入库、图还在路上"这种读了会报错的中间态。
+    const attachments = []
+    for (const f of pending) {
+      // 从链接抓来的图在"添加"那一刻就已经落盘，这里直接引用，不再上传一次
+      if (f.attachment) {
+        attachments.push(f.attachment)
+        continue
+      }
+      try {
+        attachments.push(await saveAttachment(sid, f.name, f.payload, 'user'))
+      } catch (e) {
+        // 单张失败不阻断整条消息：剩下的照发，失败的在这里点名
+        ui.notify(`图片「${f.name}」未能添加：${e.message || e}`, 'error')
+      }
+    }
+    clearPendingFiles()
+
+    // 2. 持久化用户消息（后端补全 id/createdAt 后同步到本地）
+    const savedUserMsg = await appendMessage(sid, {
+      role: 'user',
+      content: text,
+      attachments: attachments.length ? attachments : undefined,
+    })
     chatStore.addLocalMessage(savedUserMsg)
     // 本地同步会话标题与活跃时间
     const cur = sessionStore.currentSession
     if (cur && (!cur.title || cur.title === '新会话')) {
-      const flat = text.replace(/\s+/g, ' ').trim()
+      // 纯图片消息没有正文可作标题，用图片文件名兜底（否则会话列表里会出现一行空白）
+      const src = text || (attachments[0] && attachments[0].name) || '（图片）'
+      const flat = src.replace(/\s+/g, ' ').trim()
       sessionStore.touchSession(sid, {
         title: flat.length > 30 ? flat.slice(0, 30) + '...' : flat,
       })
@@ -269,7 +564,7 @@ async function sendMessage() {
     }
 
     // 计划模式：走规划流程产出可审核的计划（平凡请求由后端直接回复）
-    if (planMode.value) {
+    if (usePlan) {
       const result = await chat(sid, text, {
         stream: false, // 规划器固定非流式；免计划直答取完整回复
         plan: true,
@@ -639,10 +934,53 @@ function openDiff() {
       </template>
     </div>
 
-    <div class="prompt-box">
+    <div
+      class="prompt-box"
+      :class="{ dragging }"
+      @dragover="handleDragOver"
+      @dragleave="handleDragLeave"
+      @drop="handleDrop"
+    >
+      <!-- 拖拽遮罩：明确告诉用户"松手就添加"，而不是让它猜为什么拖不进来 -->
+      <div v-if="dragging" class="drop-hint">松开鼠标添加图片</div>
+
       <div class="prompt-toolbar">
-        <!-- 原先这里的「附件 / @提及文件 / 更多」三个图标按钮没有绑定任何事件，
-             点了没反应；后端也还没有对应能力，先移除，避免诱导点击。 -->
+        <!-- 「附件 / @提及文件 / 更多」三个图标按钮当年没有绑定任何事件，点了没反应，
+             已移除；这里只放真正有实现的入口。 -->
+        <button
+          class="tool-btn"
+          :disabled="chatStore.isGenerating"
+          title="添加图片（也可以直接粘贴 Ctrl+V 或把图拖进来）"
+          @click="pickFiles"
+        >
+          <svg width="15" height="15" viewBox="0 0 16 16" fill="none">
+            <rect x="2" y="3" width="12" height="10" rx="1.4" stroke="currentColor" stroke-width="1.3" />
+            <circle cx="5.8" cy="6.6" r="1.1" fill="currentColor" />
+            <path d="M2.6 11.6l3.2-3.1 2.2 2.1 2-1.9 3.4 3.2" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round" />
+          </svg>
+          图片
+        </button>
+        <input
+          ref="fileInput"
+          type="file"
+          accept="image/png,image/jpeg,image/gif"
+          multiple
+          class="file-input"
+          @change="handleFilePicked"
+        />
+        <button
+          class="tool-btn"
+          :disabled="chatStore.isGenerating"
+          title="从图片链接添加：会从本机下载一次，内容必须是图片（用户点按才会发起）"
+          @click="addFromURL"
+        >
+          <svg width="15" height="15" viewBox="0 0 16 16" fill="none">
+            <path d="M6.6 9.4l2.8-2.8" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" />
+            <path d="M7.3 4.7l.8-.8a2.5 2.5 0 0 1 3.5 3.5l-.8.8" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" />
+            <path d="M8.7 11.3l-.8.8a2.5 2.5 0 0 1-3.5-3.5l.8-.8" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" />
+          </svg>
+          链接
+        </button>
         <button class="tool-btn diff-btn" title="查看文件差异" @click="openDiff">
           <svg width="15" height="15" viewBox="0 0 16 16" fill="none">
             <path d="M8 2v12M2 8h12" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
@@ -707,6 +1045,15 @@ function openDiff() {
         </button>
       </div>
 
+      <!-- 待发送的图片：本地预览 + 删除。发送成功后才上传，贴错了直接删掉 -->
+      <div v-if="pendingFiles.length" class="pending-files">
+        <div v-for="f in pendingFiles" :key="f.key" class="pending-file" :title="f.name">
+          <img :src="f.preview" :alt="f.name" />
+          <button class="pending-remove" title="移除这张图" @click="removePending(f.key)">×</button>
+          <span class="pending-meta">{{ formatFileSize(f.size) }}</span>
+        </div>
+      </div>
+
       <div class="prompt-input-wrap">
         <!-- 「/技能名」补全：向上弹出，避免遮住下方的发送按钮 -->
         <div v-if="skillMenuOpen" class="skill-menu">
@@ -725,16 +1072,17 @@ function openDiff() {
         <textarea
           v-model="input"
           class="prompt-input"
-          placeholder="输入消息... (Enter 发送，Shift+Enter 换行；输入 / 调用技能)"
+          placeholder="输入消息... (Enter 发送，Shift+Enter 换行；输入 / 调用技能，/vision 自检看图能力；可粘贴或拖入图片)"
           rows="1"
           @keydown="handleKeydown"
+          @paste="handlePaste"
         />
       </div>
 
       <div class="prompt-footer">
         <button
           class="btn btn-primary send-btn"
-          :disabled="!input.trim() || chatStore.isGenerating || !sessionId"
+          :disabled="(!input.trim() && !pendingFiles.length) || chatStore.isGenerating || !sessionId"
           @click="sendMessage"
         >
           发送
@@ -848,9 +1196,88 @@ function openDiff() {
 }
 
 .prompt-box {
+  position: relative;
   border-top: 1px solid $color-border;
   background-color: $color-bg-secondary;
   padding: $space-md;
+}
+
+// 拖拽悬停：给一点边框反馈，明确"这里可以放"
+.prompt-box.dragging {
+  outline: 1px dashed $color-primary;
+  outline-offset: -4px;
+}
+
+.drop-hint {
+  position: absolute;
+  inset: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: $font-size-sm;
+  color: $color-primary;
+  background-color: rgb(var(--color-primary-rgb) / 0.06);
+  pointer-events: none; // 让 dragover/drop 继续落在 .prompt-box 上
+}
+
+// 隐藏的原生文件选择框：入口是工具栏那个「图片」按钮
+.file-input {
+  display: none;
+}
+
+// 待发送的图片预览条
+.pending-files {
+  display: flex;
+  flex-wrap: wrap;
+  gap: $space-sm;
+  margin-bottom: $space-sm;
+}
+
+.pending-file {
+  position: relative;
+  width: 72px;
+  height: 72px;
+  border-radius: $radius-md;
+  border: 1px solid $color-border;
+  overflow: hidden;
+  background-color: $color-bg-tertiary;
+
+  img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+  }
+
+  .pending-remove {
+    position: absolute;
+    top: 2px;
+    right: 2px;
+    width: 18px;
+    height: 18px;
+    font-size: 13px;
+    line-height: 1;
+    color: #fff;
+    background-color: rgba(0, 0, 0, 0.55);
+    border-radius: 50%;
+
+    &:hover {
+      background-color: $color-error;
+    }
+  }
+
+  .pending-meta {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    padding: 1px 4px;
+    font-size: 10px;
+    color: #fff;
+    background-color: rgba(0, 0, 0, 0.55);
+    text-align: center;
+  }
 }
 
 .prompt-toolbar {

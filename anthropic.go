@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -106,7 +107,7 @@ type anthropicTool struct {
 	InputSchema map[string]interface{} `json:"input_schema"`
 }
 
-// anthropicContentBlock 兼容请求/响应两端的块结构（请求端用 text/tool_use/tool_result，
+// anthropicContentBlock 兼容请求/响应两端的块结构（请求端用 text/tool_use/tool_result/image，
 // 响应端用 text/tool_use）。
 type anthropicContentBlock struct {
 	Type      string          `json:"type"`
@@ -116,6 +117,17 @@ type anthropicContentBlock struct {
 	Input     json.RawMessage `json:"input,omitempty"`
 	ToolUseID string          `json:"tool_use_id,omitempty"`
 	Content   string          `json:"content,omitempty"`
+	// Source 图片块专用。Anthropic 的图片块是 {"type":"image","source":{...}}，
+	// 与 OpenAI 的 data URL 形状完全不同——这正是需要适配器的那类差异。
+	Source *anthropicImageSource `json:"source,omitempty"`
+}
+
+// anthropicImageSource Anthropic 的 base64 图片来源。
+// Data 是**裸 base64**，不带 "data:image/png;base64," 前缀（那正是 OpenAI 的形状）。
+type anthropicImageSource struct {
+	Type      string `json:"type"`       // 固定 "base64"
+	MediaType string `json:"media_type"` // image/png / image/jpeg / image/gif
+	Data      string `json:"data"`
 }
 
 // anthropicStreamDelta 流式帧的 delta 字段。它承载两类内容：
@@ -181,6 +193,8 @@ func toAnthropicRequest(req *LLMReq) *anthropicReq {
 				Content:   m.Content,
 			})
 		case RoleAssistant:
+			// assistant 消息不带图（模型不会"发出"图片），呈现在这里会被静默丢掉；
+			// 若日后要做"模型生成图片"，必须在这里补分支而不是让它悄悄消失。
 			if len(m.ToolCalls) > 0 {
 				blocks := make([]anthropicContentBlock, 0, len(m.ToolCalls)+1)
 				if strings.TrimSpace(m.Content) != "" {
@@ -199,10 +213,22 @@ func toAnthropicRequest(req *LLMReq) *anthropicReq {
 				appendAnthropicMessage(out, RoleAssistant, anthropicContentBlock{Type: "text", Text: m.Content})
 			}
 		default: // user
-			if strings.TrimSpace(m.Content) == "" {
+			// 有图但没文字的消息也必须发出去，所以判空条件是"两者皆空"
+			if strings.TrimSpace(m.Content) == "" && len(m.Images) == 0 {
 				continue
 			}
-			appendAnthropicMessage(out, RoleUser, anthropicContentBlock{Type: "text", Text: m.Content})
+			blocks := make([]anthropicContentBlock, 0, len(m.Images)+1)
+			// 文本在前、图片在后：与 Claude Code 的实际行为一致（用户先写一句话再附图）。
+			// 顺序对正确性没有要求，只影响模型对"这句话是在说哪张图"的理解。
+			// textPartFor：**纯图片消息必须补一个文本块**——Anthropic 本身允许
+			// 只有 image 的 content，但网关侧未必，而两条协议共用同一条规则更不容易漂。
+			if text := textPartFor(m.Content, m.Images); strings.TrimSpace(text) != "" {
+				blocks = append(blocks, anthropicContentBlock{Type: "text", Text: text})
+			}
+			for _, img := range appendAnthropicImages(m.Images) {
+				blocks = append(blocks, img)
+			}
+			appendAnthropicMessage(out, RoleUser, blocks...)
 		}
 	}
 	out.System = strings.Join(systemParts, "\n\n")
@@ -222,6 +248,39 @@ func appendAnthropicMessage(out *anthropicReq, role string, blocks ...anthropicC
 		}
 	}
 	out.Messages = append(out.Messages, anthropicMessage{Role: role, Content: blocks})
+}
+
+// appendAnthropicImages 把内部中立的图片载荷转成 Anthropic 的 image 块。
+//
+// 两处形状差异都在这里吸收掉：
+//   - OpenAI 用 data URL（前缀 + base64 拼在一起），Anthropic 要求 media_type 与
+//     data 分成两个字段；
+//   - 脱敏后的图片（请求快照路径）不能编一段假 base64 发出去，降级成一行文本说明，
+//     这样"这里本该有张图"这件事在报文里仍然是可见的。
+func appendAnthropicImages(images []LLMImage) []anthropicContentBlock {
+	if len(images) == 0 {
+		return nil
+	}
+	out := make([]anthropicContentBlock, 0, len(images))
+	for _, img := range images {
+		if img.Redacted {
+			out = append(out, anthropicContentBlock{Type: "text", Text: "（" + img.describe() + "）"})
+			continue
+		}
+		mediaType := img.MediaType
+		if mediaType == "" {
+			mediaType = "image/png"
+		}
+		out = append(out, anthropicContentBlock{
+			Type: "image",
+			Source: &anthropicImageSource{
+				Type:      "base64",
+				MediaType: mediaType,
+				Data:      base64.StdEncoding.EncodeToString(img.Data),
+			},
+		})
+	}
+	return out
 }
 
 // rawJSONObject 把工具参数（JSON 字符串）规整为合法对象字面量，异常时回退为 {}。
@@ -352,10 +411,48 @@ func newAnthropicHTTPRequest(ctx context.Context, url, token string, body []byte
 	return httpReq, nil
 }
 
+// logAnthropicImageShape 出站前记录带图请求的**实际形状**。
+//
+// 为什么必须记：`RequestPreviewDialog` 展示的是**内部中立格式**（OpenAI 形状）的序列，
+// Anthropic 侧还会再转一次（system 抽出、图片变成 source 块）。两次转换之间出问题的话，
+// 在对话框里一点异常都看不出来——真机上已经吃过这个亏（模型说"图片只以 URL 形式出现"）。
+// 只记形状与长度，不记内容。
+func logAnthropicImageShape(areq *anthropicReq) {
+	if areq == nil {
+		return
+	}
+	blocks, images := 0, 0
+	firstType, firstMedia, firstLen := "", "", 0
+	for _, m := range areq.Messages {
+		bs, ok := m.Content.([]anthropicContentBlock)
+		if !ok {
+			continue
+		}
+		for _, b := range bs {
+			blocks++
+			if b.Type != "image" {
+				continue
+			}
+			images++
+			if images == 1 && b.Source != nil {
+				firstType = b.Source.Type
+				firstMedia = b.Source.MediaType
+				firstLen = len(b.Source.Data)
+			}
+		}
+	}
+	if images == 0 {
+		return // 不带图的请求不记，免得刷屏
+	}
+	fmt.Printf("[协议] Anthropic 出站：%d 条消息 / %d 个内容块 / %d 个图像块；首个图像 type=%s media=%s data=%d 字符\n",
+		len(areq.Messages), blocks, images, firstType, firstMedia, firstLen)
+}
+
 // callAnthropic 非流式调用 Anthropic Messages 协议。
 func callAnthropic(ctx context.Context, url, token string, req *LLMReq) (*LLMResp, error) {
 	areq := toAnthropicRequest(req)
 	areq.Stream = false
+	logAnthropicImageShape(areq)
 	data, err := json.Marshal(areq)
 	if err != nil {
 		return nil, fmt.Errorf("序列化 Anthropic 请求失败: %w", err)
@@ -393,6 +490,7 @@ func callAnthropic(ctx context.Context, url, token string, req *LLMReq) (*LLMRes
 func callAnthropicStream(ctx context.Context, url, token string, req *LLMReq, onContent func(string)) (*LLMResp, error) {
 	areq := toAnthropicRequest(req)
 	areq.Stream = true
+	logAnthropicImageShape(areq)
 	data, err := json.Marshal(areq)
 	if err != nil {
 		return nil, fmt.Errorf("序列化 Anthropic 请求失败: %w", err)

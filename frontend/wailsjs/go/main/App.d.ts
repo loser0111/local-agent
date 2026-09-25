@@ -45,6 +45,10 @@ export function ExecutePlan(arg1:string,arg2:boolean):Promise<main.ChatResult>;
 
 export function ExportMCPServers(arg1:Array<string>):Promise<string>;
 
+export function FetchImageURL(arg1:string,arg2:string):Promise<main.Attachment>;
+
+export function GetAttachmentDataURL(arg1:string,arg2:string):Promise<string>;
+
 export function GetContextPrefs():Promise<main.ContextPrefs>;
 
 export function GetContextStat(arg1:string):Promise<main.ContextStat>;
@@ -134,6 +138,8 @@ export function ResolveAskUser(arg1:main.AskAnswer):Promise<void>;
 export function ResolvePermission(arg1:string,arg2:string,arg3:string,arg4:string,arg5:string):Promise<void>;
 
 export function RunTaskNow(arg1:string):Promise<plugin.RunRecord>;
+
+export function SaveAttachment(arg1:string,arg2:string,arg3:string,arg4:string):Promise<main.Attachment>;
 
 export function SavePlan(arg1:main.Plan):Promise<void>;
 

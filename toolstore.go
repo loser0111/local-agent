@@ -84,6 +84,14 @@ func defaultSources() []*ToolSource {
 			},
 		},
 		{
+			ID: toolReadImage, Name: toolReadImage, Label: "查看图片",
+			Description: "查看工作区内的一张图片（PNG/JPEG/GIF）：截图、报错图、设计稿、图表。图片会作为图像内容返回，可直接分析其中内容",
+			Kind:        SourceBuiltin, Icon: "image", Enabled: true, Builtin: true,
+			Parameters: []ToolParamConfig{
+				{Name: "path", Description: "图片路径（相对工作区目录或绝对路径）", Required: true},
+			},
+		},
+		{
 			ID: "write_file", Name: "write_file", Label: "写入文件",
 			Description: "新建或整体覆盖一个文本文件",
 			Kind:        SourceBuiltin, Icon: "file-plus", Enabled: true, Builtin: true,

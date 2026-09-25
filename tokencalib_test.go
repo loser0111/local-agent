@@ -102,7 +102,7 @@ func TestCalibCorruptFileFallsBack(t *testing.T) {
 // 无锚点时套系数；有锚点时锚点是真值，绝不再乘一次
 func TestContextStatCalibOnlyWithoutAnchor(t *testing.T) {
 	sess := &Session{Messages: []Message{{Role: RoleUser, Content: strings.Repeat("内容", 50)}}}
-	msgs := buildRunMessages(sess, "", false)
+	msgs := buildRunMessages(sess, "", false, nil)
 
 	base := contextStatOf(sess, msgs, 1_000_000, nil, 0, 1.0)
 	doubled := contextStatOf(sess, msgs, 1_000_000, nil, 0, 2.0)

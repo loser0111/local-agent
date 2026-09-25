@@ -484,6 +484,10 @@ func TestFileToolsAssembledAndDirectExposed(t *testing.T) {
 		ProjectDir: dir,
 		SessionID:  "s1",
 		Enforcer:   AllowAllEnforcer{},
+		// read_image 也是一样：它要在能存图时才注册（没有附件存储就用不了），
+		// 不给这一项，下面的"directToolOrder 全员可见"断言就会因为"没装上"而失败，
+		// 掩盖掉真正要守的东西。
+		Attachments: NewAttachmentStore(t.TempDir()),
 		// 给一个 spawner：directToolOrder 里有 spawn_agent，而没有 spawner 时它按设计
 		// 根本不注册（子代理正是靠这个不注册来防止再派生）。此处传桩只为让它存在，
 		// 下面的断言才能覆盖完整名录——否则失败原因是"工具没装上"，而不是"没直出"。

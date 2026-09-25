@@ -172,7 +172,7 @@ func TestBuildRunMessagesWithSummary(t *testing.T) {
 		ContextSummary:     "之前聊了两轮，结论是 X。",
 		ContextCoveredUpTo: 2,
 	}
-	out := buildRunMessages(session, "SYS", false)
+	out := buildRunMessages(session, "SYS", false, nil)
 
 	// system + 摘要说明 + 后 2 条
 	if len(out) != 4 {
@@ -202,7 +202,7 @@ func TestBuildRunMessagesWithoutSummary(t *testing.T) {
 		{ID: "m0", Role: RoleUser, Content: "问题"},
 		{ID: "m1", Role: RoleAssistant, Content: "回答"},
 	}}
-	out := buildRunMessages(session, "SYS", false)
+	out := buildRunMessages(session, "SYS", false, nil)
 	if len(out) != 3 {
 		t.Fatalf("应为 system + 2 条，实际 %d", len(out))
 	}
@@ -233,7 +233,7 @@ func TestContextSummaryIsReversible(t *testing.T) {
 	}
 
 	got, _ := store.GetSession(sess.ID)
-	compressed := buildRunMessages(got, "SYS", false)
+	compressed := buildRunMessages(got, "SYS", false, nil)
 	if !strings.Contains(compressed[1].Content, "摘要正文") {
 		t.Fatalf("应发送摘要，实际 %q", compressed[1].Content)
 	}
@@ -243,7 +243,7 @@ func TestContextSummaryIsReversible(t *testing.T) {
 		t.Fatal(err)
 	}
 	got2, _ := store.GetSession(sess.ID)
-	restored := buildRunMessages(got2, "SYS", false)
+	restored := buildRunMessages(got2, "SYS", false, nil)
 	if !strings.Contains(restored[1].Content, "问题一") {
 		t.Fatalf("清空摘要后应回到全量上下文，实际 %q", restored[1].Content)
 	}
@@ -260,7 +260,7 @@ func TestContextStatOf(t *testing.T) {
 		ContextCoveredUpTo: 3,
 		ContextSummary:     "摘要",
 	}
-	msgs := buildRunMessages(session, "", false)
+	msgs := buildRunMessages(session, "", false, nil)
 	st := contextStatOf(session, msgs, 1000, nil, 0, 1.0)
 	if st.SessionID != "s1" || st.WindowTokens != 1000 {
 		t.Fatalf("基础字段错误: %+v", st)
@@ -517,7 +517,7 @@ func TestSecondCompactCarriesPreviousSummary(t *testing.T) {
 
 	// 模型看到的应是新摘要，且原文依然完整保留
 	reloaded, _ := app.sessionStore.GetSession(sess.ID)
-	visible := buildRunMessages(reloaded, "SYS", false)
+	visible := buildRunMessages(reloaded, "SYS", false, nil)
 	if !strings.Contains(visible[1].Content, "BETA") {
 		t.Fatalf("应发送新摘要，实际 %q", visible[1].Content)
 	}

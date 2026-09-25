@@ -310,6 +310,9 @@ type SessionView struct {
 	meta    *MetaTool
 	// direct 直出给模型的工具名，顺序稳定；由来源的 exposure 决定（不再写死在代码里）
 	direct []string
+	// images 本次装配的产图通道：read_image 这类工具把读到的图片放进来，
+	// 由工具循环在调用返回后取走并落到该次调用结果的消息上（见 imageCollector）。
+	images *imageCollector
 }
 
 // BuildOptions 装配工具视图的会话级参数
@@ -319,7 +322,10 @@ type BuildOptions struct {
 	ProjectDir    string         // 会话工作区目录：工具的工作目录，也是权限判定的边界
 	SessionID     string         // 会话 ID（文件改动的归因记录按会话隔离）
 	Changes       *FileChangeLog // 文件改动记录；为 nil 时不记录
-	Enforcer      Enforcer       // 权限网关；为空时装配 fail-closed 的拒绝网关
+	// Attachments 附件存储（read_image 用它把工作区里的图片存成会话附件）。
+	// 为 nil 时 read_image **不注册**——没有地方存图，注册出来只会每次调用都失败。
+	Attachments *AttachmentStore
+	Enforcer    Enforcer // 权限网关；为空时装配 fail-closed 的拒绝网关
 	// Ask 用户提问回路（ask_user 工具）：发事件给前端并阻塞等待作答。
 	// 为 nil 时该工具仍会装配，但调用会返回"界面未就绪"——便于测试与降级。
 	Ask func(ctx context.Context, req AskRequest) (AskAnswer, error)
@@ -340,7 +346,7 @@ type BuildOptions struct {
 // buildContext 装配期传给内置工具构造函数的上下文
 type buildContext struct {
 	dir     string                                                       // 工作区目录（命令类工具的工作目录）
-	fileCtx fileToolContext                                              // 文件类工具的上下文（目录 + 归因记录）
+	fileCtx fileToolContext                                              // 文件类工具的上下文（目录 + 归因记录 + 附件）
 	asker   func(ctx context.Context, req AskRequest) (AskAnswer, error) // ask_user 的回路
 	// spawner 派生代理的回路；为 nil 时 spawn_agent 不注册（子代理因此无法再派生）
 	spawner func(ctx context.Context, task string, maxTurns int) (*SubagentResult, error)
@@ -361,6 +367,13 @@ func newBuiltinTool(src *ToolSource, bc buildContext) (ToolInterface, bool) {
 		}, true
 	case toolReadFile:
 		return newReadFileTool(bc), true
+	case toolReadImage:
+		// 没有附件存储就不注册 read_image：存图这一步无处可去，
+		// 注册出来只会每次调用都报错，白耗模型一轮。
+		if bc.fileCtx.attachments == nil {
+			return nil, false
+		}
+		return newReadImageTool(bc), true
 	case toolWriteFile:
 		return newWriteFileTool(bc), true
 	case toolEditFile:
@@ -481,12 +494,17 @@ func (tm *ToolManager) BuildView(ctx context.Context, opts BuildOptions) *Sessio
 			dir = opts.ProjectDir
 		}
 	}
+	// 产图通道：本次装配的所有工具共用同一个收集器，工具循环按调用顺序取走。
+	// 一次装配对应一次运行，所以不存在跨会话串图的问题。
+	images := &imageCollector{}
 	bc := buildContext{
 		dir: dir,
 		fileCtx: fileToolContext{
-			root:      dir,
-			sessionID: opts.SessionID,
-			changes:   opts.Changes,
+			root:        dir,
+			sessionID:   opts.SessionID,
+			changes:     opts.Changes,
+			attachments: opts.Attachments,
+			imageOut:    images,
 		},
 		asker:   opts.Ask,
 		spawner: opts.SpawnAgent,
@@ -630,7 +648,20 @@ func (tm *ToolManager) BuildView(ctx context.Context, opts BuildOptions) *Sessio
 		nonMeta: registry,
 		meta:    NewMetaTool(registry, typeMap, hidden),
 		direct:  directToolNames(exposure),
+		images:  images,
 	}
+}
+
+// TakeImages 取出本次工具调用**刚产出**的图片（read_image 之类"结果里带图"的工具）。
+//
+// 必须在**每次 ExecuteToolCtx 之后立刻**调用：一次装配的工具共用同一个收集器，
+// 中间不取走的话，"这两张图是哪一次调用产的"就再也分不出来了。
+// 循环是串行执行 tool_calls 的，所以"执行一次、取一次"能保证归因准确。
+func (v *SessionView) TakeImages() []Attachment {
+	if v == nil {
+		return nil
+	}
+	return v.images.take()
 }
 
 // directToolNames 计算直出名录：先按既有的稳定顺序（directToolOrder）列出内置文件工具等，

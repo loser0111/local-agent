@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
-import { ref } from 'vue'
-import { getSession } from '@/api/session'
+import { ref, shallowRef } from 'vue'
+import { getSession, getAttachmentDataURL } from '@/api/session'
 
 /**
  * 对话消息 Store —— 仅维护「当前会话」的消息
@@ -15,6 +15,36 @@ export const useChatStore = defineStore('chat', () => {
   // 外部（如 DiffPane 的 Review code）请求填入输入框的提示词
   const pendingPrompt = ref(null)
 
+  // 附件 data URL 缓存：key = `${sessionId}:${attachmentId}`。
+  //
+  // 图片是重数据（单张几百 KB 的 base64），而消息列表会因为流式输出、滚动、工具卡片
+  // 状态变化而频繁重渲染。没有这层缓存，每渲染一次就向后端要一次图。
+  // 用 shallowRef：我们只整体替换这个对象，不需要 Vue 深度追踪里面每个 URL。
+  // 只增不减，切会话时整体清空——跨会话留着没有意义，还白占内存。
+  const attachmentUrls = shallowRef({})
+
+  /**
+   * 取某个附件的 data URL（带缓存）。取不到时缓存空串并返回空串。
+   * @param {string} sessionId
+   * @param {string} attachmentId
+   * @returns {Promise<string>}
+   */
+  async function loadAttachmentUrl(sessionId, attachmentId) {
+    const key = `${sessionId}:${attachmentId}`
+    const cached = attachmentUrls.value[key]
+    if (cached !== undefined) return cached
+    const url = await getAttachmentDataURL(sessionId, attachmentId)
+    attachmentUrls.value = { ...attachmentUrls.value, [key]: url }
+    return url
+  }
+
+  /**
+   * 同步读缓存（已加载过才有值）。组件渲染时先看它，避免闪一下空占位。
+   */
+  function attachmentUrl(sessionId, attachmentId) {
+    return attachmentUrls.value[`${sessionId}:${attachmentId}`] || ''
+  }
+
   /**
    * 加载指定会话的历史消息
    */
@@ -22,9 +52,13 @@ export const useChatStore = defineStore('chat', () => {
     if (!sessionId) {
       messages.value = []
       loadedSessionId.value = null
+      attachmentUrls.value = {}
       return
     }
     if (loadedSessionId.value === sessionId) return
+
+    // 切会话：附件缓存整体作废（键里虽然带会话 ID，但跨会话攒着只会白占内存）
+    attachmentUrls.value = {}
 
     loadingHistory.value = true
     try {
@@ -98,6 +132,9 @@ export const useChatStore = defineStore('chat', () => {
     loadingHistory,
     loadedSessionId,
     pendingPrompt,
+    attachmentUrls,
+    loadAttachmentUrl,
+    attachmentUrl,
     loadMessages,
     addLocalMessage,
     updateLocalMessage,

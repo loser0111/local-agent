@@ -28,6 +28,27 @@
  */
 
 /**
+ * 附件（目前只有图片）。
+ *
+ * 它是**引用**而不是数据：字节落在后端附件目录（~/.local-agent/attachments/<会话ID>/），
+ * 消息里只存这些元数据。要展示时用 api/session 的 getAttachmentDataURL(会话ID, id) 取回，
+ * 且只传 ID——后端不接受路径（那等于把"读任意文件"的能力开给前端）。
+ *
+ * @typedef {Object} Attachment
+ * @property {string} id 内容寻址 ID（同一张图重复贴只存一份）
+ * @property {string} kind image
+ * @property {string} name 展示用文件名
+ * @property {string} mediaType 送给模型的媒体类型（可能是后端规整后的结果）
+ * @property {number} bytes 规整后的字节数
+ * @property {number} [width]
+ * @property {number} [height]
+ * @property {('user'|'tool')} [source] user=用户贴的 / tool=模型读的
+ * @property {boolean} [changed] 后端是否做过缩放或重编码
+ * @property {string} [path] 相对附件根的路径（后端内部使用）
+ * @property {number} [createdAt]
+ */
+
+/**
  * 工具调用
  * @typedef {Object} ToolCall
  * @property {string} id
@@ -36,6 +57,8 @@
  * @property {ToolCallStatus} status
  * @property {number} [duration]
  * @property {string} [result]
+ * @property {string[]} [files] 本次调用改动的文件（相对工作区路径）
+ * @property {string[]} [images] 本次调用产出的图片附件 ID（read_image）
  */
 
 /**
@@ -45,6 +68,7 @@
  * @property {MessageRole} role
  * @property {string} content
  * @property {ToolCall[]} [toolCalls]
+ * @property {Attachment[]} [attachments] 本条消息携带的图片
  * @property {number} createdAt
  * @property {boolean} [streaming]
  */

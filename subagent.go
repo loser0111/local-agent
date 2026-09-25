@@ -247,6 +247,7 @@ func (a *App) runSubagent(parentRun *runControl, parent *Session, dir string, mo
 		ProjectDir:    dir,
 		SessionID:     child.ID,
 		Changes:       a.fileChanges,
+		Attachments:   a.attachments,
 		Enforcer:      sub,
 		ExcludeTools:  []string{toolAskUser, toolMemorySave, toolMemoryForget},
 		Memory:        a.memory,
@@ -269,8 +270,11 @@ func (a *App) runSubagent(parentRun *runControl, parent *Session, dir string, mo
 		Diff:         a.diffService,
 		Changes:      a.fileChanges,
 		ReqLog:       a.reqLog,
-		Compactor:    nil, // 子代理不做摘要压缩：多条运行同改一份会话摘要会互相打架
-		Recorder:     &subagentRecorder{app: a, runID: child.ID},
+		Attachments:  a.attachments,
+		// 子代理用的是同一个模型，看图能力的结论也照传（它同样可能读到图）
+		VisionUnsupported: a.visionVerdicts.Unsupported(child.Model, modelCallID(model), model.URL),
+		Compactor:         nil, // 子代理不做摘要压缩：多条运行同改一份会话摘要会互相打架
+		Recorder:          &subagentRecorder{app: a, runID: child.ID},
 	})
 
 	out := &SubagentResult{

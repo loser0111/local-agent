@@ -18,6 +18,9 @@ import {
   GetDiffTurns,
   ListSubagents,
   GetSubagentMessages,
+  SaveAttachment,
+  GetAttachmentDataURL,
+  FetchImageURL,
 } from '@/../wailsjs/go/main/App'
 import { EventsOn, EventsOff } from '@/../wailsjs/runtime/runtime'
 import { putMockPlan } from '@/api/plan'
@@ -146,6 +149,8 @@ export async function appendMessage(sessionId, message) {
     role: message.role,
     content: message.content || '',
     toolCalls: message.toolCalls || undefined,
+    // 附件引用要跟着消息一起落库：少了它，界面上那张图会在刷新后消失
+    attachments: message.attachments?.length ? message.attachments : undefined,
     createdAt: now,
   }
   session.messages.push(full)
@@ -345,6 +350,88 @@ export async function chat(
       },
     ],
   }
+}
+
+// ===== 附件（图片）=====
+
+// 浏览器开发模式的附件表：`${sessionId}:${id}` → data URL。
+// 真实环境里图是落盘的（~/.local-agent/attachments/<会话ID>/），这里只放内存够用。
+const mockAttachments = new Map()
+
+/**
+ * 保存一张图片附件，返回可写进消息的附件引用。
+ *
+ * 流程是"先存附件、再带引用落消息"：消息落库时引用已经完整，
+ * 因此不会出现"消息里挂着一张读不到的图"这种中间态。
+ *
+ * 后端会做入站规整（校验格式与大小、按最长边 1568px 等比缩小、必要时重编码），
+ * 所以返回的 bytes/width/height 可能与你传进来的不一致——界面应以后端返回的为准。
+ *
+ * @param {string} sessionId
+ * @param {string} name 原始文件名（只用于展示）
+ * @param {string} payload base64 字符串或 data URL
+ * @param {string} [source] user（用户贴的）/ tool（模型读的）
+ * @returns {Promise<import('@/types').Attachment>}
+ */
+export async function saveAttachment(sessionId, name, payload, source = 'user') {
+  if (isWails()) {
+    return await SaveAttachment(sessionId, name, payload, source)
+  }
+  const mediaType = /^data:([^;,]+)/.exec(payload)?.[1] || 'image/png'
+  const base64 = payload.includes(',') ? payload.slice(payload.indexOf(',') + 1) : payload
+  const id = `mock${Math.random().toString(16).slice(2, 10)}`
+  const dataUrl = payload.startsWith('data:') ? payload : `data:${mediaType};base64,${base64}`
+  mockAttachments.set(`${sessionId}:${id}`, dataUrl)
+  return {
+    id,
+    kind: 'image',
+    name,
+    mediaType,
+    bytes: Math.round((base64.length * 3) / 4),
+    source,
+    changed: false,
+    createdAt: Date.now(),
+  }
+}
+
+/**
+ * 取附件的数据 URL（历史消息里的图片展示用）。
+ *
+ * 取不到时返回空串而不是抛错：附件目录被清理过是真实存在的情况，
+ * 界面据此显示"图片已丢失"，比一个破图占位诚实得多。
+ *
+ * @param {string} sessionId
+ * @param {string} id 附件 ID（只能给 ID，后端不接受路径——那等于把读任意文件的能力开给前端）
+ * @returns {Promise<string>} 空串表示取不到
+ */
+export async function getAttachmentDataURL(sessionId, id) {
+  if (!sessionId || !id) return ''
+  if (!isWails()) {
+    return mockAttachments.get(`${sessionId}:${id}`) || ''
+  }
+  try {
+    return (await GetAttachmentDataURL(sessionId, id)) || ''
+  } catch {
+    return ''
+  }
+}
+
+/**
+ * 从图片链接抓取一张图，按与"用户贴图"完全相同的方式存成会话附件。
+ *
+ * 只应由**用户明确点按**触发（界面上的「链接」入口）：这会从本机发起一次出站请求。
+ * 后端限定 http/https、重定向最多 3 跳且逐跳校验、整体超时、响应体限长，
+ * 并要求内容真能嗅探成受支持的图片。模型无法触发它——它不是工具。
+ *
+ * @param {string} sessionId
+ * @param {string} url
+ * @returns {Promise<import('@/types').Attachment>}
+ */
+export async function fetchImageURL(sessionId, url) {
+  if (isWails()) {
+    return await FetchImageURL(sessionId, url)
+  }
+  throw new Error('浏览器开发模式不支持从链接抓取图片')
 }
 
 // ===== Diff 差异视图 =====

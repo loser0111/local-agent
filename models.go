@@ -263,3 +263,18 @@ func maskAPIKey(key string) string {
 	}
 	return strings.Repeat("*", len(key)-4) + key[len(key)-4:]
 }
+
+// modelCallID 发请求时实际使用的模型 ID（未配置 ModelID 时回落到配置名）。
+//
+// 必须是**一个共用函数**：/vision 写看图结论、工具循环读结论，两边若各写一份
+// "为空则用 Name" 的回落逻辑，只要有一边漏了，键就对不上——
+// 表现为"测过了但警告永远不出现"这种查起来很费劲的静默失效。
+func modelCallID(m *Model) string {
+	if m == nil {
+		return ""
+	}
+	if id := strings.TrimSpace(m.ModelID); id != "" {
+		return id
+	}
+	return m.Name
+}

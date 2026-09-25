@@ -145,6 +145,26 @@ func estimateSeqTokens(messages []LLMMessage, anchor *tokenAnchor) int {
 	return total
 }
 
+// imageTokens 估算一张图片占用的输入 token。
+//
+// 用 Anthropic 公开的口径 tokens ≈ (宽 × 高) / 750，而**不是**按 base64 字符数估：
+// 图片的计费只与像素数有关，与字节数基本无关。照字符估会得出完全相反的结论——
+// 一张 200KB 的 1568×1568 截图（≈3270 token）比一张 2MB 的 4000×3000 照片贵得多
+// （后者在入站时已被压到 1568px 上限）。
+//
+// 向上取整：宁可高估。压缩判定宁早勿晚——早压一次只是多花一次摘要调用，
+// 压晚了会直接把请求打成超限错误。
+func imageTokens(w, h int) int {
+	if w <= 0 || h <= 0 {
+		return 0
+	}
+	t := (w*h + 749) / 750
+	if t < 1 {
+		t = 1
+	}
+	return t
+}
+
 // messageTokens 单条消息的估算（含 role 等结构开销）
 func messageTokens(m LLMMessage) int {
 	n := estimateTokens(m.Content) + 4
@@ -153,6 +173,9 @@ func messageTokens(m LLMMessage) int {
 	}
 	for _, tc := range m.ToolCalls {
 		n += estimateTokens(tc.Function.Name) + estimateTokens(tc.Function.Arguments) + 8
+	}
+	for _, img := range m.Images {
+		n += imageTokens(img.Width, img.Height)
 	}
 	return n
 }
@@ -170,6 +193,10 @@ func storedMessageTokens(m Message) int {
 		// 参数用 %v 粗估即可：这里只是为了算出"压缩前大概多大"，
 		// 精确值由锚点负责，不需要为了几个 token 去序列化 JSON
 		n += estimateTokens(tc.Name) + estimateTokens(fmt.Sprintf("%v", tc.Args)) + 8
+	}
+	// 附件同样要计入：不然一张图能被"压缩省下 0 token"，而它实际占了三千多。
+	for _, att := range m.Attachments {
+		n += imageTokens(att.Width, att.Height)
 	}
 	return n
 }
@@ -275,9 +302,13 @@ func applyToolResultBudget(msgs []Message) []Message {
 // 顺序有讲究：先做摘要前缀替换（它改变消息条数），再施加工具结果预算（逐条改内容），
 // 最后交给 buildLLMMessages 转成协议格式。
 // forceTruncate 为 true 时走确定性截断——它是降级路径与调试开关，不是常规流程。
-func buildRunMessages(session *Session, systemPrompt string, forceTruncate bool) []LLMMessage {
+//
+// loader 是附件读取口，一路上传给 buildLLMMessages（可为 nil，见 imageLoader 的说明）。
+// 它必须是参数而不是去全局取：这一层要做的是"取哪几条消息"，取图的动作属于协议组装，
+// 待到了最后一步才发生——中间那两步（摘要替换、结果预算）都不碰图片。
+func buildRunMessages(session *Session, systemPrompt string, forceTruncate bool, loader imageLoader) []LLMMessage {
 	if session == nil {
-		return buildLLMMessages(nil, systemPrompt)
+		return buildLLMMessages(nil, systemPrompt, loader)
 	}
 	history := session.Messages
 	if session.ContextCoveredUpTo > 0 &&
@@ -289,7 +320,7 @@ func buildRunMessages(session *Session, systemPrompt string, forceTruncate bool)
 		history = compactMessages(history)
 	}
 	history = applyToolResultBudget(history)
-	return buildLLMMessages(history, systemPrompt)
+	return buildLLMMessages(history, systemPrompt, loader)
 }
 
 // ===== 摘要生成 =====
@@ -310,10 +341,14 @@ const contextSummaryPrompt = `你在为一次长对话做上下文压缩。把�
 
 // buildCompactTranscript 把待压缩的消息拼成摘要器的输入。
 // 有总长与单条长度上限：摘要请求本身也不能超长。
+//
+// 图片**不进**摘要素材（摘要请求只发文本），但必须留下痕迹：被摘要覆盖之后，
+// 那张图不会再出现在后续请求里，摘要若不记一笔，模型就完全不知道"用户曾给过一张图"——
+// 而用户后面完全可能问"刚才那张图里第三行是什么"。
 func buildCompactTranscript(msgs []Message) string {
 	var sb strings.Builder
 	for _, m := range msgs {
-		if strings.TrimSpace(m.Content) == "" && len(m.ToolCalls) == 0 {
+		if strings.TrimSpace(m.Content) == "" && len(m.ToolCalls) == 0 && len(m.Attachments) == 0 {
 			continue
 		}
 		content := m.Content
@@ -328,6 +363,9 @@ func buildCompactTranscript(msgs []Message) string {
 			}
 			sb.WriteString("（调用了工具：" + strings.Join(names, ", ") + "）")
 		}
+		if len(m.Attachments) > 0 {
+			sb.WriteString("（附带 " + describeAttachments(m.Attachments) + "）")
+		}
 		sb.WriteString("\n")
 		if sb.Len() >= compactTranscriptLimit {
 			sb.WriteString("…（更早的内容已省略）\n")
@@ -335,6 +373,22 @@ func buildCompactTranscript(msgs []Message) string {
 		}
 	}
 	return sb.String()
+}
+
+// describeAttachments 附件清单的一行描述（摘要素材与工具结果文本共用）
+func describeAttachments(atts []Attachment) string {
+	names := make([]string, 0, len(atts))
+	for _, a := range atts {
+		name := a.Name
+		if strings.TrimSpace(name) == "" {
+			name = a.ID
+		}
+		if a.Width > 0 && a.Height > 0 {
+			name = fmt.Sprintf("%s（%d×%d）", name, a.Width, a.Height)
+		}
+		names = append(names, name)
+	}
+	return fmt.Sprintf("%d 张图片：%s", len(atts), strings.Join(names, ", "))
 }
 
 // summarizeContext 把 msgs 压成一段摘要。失败由调用方降级处理。

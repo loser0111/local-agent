@@ -86,6 +86,14 @@ export function ExportMCPServers(arg1) {
   return window['go']['main']['App']['ExportMCPServers'](arg1);
 }
 
+export function FetchImageURL(arg1, arg2) {
+  return window['go']['main']['App']['FetchImageURL'](arg1, arg2);
+}
+
+export function GetAttachmentDataURL(arg1, arg2) {
+  return window['go']['main']['App']['GetAttachmentDataURL'](arg1, arg2);
+}
+
 export function GetContextPrefs() {
   return window['go']['main']['App']['GetContextPrefs']();
 }
@@ -264,6 +272,10 @@ export function ResolvePermission(arg1, arg2, arg3, arg4, arg5) {
 
 export function RunTaskNow(arg1) {
   return window['go']['main']['App']['RunTaskNow'](arg1);
+}
+
+export function SaveAttachment(arg1, arg2, arg3, arg4) {
+  return window['go']['main']['App']['SaveAttachment'](arg1, arg2, arg3, arg4);
 }
 
 export function SavePlan(arg1) {
