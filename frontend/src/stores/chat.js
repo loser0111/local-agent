@@ -33,6 +33,12 @@ export const useChatStore = defineStore('chat', () => {
   // 于是后台会话跑完回传的用量会显示在当前会话的指示器上）
   const contextBySession = ref({})
 
+  // sessionId -> UsageEvent：本轮与会话累计 token 用量。与会话绑定，理由同 contextBySession。
+  //
+  // 这里只存**实时事件推来的那一份**（几个整数，很轻）。完整明细（请求快照、原始 usage）
+  // 重得多，只在用户打开明细弹窗时向后端拉一次，不放进这个每轮都会写的高频状态里。
+  const usageBySession = ref({})
+
   // 附件 data URL 缓存：key = `${sessionId}:${attachmentId}`。
   //
   // 图片是重数据（单张几百 KB 的 base64），而消息列表会因为流式输出、滚动、工具卡片
@@ -133,6 +139,21 @@ export const useChatStore = defineStore('chat', () => {
     return contextBySession.value[sessionId] || null
   }
 
+  // ===== Token 用量 =====
+
+  /** 当前会话最近一轮的 token 用量（还没跑过任何一轮时为 null） */
+  const usage = computed(() => usageBySession.value[currentId.value] || null)
+
+  /** 记下一轮用量（由 chat 事件的 onUsage 回调调用） */
+  function setUsage(sessionId, ev) {
+    if (!sessionId || !ev) return
+    usageBySession.value = { ...usageBySession.value, [sessionId]: ev }
+  }
+
+  function usageOf(sessionId) {
+    return usageBySession.value[sessionId] || null
+  }
+
   // ===== 附件 =====
 
   /**
@@ -202,6 +223,9 @@ export const useChatStore = defineStore('chat', () => {
     const nextCtx = { ...contextBySession.value }
     delete nextCtx[sessionId]
     contextBySession.value = nextCtx
+    const nextUsage = { ...usageBySession.value }
+    delete nextUsage[sessionId]
+    usageBySession.value = nextUsage
     dropAttachmentUrls(sessionId)
     markRunEnded(sessionId)
   }
@@ -299,6 +323,7 @@ export const useChatStore = defineStore('chat', () => {
     loadingBySession,
     generatingBySession,
     contextBySession,
+    usageBySession,
     attachmentUrls,
     pendingPrompt,
     // 当前会话视图
@@ -306,6 +331,7 @@ export const useChatStore = defineStore('chat', () => {
     isGenerating,
     loadingHistory,
     contextStat,
+    usage,
     runningSessionIds,
     loadedSessionId,
     // 查询
@@ -313,11 +339,13 @@ export const useChatStore = defineStore('chat', () => {
     isLoaded,
     isGeneratingIn,
     contextStatOf,
+    usageOf,
     // 运行状态
     markRunStarted,
     markRunEnded,
     hydrateRunning,
     setContextStat,
+    setUsage,
     // 附件
     loadAttachmentUrl,
     attachmentUrl,

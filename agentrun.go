@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"fmt"
+	"time"
 
 	wailsRuntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
@@ -61,6 +63,59 @@ type agentRun struct {
 	TokenCalib *TokenCalibStore
 
 	Recorder runRecorder
+
+	// UsageLog 每会话最近一次的用量（内存态排障视图）。为 nil 时跳过记录——
+	// 测试里会直接构造零值 agentRun，那一路径不该 panic。
+	UsageLog *usageLog
+	// PromptCache 本次运行生效的提示缓存偏好**快照**。
+	//
+	// 刻意用快照而不是实时读取配置：一次运行可能持续几分钟、几十轮，
+	// 用户中途改了开关会让同一会话前后两轮的统计口径不一致，
+	// 而"连续零命中"这类判断正好依赖口径一致。
+	PromptCache PromptCachePrefs
+}
+
+// noteUsage 处理一轮模型调用的用量：记内存明细 → 累加落盘 → 推送前端。
+//
+// 三件事必须一起做，缺一件都会产生可被用户看见的错：
+//   - 只落盘不推送 → 开着的明细弹窗要等到下一轮才更新，看起来像"卡住了"；
+//   - 只推送不落盘 → 重启后累计值归零，用户会以为统计功能坏了；
+//   - 不记内存明细 → 弹窗的"本轮"与"原始 usage"永远是空的。
+//
+// raw 是本次响应的原始 usage 文本（适配层从响应体或 SSE 帧里原样取出）。
+// 它由调用方传入而不是在这里去读上一条记录——那样会把**上一轮**的原始文本
+// 带到这一轮来，表现为"数字是本轮的、原始 JSON 是上轮的"这种无法解释的错位。
+//
+// 统计是**旁路**：任何一步失败都只记日志，绝不能让这一轮的对话失败——
+// 回复已经拿到了，为统计去报错是本末倒置。
+func (ar *agentRun) noteUsage(u TokenUsage, raw string) {
+	if ar == nil || !u.HasData() {
+		return
+	}
+	now := time.Now().UnixMilli()
+
+	ar.UsageLog.record(ar.SessionID, u, raw, now)
+
+	var totals UsageTotals
+	if ar.Store != nil && ar.SessionID != "" {
+		if t, err := ar.Store.AddUsage(ar.SessionID, u, now, ar.PromptCache.Enabled); err != nil {
+			fmt.Printf("[usage] 累加会话用量失败（不影响本轮对话）: %v\n", err)
+		} else if t != nil {
+			totals = *t
+		}
+	}
+
+	if ar.Recorder != nil {
+		ar.Recorder.Emit(ChatEvent{
+			Type: ChatEventUsage,
+			Usage: &UsageEvent{
+				Turn:   totals.Turns,
+				Last:   u,
+				Totals: totals,
+				Cache:  cacheViewOf(u, totals, ar.PromptCache),
+			},
+		})
+	}
 }
 
 // runRecorder 事件推送的抽象：主会话推给 wails 前端，子代理推给自己那条通道。
@@ -181,5 +236,7 @@ func (a *App) newMainAgentRun(run *runControl, session *Session, dir, systemProm
 		Compactor:         a.compactSession,
 		TokenCalib:        a.tokenCalib,
 		Recorder:          &appRecorder{app: a, sessionID: sessionID, runID: runID},
+		UsageLog:          a.usageLog,
+		PromptCache:       a.GetPromptCachePrefs(),
 	}
 }

@@ -154,9 +154,130 @@ type anthropicStreamMessage struct {
 
 // anthropicUsage Anthropic 的用量字段名（input_tokens / output_tokens）。
 // 转换时映射进统一的 LLMUsage（prompt_tokens / completion_tokens），全项目只用一套名字。
+// anthropicUsage Anthropic 响应的 usage。
+//
+// ⚠️ 语义陷阱：**input_tokens 只是「未命中缓存的那部分」**，不含缓存读写。
+// 输入总量 = InputTokens + CacheCreationInputTokens + CacheReadInputTokens。
+// 直接拿 InputTokens 当输入总量，会在开启缓存后把锚点算成极小值——
+// 进而让上下文占比被低估、压缩阈值永不触发。映射必须走 llmUsageFromAnthropic()，
+// 不要在任何调用点自己拼。
 type anthropicUsage struct {
 	InputTokens  int `json:"input_tokens"`
 	OutputTokens int `json:"output_tokens"`
+
+	// 缓存相关。未开启缓存时三者恒为 0。
+	CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+	CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+
+	// CacheCreation 写入量按 TTL 的拆分，同一时刻只有一个非零。
+	CacheCreation anthropicCacheCreation `json:"cache_creation"`
+
+	// ServiceTier standard / priority / batch，影响计价。
+	ServiceTier string `json:"service_tier"`
+
+	// ServerToolUse 服务端工具（联网搜索等）的调用统计。
+	ServerToolUse anthropicServerToolUse `json:"server_tool_use"`
+}
+
+// anthropicCacheCreation 缓存写入量按 TTL 拆分。
+// 它回答的是「这轮写入按 1.25x 还是 2x 计价」——服务端会单方面调整默认 TTL，
+// 这个字段是用户判断「我配的 1h 到底生效没有」的唯一手段。
+type anthropicCacheCreation struct {
+	Ephemeral5mInputTokens int `json:"ephemeral_5m_input_tokens"`
+	Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens"`
+}
+
+type anthropicServerToolUse struct {
+	WebSearchRequests int `json:"web_search_requests"`
+}
+
+// llmUsageFromAnthropic 把 Anthropic 的 usage 映射成内部统一形状。
+//
+// 这是**唯一**允许做 Anthropic → LLMUsage 的地方。非流式与流式两处都必须走它：
+// 原先两处各写一份映射，正是「两处实现悄悄漂移」的高发形态
+// （本项目在权限网关与工具曝光策略上已经各吃过一次）。
+func llmUsageFromAnthropic(u anthropicUsage) LLMUsage {
+	return LLMUsage{
+		// 输入总量必须是三者相加，见该结构体上的说明。
+		PromptTokens:     u.InputTokens + u.CacheCreationInputTokens + u.CacheReadInputTokens,
+		CompletionTokens: u.OutputTokens,
+
+		CacheRead:    u.CacheReadInputTokens,
+		CacheWrite:   u.CacheCreationInputTokens,
+		CacheWrite5m: u.CacheCreation.Ephemeral5mInputTokens,
+		CacheWrite1h: u.CacheCreation.Ephemeral1hInputTokens,
+
+		ServiceTier:            u.ServiceTier,
+		ServerToolUseWebSearch: u.ServerToolUse.WebSearchRequests,
+	}
+}
+
+// mergeUsage 把 src 里的**非零**字段并入 dst。
+//
+// 为什么是"按非零合并"而不是"整体替换"，也不是"只挑几个字段复制"：
+//
+//   - 整体替换不行：流式 usage 是**分两帧给的**——message_start 带输入侧（含缓存读写），
+//     message_delta 带输出侧。后一帧整体覆盖会把输入侧清零。
+//   - 只挑字段复制也不行（这正是原实现的写法，也是"输出恒为 0、缓存数字全丢"的根因）：
+//     网关心血来潮换一种放置形状，被挑的那几个字段就再也读不到，而且**不报错**。
+//   - 按非零合并对两种形状都成立：谁给了值就用谁的，各帧互补，重复给的以后者为准。
+//
+// "非零才覆盖"是安全的：这些字段在有真实请求时不会是 0
+// （input_tokens 至少几百、output_tokens 对任何非空回复都 > 0），
+// 所以 0 只可能表示"这一帧没带这个字段"，而不表示"真的是 0"。
+func mergeUsage(dst *anthropicUsage, src anthropicUsage) {
+	if dst == nil {
+		return
+	}
+	if src.InputTokens != 0 {
+		dst.InputTokens = src.InputTokens
+	}
+	if src.OutputTokens != 0 {
+		dst.OutputTokens = src.OutputTokens
+	}
+	if src.CacheCreationInputTokens != 0 {
+		dst.CacheCreationInputTokens = src.CacheCreationInputTokens
+	}
+	if src.CacheReadInputTokens != 0 {
+		dst.CacheReadInputTokens = src.CacheReadInputTokens
+	}
+	if src.CacheCreation.Ephemeral5mInputTokens != 0 {
+		dst.CacheCreation.Ephemeral5mInputTokens = src.CacheCreation.Ephemeral5mInputTokens
+	}
+	if src.CacheCreation.Ephemeral1hInputTokens != 0 {
+		dst.CacheCreation.Ephemeral1hInputTokens = src.CacheCreation.Ephemeral1hInputTokens
+	}
+	if src.ServiceTier != "" {
+		dst.ServiceTier = src.ServiceTier
+	}
+	if src.ServerToolUse.WebSearchRequests != 0 {
+		dst.ServerToolUse.WebSearchRequests = src.ServerToolUse.WebSearchRequests
+	}
+}
+
+// rawUsageOfEvent 从 Anthropic 流式事件里取出 usage 子对象（原样文本）。
+//
+// 两处形状不同：message_start 的把 usage 嵌在 message 下，message_delta 的在顶层。
+// 都试一遍，取到就返回，取不到返回空串（不是所有帧都带 usage）。
+// 刻意返回**原样 JSON** 而不是重新序列化我们解析出的结构体——
+// 排障时「网关到底发了什么」比「我们解析出了什么」更有价值。
+func rawUsageOfEvent(payload []byte) string {
+	var probe struct {
+		Usage   json.RawMessage `json:"usage"`
+		Message struct {
+			Usage json.RawMessage `json:"usage"`
+		} `json:"message"`
+	}
+	if err := json.Unmarshal(payload, &probe); err != nil {
+		return ""
+	}
+	if len(probe.Usage) > 0 {
+		return string(probe.Usage)
+	}
+	if len(probe.Message.Usage) > 0 {
+		return string(probe.Message.Usage)
+	}
+	return ""
 }
 
 type anthropicResp struct {
@@ -387,10 +508,7 @@ func fromAnthropicResponse(r *anthropicResp) *LLMResp {
 			FinishReason: finish,
 			Message:      msg,
 		}},
-		Usage: LLMUsage{
-			PromptTokens:     r.Usage.InputTokens,
-			CompletionTokens: r.Usage.OutputTokens,
-		},
+		Usage: llmUsageFromAnthropic(r.Usage),
 	}
 }
 
@@ -481,7 +599,11 @@ func callAnthropic(ctx context.Context, url, token string, req *LLMReq) (*LLMRes
 	if err := json.Unmarshal(body, &ar); err != nil {
 		return nil, fmt.Errorf("解析 Anthropic 响应失败: %w (body=%s)", err, string(body))
 	}
-	return fromAnthropicResponse(&ar), nil
+	// 注意变量名不能叫 resp：上面那个 resp 是 *http.Response，同名用 := 会
+	// 编译不过（"no new variables on left side of :="）。
+	out := fromAnthropicResponse(&ar)
+	out.Usage.RawUsage = extractRawUsage(body)
+	return out, nil
 }
 
 // callAnthropicStream 以 SSE 方式调用 Anthropic Messages 协议。
@@ -533,13 +655,26 @@ func callAnthropicStream(ctx context.Context, url, token string, req *LLMReq, on
 		ContentBlock *anthropicContentBlock `json:"content_block"`
 		Delta        *anthropicStreamDelta  `json:"delta"`
 		Error        *anthropicStreamError  `json:"error"`
-		// Message 只在 message_start 出现，其中带 input_tokens
+		// Message 只在 message_start 出现，其中带输入侧 usage（input_tokens + 缓存读写）
 		Message *anthropicStreamMessage `json:"message"`
+		// Usage 事件**顶层**的 usage。
+		//
+		// 规范里 message_delta 的 usage 嵌在 delta 下，但**实测本项目所用的网关
+		// 把它放在事件顶层**，且是完整的一份（input/output/cache_creation/cache_read 全有）。
+		// 少读这一处，表现就是"输出 token 恒为 0、缓存数字全丢"——
+		// 而请求本身完全成功，没有任何报错。两处都要读，见 mergeUsage。
+		Usage *anthropicUsage `json:"usage"`
 	}
 
 	// usage 流式用量：input_tokens 来自 message_start，output_tokens 来自 message_delta，
 	// 两者拼起来才是整次请求的用量（这正是"锚点"的来源）
 	var usage anthropicUsage
+
+	// rawUsageParts 收集带 usage 的那几帧的 usage 子对象（原样文本）。
+	// 流式没有单一响应体可留，只能逐帧收集；最后拼成一个合法 JSON 数组交给排障视图。
+	// 两个来源都保留（而不是后一个覆盖前一个）：缓存字段只在 message_start 里，
+	// 输出 token 只在 message_delta 里，丢掉任一个都会让排障区看不出全貌。
+	var rawUsageParts []string
 
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
@@ -562,11 +697,19 @@ func callAnthropicStream(ctx context.Context, url, token string, req *LLMReq, on
 			fmt.Printf("[chat] 跳过无法解析的 Anthropic SSE 帧: %v\n", err)
 			continue
 		}
+		if raw := rawUsageOfEvent([]byte(payload)); raw != "" {
+			rawUsageParts = append(rawUsageParts, raw)
+		}
 
 		switch ev.Type {
 		case "message_start":
 			if ev.Message != nil {
-				usage.InputTokens = ev.Message.Usage.InputTokens
+				// 整份合并，而不是只挑 InputTokens：
+				// 输入侧的缓存读写（cache_read_input_tokens 等）**只在这一帧里**。
+				mergeUsage(&usage, ev.Message.Usage)
+			}
+			if ev.Usage != nil {
+				mergeUsage(&usage, *ev.Usage)
 			}
 		case "content_block_start":
 			if ev.ContentBlock != nil && ev.ContentBlock.Type == "tool_use" {
@@ -598,13 +741,16 @@ func callAnthropicStream(ctx context.Context, url, token string, req *LLMReq, on
 				}
 			}
 		case "message_delta":
+			if ev.Delta != nil && ev.Delta.StopReason != "" {
+				stopReason = ev.Delta.StopReason
+			}
+			// 两处都读：规范形状在 delta.usage，实测网关在事件顶层 usage。
+			// 顶层那份通常是完整的一份（含缓存字段），所以它放在后面 merg——非零覆盖。
 			if ev.Delta != nil {
-				if ev.Delta.StopReason != "" {
-					stopReason = ev.Delta.StopReason
-				}
-				if ev.Delta.Usage.OutputTokens > 0 {
-					usage.OutputTokens = ev.Delta.Usage.OutputTokens
-				}
+				mergeUsage(&usage, ev.Delta.Usage)
+			}
+			if ev.Usage != nil {
+				mergeUsage(&usage, *ev.Usage)
 			}
 		case "error":
 			msg := "未知错误"
@@ -640,12 +786,14 @@ func callAnthropicStream(ctx context.Context, url, token string, req *LLMReq, on
 	if len(msg.ToolCalls) > 0 && finish == FinishReasonStop {
 		finish = FinishReasonToolCalls
 	}
+	// 先归一化，再补原始文本：原始文本只是排障用，不能影响归一结果。
+	out := llmUsageFromAnthropic(usage)
+	if len(rawUsageParts) > 0 {
+		out.RawUsage = "[" + strings.Join(rawUsageParts, ",") + "]"
+	}
 	return &LLMResp{
 		Object:  "chat.completion",
 		Choices: []LLMChoice{{FinishReason: finish, Message: msg}},
-		Usage: LLMUsage{
-			PromptTokens:     usage.InputTokens,
-			CompletionTokens: usage.OutputTokens,
-		},
+		Usage:   out,
 	}, nil
 }

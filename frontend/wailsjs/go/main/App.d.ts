@@ -75,6 +75,8 @@ export function GetPermissionAudit(arg1:string):Promise<Array<main.AuditEntry>>;
 
 export function GetPermissionState(arg1:string):Promise<main.PermissionState>;
 
+export function GetPromptCachePrefs():Promise<main.PromptCachePrefs>;
+
 export function GetSession(arg1:string):Promise<main.Session>;
 
 export function GetSessionPlan(arg1:string):Promise<main.Plan>;
@@ -88,6 +90,8 @@ export function GetTask(arg1:string):Promise<plugin.TaskView>;
 export function GetTaskSettings():Promise<plugin.GlobalConfig>;
 
 export function GetToolFileChanges(arg1:string):Promise<Array<main.ToolFileChange>>;
+
+export function GetUsageDetail(arg1:string):Promise<main.UsageDetail>;
 
 export function Greet(arg1:string):Promise<string>;
 
@@ -152,6 +156,8 @@ export function SaveTool(arg1:main.ToolSource):Promise<main.ToolSource>;
 export function SetContextKeepRecentMsgs(arg1:number):Promise<main.ContextPrefs>;
 
 export function SetExposure(arg1:string,arg2:string):Promise<void>;
+
+export function SetPromptCachePrefs(arg1:main.PromptCachePrefs):Promise<main.PromptCachePrefs>;
 
 export function SetSessionPermissionMode(arg1:string,arg2:string):Promise<main.Session>;
 

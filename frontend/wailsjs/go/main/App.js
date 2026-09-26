@@ -146,6 +146,10 @@ export function GetPermissionState(arg1) {
   return window['go']['main']['App']['GetPermissionState'](arg1);
 }
 
+export function GetPromptCachePrefs() {
+  return window['go']['main']['App']['GetPromptCachePrefs']();
+}
+
 export function GetSession(arg1) {
   return window['go']['main']['App']['GetSession'](arg1);
 }
@@ -172,6 +176,10 @@ export function GetTaskSettings() {
 
 export function GetToolFileChanges(arg1) {
   return window['go']['main']['App']['GetToolFileChanges'](arg1);
+}
+
+export function GetUsageDetail(arg1) {
+  return window['go']['main']['App']['GetUsageDetail'](arg1);
 }
 
 export function Greet(arg1) {
@@ -300,6 +308,10 @@ export function SetContextKeepRecentMsgs(arg1) {
 
 export function SetExposure(arg1, arg2) {
   return window['go']['main']['App']['SetExposure'](arg1, arg2);
+}
+
+export function SetPromptCachePrefs(arg1) {
+  return window['go']['main']['App']['SetPromptCachePrefs'](arg1);
 }
 
 export function SetSessionPermissionMode(arg1, arg2) {

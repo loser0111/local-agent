@@ -168,14 +168,102 @@ type LLMReq struct {
 // LLMResp LLM 响应
 // LLMUsage 一次请求的真实用量。
 //
-// 字段名统一用 OpenAI 的 prompt_tokens / completion_tokens，
-// Anthropic 的 input_tokens / output_tokens 在解析时映射进来，全项目只用这一套名字。
+// 字段名以 OpenAI 的 prompt_tokens / completion_tokens 为基准，
+// 其余协议在各自的适配层归一进来（Anthropic 见 llmUsageFromAnthropic）。
+//
+// ⚠️ 一条必须成立的不变式：**PromptTokens 恒为「输入总量」**。
+//   - Anthropic 的 input_tokens 只是「未命中缓存的那部分」，适配层要把
+//     input + cache_creation + cache_read 相加后再填进来，**不能原样搬**；
+//   - OpenAI / DeepSeek 的 prompt_tokens 本身就是总量（含缓存），原样即可。
+//
+// 有了这条不变式，「未命中 = PromptTokens − CacheRead − CacheWrite」对三家都成立，
+// tokenUsageOf 里因此不需要任何协议判断。这条不变式曾经被破坏过：
+// 两处 Anthropic 映射各写一份、都直接填 InputTokens，一旦开启缓存，
+// 上下文锚点会骤降到极小值，压缩阈值永不触发——而症状要等到聊很久之后才显现。
 //
 // 有它才能把「纯字符估算」升级成「真实锚点 + 增量估算」——精度是数量级差别。
 type LLMUsage struct {
 	PromptTokens     int `json:"prompt_tokens"`
 	CompletionTokens int `json:"completion_tokens"`
 	TotalTokens      int `json:"total_tokens,omitempty"`
+
+	// ===== 以下为归一化后的统一字段（各协议的原始形状在 normalize 里摊平）=====
+
+	// CacheRead 命中缓存的输入量 / CacheWrite 写入缓存的量。
+	CacheRead  int `json:"cache_read_input_tokens,omitempty"`
+	CacheWrite int `json:"cache_creation_input_tokens,omitempty"`
+	// CacheWrite5m / CacheWrite1h 仅 Anthropic 提供（usage.cache_creation 的 TTL 拆分）。
+	CacheWrite5m int `json:"-"`
+	CacheWrite1h int `json:"-"`
+	// ReasoningTokens 推理 token：计费算输出，但不进正文，对用户是完全看不见的成本。
+	ReasoningTokens int `json:"-"`
+	// ServiceTier 与 ServerToolUseWebSearch 仅 Anthropic 提供，用于解释计价与额外调用。
+	ServiceTier            string `json:"-"`
+	ServerToolUseWebSearch int    `json:"-"`
+
+	// ===== 各协议的原始形状（只用于解析，统一字段以上面那组为准）=====
+
+	// PromptTokensDetails / CompletionTokensDetails OpenAI 系的嵌套形状。
+	PromptTokensDetails     *llmUsageDetails `json:"prompt_tokens_details,omitempty"`
+	CompletionTokensDetails *llmUsageDetails `json:"completion_tokens_details,omitempty"`
+
+	// PromptCacheHitTokens / PromptCacheMissTokens DeepSeek 系的扁平别名。
+	// hit 与 OpenAI 的 cached_tokens 同义；miss 就是「未命中」，**不是写入**（见 normalize）。
+	PromptCacheHitTokens  int `json:"prompt_cache_hit_tokens,omitempty"`
+	PromptCacheMissTokens int `json:"prompt_cache_miss_tokens,omitempty"`
+
+	// RawUsage 原始 usage JSON 文本，只用于「用量明细」弹窗底部的排障折叠区。
+	// 非流式由 extractRawUsage 从响应体**原样**取出（保留我们没建模的字段）；
+	// 流式从带 usage 的那一帧取。它不出现在任何请求体里。
+	RawUsage string `json:"-"`
+}
+
+// llmUsageDetails OpenAI 系 usage 里的明细对象。
+// prompt_tokens_details 与 completion_tokens_details 形状不同但字段不冲突，共用一个类型。
+type llmUsageDetails struct {
+	CachedTokens    int `json:"cached_tokens,omitempty"`
+	ReasoningTokens int `json:"reasoning_tokens,omitempty"`
+}
+
+// normalize 把各家的嵌套 / 别名形状摊平成上面那组统一字段。
+//
+// 幂等：只做「先判断再赋值」，不做累加，重复调用结果不变。
+// 只对 OpenAI 兼容路径有意义——Anthropic 走 llmUsageFromAnthropic，那边直接产出统一字段。
+func (u *LLMUsage) normalize() {
+	if u == nil {
+		return
+	}
+	// OpenAI：cached_tokens 藏在 prompt_tokens_details 里
+	if u.PromptTokensDetails != nil && u.PromptTokensDetails.CachedTokens > 0 {
+		u.CacheRead = u.PromptTokensDetails.CachedTokens
+	}
+	// DeepSeek：prompt_cache_hit_tokens 与 cached_tokens 同义。它更明确，优先级更高，
+	// 有些网关两个都发且不一致时以它为准。
+	if u.PromptCacheHitTokens > 0 {
+		u.CacheRead = u.PromptCacheHitTokens
+	}
+	// ⚠️ PromptCacheMissTokens 刻意**不**映射到 CacheWrite：
+	// 「未命中」是没走缓存的那部分输入，它不是写入，没有写入溢价。
+	// 混为一谈会让成本倍数把未命中量也按 1.25x/2x 计，凭空变贵。
+	// 未命中的量本来就是 PromptTokens − CacheRead，不需要单独存。
+	if u.CompletionTokensDetails != nil && u.CompletionTokensDetails.ReasoningTokens > 0 {
+		u.ReasoningTokens = u.CompletionTokensDetails.ReasoningTokens
+	}
+}
+
+// extractRawUsage 从原始响应体里取出 usage 子对象（原样，不经过我们的结构体）。
+//
+// 为什么要「原样」：排障时「网关到底发了什么」比「我们解析出了什么」更有价值——
+// 我们没建模的字段（各家自定义的缓存明细）恰恰是回答「这家到底有没有缓存」的关键。
+// 解析失败或没有 usage 时返回空串，不报错：它只是锦上添花，不能影响主链路。
+func extractRawUsage(body []byte) string {
+	var probe struct {
+		Usage json.RawMessage `json:"usage"`
+	}
+	if err := json.Unmarshal(body, &probe); err != nil || len(probe.Usage) == 0 {
+		return ""
+	}
+	return string(probe.Usage)
 }
 
 type LLMResp struct {
@@ -274,6 +362,10 @@ func callLLM(ctx context.Context, url, token string, req *LLMReq) (*LLMResp, err
 	if err := json.Unmarshal(body, &llmResp); err != nil {
 		return nil, fmt.Errorf("解析 LLM 响应失败: %w (body=%s)", err, string(body))
 	}
+	// 归一化 usage：把 cached_tokens / reasoning_tokens 这类嵌套形状摊平到统一字段。
+	// 顺序在 tokenAnchor 之前——锚点必须建在**归一后**的 PromptTokens 上（见 LLMUsage 的不变式）。
+	llmResp.Usage.normalize()
+	llmResp.Usage.RawUsage = extractRawUsage(body)
 	return &llmResp, nil
 }
 
@@ -383,6 +475,9 @@ func callLLMStream(ctx context.Context, url, token string, req *LLMReq, onConten
 		// 用量只在最后一帧出现，取到就覆盖（它是整次请求的累计值）
 		if chunk.Usage != nil && chunk.Usage.PromptTokens > 0 {
 			streamUsage = *chunk.Usage
+			// 流式这一帧就是唯一的原始来源：直接留原样文本，保证排障区看到的是网关真发的东西
+			// （而非我们解析出的子集）。
+			streamUsage.RawUsage = payload
 		}
 		for _, choice := range chunk.Choices {
 			if choice.Delta.Content != "" {
@@ -448,6 +543,9 @@ func callLLMStream(ctx context.Context, url, token string, req *LLMReq, onConten
 		}
 	}
 
+	// 归一化流式用量：与 callLLM 同一条规则，必须在返回前完成——
+	// tokenAnchor 建的是 Usage.PromptTokens，锚在归一前的值上等于把缓存量算丢。
+	streamUsage.normalize()
 	return &LLMResp{Choices: []LLMChoice{{FinishReason: finish, Message: msg}}, Usage: streamUsage}, nil
 }
 
@@ -550,6 +648,10 @@ type ChatEvent struct {
 	// Context 事件发生后的上下文用量。前端据此就地刷新指示，
 	// 不必等这一轮结束的 ChatResult 回来。
 	Context *ContextStat `json:"context,omitempty"`
+	// Usage 本轮 token 用量（type=usage）。与 Context 分开推、走同一个事件类型：
+	// 上下文用量是"还剩多少空间"，token 用量是"已经花了多少"，
+	// 两者跟着同一轮请求产生，但刷新时机与消费方不同（指示器 vs 明细弹窗）。
+	Usage *UsageEvent `json:"usage,omitempty"`
 }
 
 // 事件类型常量（前端按同名分支分发）
@@ -564,6 +666,9 @@ const (
 	// ChatEventContextCompacted 自动摘要压缩已生效（事件携带压缩结果与新的用量）。
 	// 前端用它弹一次提示：用量下降是压缩造成的，原文仍在会话记录里。
 	ChatEventContextCompacted = "context_compacted"
+	// ChatEventUsage 一轮模型调用的 token 用量已产生（事件携带本轮与会话累计）。
+	// 前端据此就地刷新用量明细弹窗，不必等这一轮结束的 ChatResult 回来。
+	ChatEventUsage = "usage"
 )
 
 // emitChatEvent 向前端推送一个聊天事件（无 Wails 上下文时静默跳过）。
@@ -1191,6 +1296,12 @@ func runToolLoop(ar *agentRun) *ChatResult {
 					estimateSeqTokens(messages, nil)+toolTokens)
 			}
 		}
+
+		// 用量统计与锚点是**两件事**，不能合并进上面那个 if。
+		// 锚点只在 PromptTokens>0 时更新（它是"上下文有多长"的真值来源）；
+		// 而统计必须覆盖"只有输出 token"这种畸形响应——部分网关的流式帧只回传
+		// output_tokens，若跟着锚点走，那一轮的花费会凭空消失。
+		ar.noteUsage(tokenUsageOf(resp.Usage), resp.Usage.RawUsage)
 
 		choice := resp.Choices[0]
 

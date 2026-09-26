@@ -96,6 +96,12 @@ function dispatchChat(ev) {
     case 'context_compacted':
       h.onContextCompacted?.(ev)
       break
+    // 本轮 token 用量已产生：明细弹窗开着时据此实时刷新。
+    // 与 context_compacted 分开：那个是"上下文剩多少"，这个是"已经花了多少"，
+    // 两者跟着同一轮请求产生，但消费方不同（指示器 vs 用量明细弹窗）。
+    case 'usage':
+      h.onUsage?.(ev.usage, ev)
+      break
     // 被用户停止（软取消或硬取消）：立即通知调用方收尾流式气泡，
     // 否则它会一直停在"正在输入"的状态
     case 'cancelled':
@@ -123,7 +129,7 @@ function ensureStarted() {
  *
  * @param {string} sessionId
  * @param {object} handlers 见 dispatchChat 的 switch：onReplyDelta / onToolCallStart /
- *   onToolCallEnd / onPlanUpdate / onContextCompacted / onCancelled
+ *   onToolCallEnd / onPlanUpdate / onContextCompacted / onUsage / onCancelled
  * @returns {() => void}
  */
 export function subscribeChat(sessionId, handlers = {}) {

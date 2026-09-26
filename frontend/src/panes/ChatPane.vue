@@ -14,6 +14,7 @@ import { useAskStore } from '@/stores/asks'
 import { useSkillsStore } from '@/stores/skills'
 import { useUiStore } from '@/stores/ui'
 import RequestPreviewDialog from '@/components/business/RequestPreviewDialog.vue'
+import UsageDialog from '@/components/business/UsageDialog.vue'
 import PaneHeader from '@/components/layout/PaneHeader.vue'
 import MessageBubble from '@/components/business/MessageBubble.vue'
 import ToolProcess from '@/components/business/ToolProcess.vue'
@@ -49,6 +50,8 @@ function setStopping(sid, v) {
 
 // 请求快照查看（排障用）：显示实际发出的 message 列表
 const reqPreviewVisible = ref(false)
+// 用量明细弹窗。走应用内组件（不是宿主原生对话框）——原生 dialog 在部分 webview 上会静默失效。
+const usageVisible = ref(false)
 
 // 上下文用量（后端算的近似值）。用于显示占用比例；点它可直接触发压缩。
 //
@@ -76,9 +79,30 @@ const contextTitle = computed(() => {
   if (st.coveredMsgs > 0) {
     lines.push(`已压缩：摘要覆盖前 ${st.coveredMsgs} 条消息（${st.summaryChars} 字），原文仍保留`)
   }
-  lines.push('点击立即压缩（等价于输入 /compact）')
+  const c = cacheState.value
+  if (c) lines.push(`缓存：${cacheTitle.value}`)
+  lines.push('点击查看用量明细')
   return lines.join('\n')
 })
+
+// ===== 缓存状态点与用量明细 =====
+
+// 实时用量事件（每轮模型调用后由后端推送）。**只在本次应用运行期间有值**：
+// 它是内存态事件，重启后要等再跑一轮才会出现，而弹窗打开时会向后端拉取持久化的累计值。
+const liveUsage = computed(() => chatStore.usage)
+
+/** 缓存状态：off / idle / miss / hit / unsupported。由后端判定，前端只负责上色。 */
+const cacheState = computed(() => liveUsage.value?.cache?.state || '')
+const cacheTitle = computed(() => liveUsage.value?.cache?.note || '')
+/** 状态点只在"已启用"之后才有意义：未启用时显示灰点会让人以为缓存坏了。 */
+const cacheDot = computed(() => (cacheState.value && cacheState.value !== 'off' ? cacheState.value : ''))
+
+// 点用量指示 = 打开「用量明细」；压缩改成旁边那个显式按钮。
+// 原因：明细里有缓存命中率、成本倍数、上下文构成，是用户真正想先看的东西，
+// 而压缩是个低频的破坏性动作，不该占着指示器的点击位。
+function openUsage() {
+  usageVisible.value = true
+}
 
 // 点用量指示 = 手动压缩：复用发送路径，后端把 /compact 当上下文维护操作拦截
 function requestCompact() {
@@ -681,6 +705,12 @@ async function sendMessage() {
       onCancelled: () => {
         chatStore.updateLocalMessage(sid, localMsg.id, { streaming: false })
       },
+      // 本轮 token 用量已产生：推进 store，供「用量明细」弹窗与缓存状态点使用。
+      // 与 result.context 分开——那个是"上下文还剩多少空间"，这个是"已经花了多少"，
+      // 后者每轮模型调用就会产生（一轮里可能有多次请求），不能等整轮结束。
+      onUsage: (ev) => {
+        chatStore.setUsage(sid, ev)
+      },
     })
     updateContextStat(sid, result?.context)
 
@@ -961,6 +991,15 @@ function openDiff() {
       @close="reqPreviewVisible = false"
     />
 
+    <!-- 用量明细：打开时向后端拉一次完整明细，运行期间由 live 事件增量刷新 -->
+    <UsageDialog
+      :visible="usageVisible"
+      :session-id="sessionId || ''"
+      :live="liveUsage"
+      @close="usageVisible = false"
+      @compact="usageVisible = false; requestCompact()"
+    />
+
     <div class="messages scroll-container" ref="messagesContainer" @scroll="handleScroll">
       <div v-if="chatStore.loadingHistory" class="loading-history">历史消息加载中...</div>
 
@@ -1091,12 +1130,24 @@ function openDiff() {
           class="tool-btn ctx-btn"
           :class="{ warn: contextPercent >= 70 }"
           :title="contextTitle"
-          @click="requestCompact"
+          @click="openUsage"
         >
           上下文 {{ contextPercent }}%
           <!-- 压缩标记：用量骤降时，用户第一眼要能看出这是摘要压缩造成的，
                而不是对话被截断了。常驻显示——它会一直影响后续每一轮。 -->
           <span v-if="contextStat.coveredMsgs > 0" class="ctx-badge">已压缩</span>
+          <!-- 缓存状态点：不打开弹窗就能看出缓存有没有在工作。
+               取值由后端判定（off/idle/miss/hit/unsupported），前端只上色。 -->
+          <span v-if="cacheDot" class="cache-dot" :class="cacheDot" :title="cacheTitle" />
+        </button>
+        <button
+          v-if="contextStat"
+          class="tool-btn"
+          :disabled="!sessionId || chatStore.isGeneratingIn(sessionId)"
+          title="立即压缩上下文（等价于输入 /compact）。压缩是有损的：会把前面的消息合并成摘要，原文仍保留。"
+          @click="requestCompact"
+        >
+          压缩
         </button>
         <button
           v-if="chatStore.isGenerating"
@@ -1383,6 +1434,34 @@ function openDiff() {
       line-height: 15px;
       color: var(--color-text-muted);
       background-color: var(--color-bg-tertiary);
+    }
+
+    // 缓存状态点。未启用时**不渲染**（由 cacheDot 判空）——
+    // 显示一个灰点会让人以为"缓存开了但没命中"，而实际是根本没开。
+    .cache-dot {
+      margin-left: 4px;
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      display: inline-block;
+      vertical-align: middle;
+      background-color: var(--color-text-muted);
+
+      &.hit {
+        background-color: $color-success;
+      }
+
+      &.miss {
+        background-color: $color-warning;
+      }
+
+      &.unsupported {
+        background-color: $color-error;
+      }
+
+      &.idle {
+        background-color: var(--color-text-muted);
+      }
     }
 
     &.warn {

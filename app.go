@@ -62,6 +62,15 @@ type App struct {
 	// visionVerdicts 各模型的看图能力自检结论（~/.local-agent/vision-check.json）。
 	// 同样是观测缓存：由 /vision 写入，用于在用户贴图时提前说明"这个模型看不到图"。
 	visionVerdicts *VisionVerdictStore
+
+	// promptCachePrefs 提示缓存偏好（~/.local-agent/prompt-cache.json）。
+	// **默认关闭**：这个能力"配错了不会报错、只会多花钱"，属于必须靠观测才能确认的一类，
+	// 因此不默认开启；等命中率在真机上验证过再由用户打开。
+	promptCachePrefs *PromptCachePrefsStore
+	// usageLog 每会话最近一次的 token 用量（含原始 usage JSON）。
+	// 内存态，与 reqLog 同一个定位：它是排障视图，不是审计日志——
+	// 需要看的时候通常就是刚跑完那次，而落盘会让每轮都多一次写 I/O。
+	usageLog *usageLog
 }
 
 // NewApp creates a new App application struct
@@ -115,6 +124,10 @@ func (a *App) startup(ctx context.Context) {
 	a.tokenCalib = NewTokenCalibStore(filepath.Join(baseDir, "token-calib.json"))
 	// 看图能力自检结论：不存在 = 还没测过（"没测过"与"测过且未通过"必须区分）
 	a.visionVerdicts = NewVisionVerdictStore(filepath.Join(baseDir, "vision-check.json"))
+	// 提示缓存偏好：不存在 = 关闭（失败方向是"更保守"，不是"更激进"）
+	a.promptCachePrefs = NewPromptCachePrefsStore(filepath.Join(baseDir, "prompt-cache.json"))
+	// 各会话最近一次用量（内存态排障视图）
+	a.usageLog = &usageLog{}
 }
 
 // dataDir 返回本地数据目录（不存在则创建）
@@ -273,6 +286,7 @@ func (a *App) DeleteSession(id string) error {
 		}
 		a.diffService.ForgetBaseline(child.ID)
 		a.reqLog.forget(child.ID)
+		a.usageLog.forget(child.ID)
 		_ = a.attachments.DeleteSession(child.ID)
 		if derr := a.sessionStore.DeleteSession(child.ID); derr != nil {
 			fmt.Printf("[App] 删除子代理会话 %s 失败: %v\n", child.ID, derr)
@@ -285,6 +299,7 @@ func (a *App) DeleteSession(id string) error {
 	}
 	a.diffService.ForgetBaseline(id)
 	a.reqLog.forget(id)
+	a.usageLog.forget(id)
 	// 附件同样要级联清掉：它们不出现在会话列表里，会话删掉之后再没有入口能发现，
 	// 留着就是永久占地的孤儿文件（与上面 checkpoint ref 是同一类问题）。
 	if err := a.attachments.DeleteSession(id); err != nil {
@@ -801,6 +816,70 @@ func (a *App) SetContextKeepRecentMsgs(n int) (ContextPrefs, error) {
 		return ContextPrefs{}, err
 	}
 	return a.contextPrefs.Get(), nil
+}
+
+// ===== Token 用量与提示缓存 =====
+
+// GetUsageDetail 返回「用量明细」弹窗需要的一切。
+//
+// 与 GetContextStat 分开的原因：后者是"切会话即拉"的高频轻量接口，
+// 而明细要额外取请求快照、算派生指标，塞进同一个接口会拖慢每一次会话切换。
+func (a *App) GetUsageDetail(sessionID string) (*UsageDetail, error) {
+	if sessionID == "" {
+		return nil, fmt.Errorf("会话 ID 不能为空")
+	}
+	session, err := a.sessionStore.GetSession(sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("会话不存在: %s", sessionID)
+	}
+
+	var last TokenUsage
+	var totals UsageTotals
+	var raw string
+	if rec := a.usageLog.get(sessionID); rec != nil {
+		last = rec.Usage
+		raw = rec.RawUsage
+	}
+	// nil 表示这个会话创建于统计上线之前（或从未真正发过请求）。
+	// 此时 totals 保持零值，HasData 为 false，前端显示空态而不是一排 0。
+	if session.UsageTotals != nil {
+		totals = *session.UsageTotals
+	}
+
+	prefs := a.GetPromptCachePrefs()
+	return &UsageDetail{
+		SessionID: sessionID,
+		HasData:   totals.Turns > 0,
+		Last:      last,
+		Totals:    totals,
+		Cache:     cacheViewOf(last, totals, prefs),
+		// 与指示器用的是同一份计算，保证弹窗与指示器上的百分比必然一致。
+		Context:  a.contextStatForSession(sessionID),
+		Request:  a.reqLog.get(sessionID),
+		RawUsage: raw,
+	}, nil
+}
+
+// GetPromptCachePrefs 返回提示缓存偏好（供设置界面显示）
+func (a *App) GetPromptCachePrefs() PromptCachePrefs {
+	if a.promptCachePrefs == nil {
+		return PromptCachePrefs{RollingGuardBlocks: promptCacheRollingGuardDefault}
+	}
+	return a.promptCachePrefs.Get()
+}
+
+// SetPromptCachePrefs 更新提示缓存偏好，返回归一化后的结果。
+//
+// 归一化在这里做（而不是存下去再靠 Get 纠正），用户改完立刻能在返回值里看到实际生效值——
+// 否则他设了一个越界值、界面显示成功、实际被静默改掉，属于最难排查的那类不一致。
+func (a *App) SetPromptCachePrefs(p PromptCachePrefs) (PromptCachePrefs, error) {
+	if a.promptCachePrefs == nil {
+		return PromptCachePrefs{}, fmt.Errorf("提示缓存配置存储未初始化")
+	}
+	if err := a.promptCachePrefs.Set(p); err != nil {
+		return PromptCachePrefs{}, err
+	}
+	return a.promptCachePrefs.Get(), nil
 }
 
 // ===== 计划管理（Plan & Execute）=====
