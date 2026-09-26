@@ -603,7 +603,8 @@ async function sendMessage() {
         planStore.applyUpdate(sid, result.plan)
         // 计划是单次意图，生成后自动复位（只复位当前正在看的这条会话的开关）
         if (sessionId.value === sid) planMode.value = false
-        paneStore.openPane(sid, 'plan')
+        // 后台自动打开：不动用户的右侧收起状态（收起时计划以图标出现在窄条上）
+        paneStore.openPaneBackground(sid, 'plan')
       } else if (result?.reply) {
         chatStore.addLocalMessage(sid, {
           id: `assistant-${Date.now()}`,
@@ -650,8 +651,9 @@ async function sendMessage() {
       onToolCallStart: (tc) => {
         chatStore.addToolCall(sid, localMsg.id, tc)
         // 派生子代理时自动打开子代理面板：子代理的中间过程不在聊天流里（它跑在自己
-        // 独立的上下文里，只有结论会回到聊天），不打开面板用户就完全看不到它在做什么
-        if (tc?.name === 'spawn_agent') paneStore.openPane(sid, 'subagent')
+        // 独立的上下文里，只有结论会回到聊天），不打开面板用户就完全看不到它在做什么。
+        // 同样走后台打开：右侧收起时不强行铺开，图标会出现在窄条上。
+        if (tc?.name === 'spawn_agent') paneStore.openPaneBackground(sid, 'subagent')
       },
       onToolCallEnd: (tc) => {
         chatStore.updateToolCall(sid, localMsg.id, tc.id, {
@@ -732,7 +734,8 @@ async function sendMessage() {
     // 8. 联动 DiffPane：重新加载差异，有改动则自动展开右侧面板（都以 sid 为准）
     try {
       const changed = await diffStore.load(sid)
-      if (changed > 0) paneStore.openPane(sid, 'diff')
+      // 后台自动打开：收起状态下不强行铺开（图标出现在窄条上）
+      if (changed > 0) paneStore.openPaneBackground(sid, 'diff')
     } catch (diffErr) {
       console.warn('加载 diff 失败:', diffErr)
     }
