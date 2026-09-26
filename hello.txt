@@ -1,1 +1,6 @@
 world
+
+=== test edit @ 2025-01 ===
+This is a test edit to verify the right sidebar display.
+中文测试：你好世界！
+Emoji 测试：🔧 ✅ 📐
