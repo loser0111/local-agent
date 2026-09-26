@@ -454,7 +454,10 @@ func callLLMStream(ctx context.Context, url, token string, req *LLMReq, onConten
 // startDeltaFlusher 启动文本分片节流推送器：
 // 首个分片立即推送，之后 50ms 或累计 ≥20 字符合并推送一次，避免高频 IPC。
 // 返回的 enqueue 非阻塞入队；调用方在流结束后调 shutdown 等待残余分片发完。
-func (a *App) startDeltaFlusher() (enqueue func(string), shutdown func()) {
+//
+// sessionID / runID 必须由调用方给出：这条 goroutine 是**脱离调用栈**推送的，
+// 它发出去的分片同样是"某次运行的输出"，前端要靠归属把它贴到正确的会话上。
+func (a *App) startDeltaFlusher(sessionID, runID string) (enqueue func(string), shutdown func()) {
 	ch := make(chan string, 256)
 	done := make(chan struct{})
 
@@ -469,8 +472,10 @@ func (a *App) startDeltaFlusher() (enqueue func(string), shutdown func()) {
 				return
 			}
 			wailsRuntime.EventsEmit(a.ctx, "chat:event", ChatEvent{
-				Type:  "reply_delta",
-				Reply: sb.String(),
+				Type:      "reply_delta",
+				SessionID: sessionID,
+				RunID:     runID,
+				Reply:     sb.String(),
 			})
 			sb.Reset()
 		}
@@ -513,10 +518,18 @@ func (a *App) startDeltaFlusher() (enqueue func(string), shutdown func()) {
 
 // ===== 对话流程（借鉴 01agent 的状态机，简化为循环）=====
 
-// ChatEvent 推送给前端的事件数据
 // ChatEvent 聊天过程事件（经 "chat:event" 通道推送给前端）
+//
+// **归属不变式**：所有事件都必须带 SessionID。前端只订阅一次这条进程级通道，
+// 再按 SessionID 分发给对应会话的视图状态；没有归属的事件在前端会被丢弃
+// （见 docs/session-scoped-events-design.md 的不变式 1 与 4）。
+// 为了让"忘记带归属"变成不可能，本包的出口只有两个：emitChatEvent 与 emitInteraction
+// （外加运行期的 runRecorder 实现），三者的签名都**强制**要求传会话 ID——
+// 漏传是编译错误，而不是运行期的静默串台。
 type ChatEvent struct {
 	Type      string     `json:"type"` // tool_call_start / tool_call_end / reply_delta / done / error / diff_update / plan_update / permission_request / ask_user
+	SessionID string     `json:"sessionId,omitempty"`
+	RunID     string     `json:"runId,omitempty"`
 	ToolCall  *ToolCall  `json:"toolCall,omitempty"`
 	Reply     string     `json:"reply,omitempty"`
 	Error     string     `json:"error,omitempty"`
@@ -553,7 +566,24 @@ const (
 	ChatEventContextCompacted = "context_compacted"
 )
 
-// emitChatEvent 向前端推送一个聊天事件（无 Wails 上下文时静默跳过）
+// emitChatEvent 向前端推送一个聊天事件（无 Wails 上下文时静默跳过）。
+//
+// sessionID / runID 由调用方显式给出，并在这里写进载荷：**归属只在出口盖一次章**，
+// 运行期事件走 runRecorder（见 agentrun.go），两条路都收敛到这几行。
+// 改成强制传参是刻意的：多会话并行下，"这条事件属于谁"没有默认值可猜。
+func (a *App) emitChatEvent(sessionID, runID string, ev ChatEvent) {
+	if a.ctx == nil {
+		return
+	}
+	if ev.SessionID == "" {
+		ev.SessionID = sessionID
+	}
+	if ev.RunID == "" {
+		ev.RunID = runID
+	}
+	wailsRuntime.EventsEmit(a.ctx, "chat:event", ev)
+}
+
 // EventUserInteraction 需要用户交互的阻塞式请求（授权 / 提问）专用事件名。
 //
 // 为什么不复用 "chat:event"：前端每次调用结束都会 EventsOff("chat:event")，而 Wails 的
@@ -569,21 +599,20 @@ const EventUserInteraction = "user:interaction"
 // 或只重建了一侧），就会出现"后端在新通道喊、前端在旧通道听"（或反之），
 // 表现为弹窗永不出现、工具卡片一直卡在"运行中"直到超时。
 // 两条通道都发，新前端听 user:interaction、旧前端听 chat:event，各自只收到一次。
-func (a *App) emitInteraction(ev ChatEvent) {
+//
+// 归属同样在这里盖章：前端要据此决定"这个弹窗是不是当前会话的"，
+// 并把它记到对应会话的挂起表里（后台会话的请求只出列表标记，不弹窗）。
+func (a *App) emitInteraction(sessionID string, ev ChatEvent) {
 	if a.ctx == nil {
 		return
+	}
+	if ev.SessionID == "" {
+		ev.SessionID = sessionID
 	}
 	wailsRuntime.EventsEmit(a.ctx, EventUserInteraction, ev)
 	wailsRuntime.EventsEmit(a.ctx, "chat:event", ev) // 兼容旧前端产物
 	// 打一行日志：下次界面没弹出时，看控制台就能判断是"后端没发"还是"前端没收到"
 	fmt.Printf("[交互] 已推送 %s，等待界面应答（若弹窗没出现，请确认前端产物与二进制来自同一次构建）\n", ev.Type)
-}
-
-func (a *App) emitChatEvent(ev ChatEvent) {
-	if a.ctx == nil {
-		return
-	}
-	wailsRuntime.EventsEmit(a.ctx, "chat:event", ev)
 }
 
 // imageLoader 把消息里的附件引用读成可发送的图片。
@@ -785,8 +814,13 @@ func (a *App) executeChat(sessionID, query string, useStream bool) *ChatResult {
 	if err != nil {
 		return &ChatResult{Error: err.Error()}
 	}
-	// 登记为可取消的运行：前端「停止」经 StopChat 命中它（软取消 / 硬取消）
-	run := a.runs.begin(sessionID, "")
+	// 登记为可取消的运行：前端「停止」经 StopChat 命中它（软取消 / 硬取消）。
+	// 用 beginExclusive：同一会话已经在跑时直接拒绝——多会话并行是允许的，
+	// 同一会话并行会互相破坏消息序列与 diff 归因（见 errSessionBusy 的说明）。
+	run, berr := a.runs.beginExclusive(sessionID, "")
+	if berr != nil {
+		return &ChatResult{Error: berr.Error()}
+	}
 	defer a.runs.end(run)
 	return runToolLoop(a.newMainAgentRun(run, session, dir, prompt, &model, useStream, false))
 }
@@ -1365,14 +1399,19 @@ func runToolLoop(ar *agentRun) *ChatResult {
 // ===== Plan & Execute（规划-执行模式）=====
 
 // emitPlanUpdate 推送计划状态变更事件（plan_update，全量携带最新计划）
+//
+// 归属直接取自计划本身（plan.SessionID）：调用点分布很广（规划、执行、取消、异常收尾），
+// 让它们各自记住"这条计划属于哪个会话"是多余的，计划里本来就写着。
 func (a *App) emitPlanUpdate(plan *Plan, stepIndex int) {
-	if a.ctx != nil {
-		wailsRuntime.EventsEmit(a.ctx, "chat:event", ChatEvent{
-			Type:      "plan_update",
-			Plan:      plan,
-			StepIndex: stepIndex,
-		})
+	if a.ctx == nil || plan == nil {
+		return
 	}
+	wailsRuntime.EventsEmit(a.ctx, "chat:event", ChatEvent{
+		Type:      "plan_update",
+		SessionID: plan.SessionID,
+		Plan:      plan,
+		StepIndex: stepIndex,
+	})
 }
 
 // ChatPlan 规划流程：调用规划器产出结构化计划（或平凡请求直答）。
@@ -1395,7 +1434,10 @@ func (a *App) ChatPlan(sessionID, query string, useStream bool) *ChatResult {
 
 	// 登记为可取消的运行：规划期的 LLM 调用同样要能被停止
 	// （硬取消会断开在途的规划请求，而不是让用户白等一次 120s 超时）
-	run := a.runs.begin(sessionID, "")
+	run, berr := a.runs.beginExclusive(sessionID, "")
+	if berr != nil {
+		return &ChatResult{Error: berr.Error()}
+	}
 	defer a.runs.end(run)
 
 	// 2. 规划器调用：无工具、非流式、低温；失败重试一次
@@ -1493,7 +1535,11 @@ func (a *App) executePlan(planID string, useStream bool) (result *ChatResult) {
 
 	// 3. 登记为可取消的运行。计划执行与普通聊天共用同一套取消机制
 	// （原先自己一套 planCancels），因此 CancelPlan 也能升级为硬取消。
-	run := a.runs.begin(plan.SessionID, planID)
+	// 同样是互斥登记：计划在执行时，这条会话不该再接受第二次发送。
+	run, berr := a.runs.beginExclusive(plan.SessionID, planID)
+	if berr != nil {
+		return &ChatResult{Error: berr.Error()}
+	}
 	defer a.runs.end(run)
 	checkCancel := func() bool { return run.SoftRequested() }
 

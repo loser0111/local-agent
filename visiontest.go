@@ -151,8 +151,12 @@ func (a *App) handleVisionTestCommand(sessionID string) (*ChatResult, error) {
 		return nil, err
 	}
 
-	// 与普通对话一样登记为可取消的运行：自检也要能被「停止」断掉
-	run := a.runs.begin(sessionID, "")
+	// 与普通对话一样登记为可取消的运行：自检也要能被「停止」断掉。
+	// 同样走互斥登记：自检是一次真实模型调用，与普通对话抢同一条会话没有意义。
+	run, berr := a.runs.beginExclusive(sessionID, "")
+	if berr != nil {
+		return nil, berr
+	}
 	defer a.runs.end(run)
 	ctx := run.Ctx()
 
@@ -234,7 +238,7 @@ func (a *App) handleVisionTestCommand(sessionID string) (*ChatResult, error) {
 	if saved, serr := a.sessionStore.AppendMessage(sessionID, Message{Role: RoleAssistant, Content: reply}); serr == nil {
 		result.Messages = []Message{*saved}
 	}
-	a.emitChatEvent(ChatEvent{Type: "done", Reply: reply})
+	a.emitChatEvent(sessionID, run.runID, ChatEvent{Type: "done", Reply: reply})
 	result.Context = a.contextStatForSession(sessionID)
 	return result, nil
 }

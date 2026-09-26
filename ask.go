@@ -353,7 +353,7 @@ func (a *App) askUser(ctx context.Context, sessionID string, req AskRequest) (As
 	// 请求本体在 register 后补全：Pending() 需要能返回带 ID 的完整请求
 	a.askBroker.setRequest(id, req)
 
-	a.emitInteraction(ChatEvent{Type: "ask_user", Ask: &req})
+	a.emitInteraction(sessionID, ChatEvent{Type: "ask_user", Ask: &req})
 	return a.askBroker.Wait(ctx, id, ch)
 }
 

@@ -732,7 +732,10 @@ func (a *App) contextStatForSession(sessionID string) *ContextStat {
 func (a *App) handleCompactCommand(sessionID string) (*ChatResult, error) {
 	// 与普通对话一样登记为可取消的运行：压缩要额外发一次 LLM 请求，
 	// 硬取消同样应该能把它断掉，而不是让用户白等。
-	run := a.runs.begin(sessionID, "")
+	run, berr := a.runs.beginExclusive(sessionID, "")
+	if berr != nil {
+		return nil, berr
+	}
 	defer a.runs.end(run)
 	out, err := a.compactSessionContext(run.Ctx(), sessionID)
 	if err != nil {
@@ -750,7 +753,7 @@ func (a *App) handleCompactCommand(sessionID string) (*ChatResult, error) {
 	if saved, serr := a.sessionStore.AppendMessage(sessionID, Message{Role: RoleAssistant, Content: reply}); serr == nil {
 		result.Messages = []Message{*saved}
 	}
-	a.emitChatEvent(ChatEvent{Type: "done", Reply: reply})
+	a.emitChatEvent(sessionID, run.runID, ChatEvent{Type: "done", Reply: reply})
 	result.Context = a.contextStatForSession(sessionID)
 	return result, nil
 }
@@ -771,7 +774,9 @@ func (a *App) handleContextStatCommand(sessionID string) (*ChatResult, error) {
 	if saved, serr := a.sessionStore.AppendMessage(sessionID, Message{Role: RoleAssistant, Content: reply}); serr == nil {
 		result.Messages = []Message{*saved}
 	}
-	a.emitChatEvent(ChatEvent{Type: "done", Reply: reply})
+	// 纯读操作，没有登记运行（不需要取消），因此事件不带 runId。
+	// 归属仍然必须有：前端靠它把这条 done 归到正确会话。
+	a.emitChatEvent(sessionID, "", ChatEvent{Type: "done", Reply: reply})
 	// 统计在落库之后重算：这条报告消息自己也占上下文，报出去的数字应包含它，
 	// 否则用户紧接着再查一次会发现两边对不上。
 	result.Context = a.contextStatForSession(sessionID)
@@ -903,6 +908,18 @@ func (a *App) StopChat(sessionID string, hard bool) (bool, error) {
 	}
 	hit, _ := a.runs.stopSession(sessionID, hard)
 	return hit, nil
+}
+
+// ListRunningSessions 返回当前有活跃运行的会话 ID 列表（可能同时有多条）。
+//
+// 为什么需要它：多会话并行下，"哪几条在跑"是**后端才知道**的事实。前端页面一旦重载
+// （wails dev 的热更新、手动刷新、日后可能的开新窗口），内存里的进行中状态就全丢了，
+// 而后端的运行还在跑。没有这个接口，界面会把它们显示成空闲——用户再点发送只会收到
+// 一句"该会话已有正在进行的任务"，却看不出为什么。
+//
+// 刻意只给 ID 列表、不给进度：进度只能靠事件流，这里能补的仅仅是"在跑"这个事实。
+func (a *App) ListRunningSessions() []string {
+	return a.runs.activeSessions()
 }
 
 // ===== 文件改动归因（供差异面板与工具卡片展示）=====

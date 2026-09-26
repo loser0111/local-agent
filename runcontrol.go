@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 )
@@ -31,6 +32,13 @@ var (
 	errRunCancelled = errors.New("运行已被用户取消")
 	// errRunFinished 运行正常结束，仅用于释放 ctx，不代表取消
 	errRunFinished = errors.New("运行已结束")
+	// errSessionBusy 该会话已有正在进行的运行。
+	//
+	// 为什么必须在这里拦：runRegistry 的 sessionID → runID 索引只能指向一条运行，
+	// 同一会话被并发启动两次时，后一条会**覆盖索引**——前一条还在跑，却再也停不掉了
+	// （StopChat 只能命中新的那条），而且两条运行会同时往同一个会话文件里追加消息。
+	// 多会话并行放开之后，前端"按钮禁用"不再是保证，必须由后端守住这条线。
+	errSessionBusy = errors.New("该会话已有正在进行的任务")
 )
 
 // 取消种类取值
@@ -198,9 +206,46 @@ type runRegistry struct {
 // 对 nil 接收者安全：零值 App（测试里常见）没有注册表，此时返回一个可用但
 // 不可被 stop 的控制块，而不是 panic —— 取消是可选能力，不该让无关路径崩掉。
 func (g *runRegistry) begin(sessionID, planID string) *runControl {
+	if g == nil {
+		return &runControl{
+			runID:     "run_unregistered",
+			sessionID: sessionID,
+			planID:    planID,
+			startedAt: time.Now(),
+			soft:      make(chan struct{}),
+		}
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.beginLocked(sessionID, planID)
+}
+
+// beginExclusive 与 begin 相同，但**同一会话已有运行在跑时直接拒绝**。
+//
+// 会话级互斥放在后端（而不是靠前端禁用按钮）：前端的状态永远只是提示，
+// 而且它本来就允许多个窗口/多入口发起同一条会话的请求。
+// 返回的错误是 errSessionBusy 的包装，调用方把它转成一句给用户看的话。
+func (g *runRegistry) beginExclusive(sessionID, planID string) (*runControl, error) {
+	if g == nil {
+		return g.begin(sessionID, planID), nil
+	}
+	if sessionID == "" {
+		// 无会话归属的运行（测试构造的零散场景）不参与互斥：没有索引可比较
+		return g.begin(sessionID, planID), nil
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if cur := g.bySessionLocked(sessionID); cur != nil {
+		return nil, fmt.Errorf("%w：会话 %s 的 %s 尚未结束", errSessionBusy, sessionID, cur.runID)
+	}
+	return g.beginLocked(sessionID, planID), nil
+}
+
+// beginLocked 真正创建并登记运行；调用方必须持有 g.mu
+func (g *runRegistry) beginLocked(sessionID, planID string) *runControl {
 	ctx, cancel := context.WithCancelCause(context.Background())
 	r := &runControl{
-		runID:     "run_unregistered",
+		runID:     "",
 		sessionID: sessionID,
 		planID:    planID,
 		startedAt: time.Now(),
@@ -208,12 +253,6 @@ func (g *runRegistry) begin(sessionID, planID string) *runControl {
 		cancel:    cancel,
 		soft:      make(chan struct{}),
 	}
-	if g == nil {
-		return r
-	}
-
-	g.mu.Lock()
-	defer g.mu.Unlock()
 	if g.runs == nil {
 		g.runs = map[string]*runControl{}
 		g.sessionRun = map[string]string{}
@@ -226,6 +265,29 @@ func (g *runRegistry) begin(sessionID, planID string) *runControl {
 		g.sessionRun[sessionID] = r.runID
 	}
 	return r
+}
+
+// activeSessions 当前有活跃运行的会话 ID（去重、稳定排序）。
+//
+// 供前端在页面重载后重建"哪几条会话正在跑"——否则刷新一次，后台还在跑的会话
+// 在界面上就变回"空闲"，用户点发送会被后端的互斥拒绝，而他看不出为什么。
+func (g *runRegistry) activeSessions() []string {
+	if g == nil {
+		return nil
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	out := make([]string, 0, len(g.sessionRun))
+	for sid, runID := range g.sessionRun {
+		if sid == "" {
+			continue
+		}
+		if _, ok := g.runs[runID]; ok {
+			out = append(out, sid)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // end 注销运行并释放 ctx。正常结束时也必须调用，否则 ctx 与其派生会一直挂着。
@@ -251,7 +313,12 @@ func (g *runRegistry) bySession(sessionID string) *runControl {
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if g.sessionRun == nil {
+	return g.bySessionLocked(sessionID)
+}
+
+// bySessionLocked 与 bySession 同义；调用方必须持有 g.mu
+func (g *runRegistry) bySessionLocked(sessionID string) *runControl {
+	if sessionID == "" || g.sessionRun == nil {
 		return nil
 	}
 	return g.runs[g.sessionRun[sessionID]]

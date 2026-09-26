@@ -116,7 +116,9 @@ async function persistDraft() {
 async function approve() {
   const saved = await persistDraft()
   if (!saved) return
-  await planStore.execute(saved.id, settingStore.settings.streamResponse)
+  // 会话 ID 显式传：计划执行的事件要按会话路由，不能靠"当前显示的会话"去猜
+  // （用户完全可以在执行期间切到别的会话）
+  await planStore.execute(sessionId.value, saved.id, settingStore.settings.streamResponse)
 }
 
 async function saveOnly() {
@@ -136,7 +138,7 @@ async function cancelExec() {
 /** 从失败/取消处继续执行：已完成的步骤不会重跑 */
 async function resumeExec() {
   if (!plan.value) return
-  await planStore.execute(plan.value.id, settingStore.settings.streamResponse)
+  await planStore.execute(sessionId.value, plan.value.id, settingStore.settings.streamResponse)
 }
 
 /** 退回待审核以便修改步骤（失败后「修改后重试」） */

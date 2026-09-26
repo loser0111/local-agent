@@ -103,6 +103,8 @@ export function ListCheckpoints(arg1:string):Promise<Array<main.CheckpointInfo>>
 
 export function ListPlans(arg1:string):Promise<Array<main.Plan>>;
 
+export function ListRunningSessions():Promise<Array<string>>;
+
 export function ListSessions():Promise<Array<main.Session>>;
 
 export function ListSkillResources(arg1:string):Promise<Array<main.SkillResource>>;

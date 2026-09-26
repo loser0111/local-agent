@@ -6,7 +6,7 @@ import {
   ReopenPlan,
   ListPlans,
 } from '@/../wailsjs/go/main/App'
-import { EventsOn, EventsOff } from '@/../wailsjs/runtime/runtime'
+import { subscribeChat } from '@/api/eventbus'
 
 /**
  * 判断是否运行在 Wails 桌面环境
@@ -112,36 +112,30 @@ export async function savePlan(plan) {
 
 /**
  * 逐步执行计划（长耗时；过程经 onPlanUpdate/onReplyDelta/onToolCall* 回调）
+ *
+ * sessionId 是**必传**的：事件按会话路由（见 api/eventbus.js），执行一条后台会话的计划时
+ * "当前显示的会话"可能已经不是它了，不能靠调用方所在组件去猜。
+ *
+ * @param {string} sessionId
  * @param {string} planId
  * @param {boolean} useStream
  * @param {{onPlanUpdate?:Function, onReplyDelta?:Function, onToolCallStart?:Function, onToolCallEnd?:Function}} handlers
  * @returns {Promise<{plan?:import('@/types').Plan, reply?:string, error?:string}>}
  */
-export async function executePlan(planId, useStream, handlers = {}) {
+export async function executePlan(sessionId, planId, useStream, handlers = {}) {
   if (isWails()) {
-    // 监听计划状态与工具调用/流式分片事件（后端执行期间持续推送）
-    const eventHandler = (eventData) => {
-      if (!eventData) return
-      switch (eventData.type) {
-        case 'plan_update':
-          handlers.onPlanUpdate?.(eventData.plan)
-          break
-        case 'reply_delta':
-          handlers.onReplyDelta?.(eventData.reply)
-          break
-        case 'tool_call_start':
-          handlers.onToolCallStart?.(eventData.toolCall)
-          break
-        case 'tool_call_end':
-          handlers.onToolCallEnd?.(eventData.toolCall)
-          break
-      }
-    }
-    EventsOn('chat:event', eventHandler)
+    // 订阅运行事件（后端执行期间持续推送）。进程级单订阅 + 按会话路由，
+    // 不再按调用 EventsOn/EventsOff —— 后者会把别的会话的监听一起摘掉。
+    const off = subscribeChat(sessionId, {
+      onPlanUpdate: handlers.onPlanUpdate,
+      onReplyDelta: handlers.onReplyDelta,
+      onToolCallStart: handlers.onToolCallStart,
+      onToolCallEnd: handlers.onToolCallEnd,
+    })
     try {
       return await ExecutePlan(planId, !!useStream)
     } finally {
-      EventsOff('chat:event')
+      off()
     }
   }
 

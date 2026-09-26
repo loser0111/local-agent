@@ -77,9 +77,15 @@ type runRecorder interface {
 	FlushStream() (enqueue func(string), shutdown func())
 }
 
-// appRecorder 主会话的 recorder：推给 wails 事件通道
+// appRecorder 主会话的 recorder：推给 wails 事件通道。
+//
+// sessionID / runID 在构造时钉死（而不是发射时去问 App"当前是哪个会话"——
+// App 根本没有这个概念，多会话并行时也不该有）：运行期十几处 Recorder.Emit 因此
+// 自动获得归属，不需要每处都记得传。
 type appRecorder struct {
-	app *App
+	app       *App
+	sessionID string
+	runID     string
 }
 
 // Emit 推送聊天事件
@@ -87,7 +93,7 @@ func (r *appRecorder) Emit(ev ChatEvent) {
 	if r == nil || r.app == nil {
 		return
 	}
-	r.app.emitChatEvent(ev)
+	r.app.emitChatEvent(r.sessionID, r.runID, ev)
 }
 
 // EmitDiff 推送差异更新
@@ -96,9 +102,11 @@ func (r *appRecorder) EmitDiff(files []DiffFile, turn int) {
 		return
 	}
 	wailsRuntime.EventsEmit(r.app.ctx, "diff:update", ChatEvent{
-		Type: "diff_update",
-		Diff: files,
-		Turn: turn,
+		Type:      "diff_update",
+		SessionID: r.sessionID,
+		RunID:     r.runID,
+		Diff:      files,
+		Turn:      turn,
 	})
 }
 
@@ -107,7 +115,7 @@ func (r *appRecorder) FlushStream() (func(string), func()) {
 	if r == nil || r.app == nil {
 		return func(string) {}, func() {}
 	}
-	return r.app.startDeltaFlusher()
+	return r.app.startDeltaFlusher(r.sessionID, r.runID)
 }
 
 // newMainAgentRun 组装主会话的一次运行。
@@ -172,6 +180,6 @@ func (a *App) newMainAgentRun(run *runControl, session *Session, dir, systemProm
 		VisionUnsupported: a.visionVerdicts.Unsupported(session.Model, modelCallID(model), model.URL),
 		Compactor:         a.compactSession,
 		TokenCalib:        a.tokenCalib,
-		Recorder:          &appRecorder{app: a},
+		Recorder:          &appRecorder{app: a, sessionID: sessionID, runID: runID},
 	}
 }

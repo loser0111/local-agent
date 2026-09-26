@@ -112,7 +112,7 @@ func TestCallLLMStreamErrorStatus(t *testing.T) {
 // 节流推送器：首片立即、后续合并
 func TestStartDeltaFlusher(t *testing.T) {
 	app := &App{} // ctx=nil 时不实际 emit，但节流/关闭逻辑应正常退出
-	enqueue, shutdown := app.startDeltaFlusher()
+	enqueue, shutdown := app.startDeltaFlusher("s1", "run_1_1")
 	enqueue("a")
 	enqueue("b")
 	shutdown() // 不死锁即通过

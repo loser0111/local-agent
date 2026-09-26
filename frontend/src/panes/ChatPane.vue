@@ -31,17 +31,34 @@ const ui = useUiStore()
 
 // 计划模式（单次意图，非全局偏好）：开启后下一条消息走规划流程
 const planMode = ref(false)
+
 // 停止请求已发出、正在等后端收尾。此时再点「停止」升级为硬取消。
-const stopping = ref(false)
+//
+// **按会话记**：两个会话可能同时在跑，"A 已进入停止中"不该让 B 的停止按钮
+// 第一次点就变成硬取消（那是不可逆的：直接断开在途请求、kill 子进程）。
+const stoppingBySession = ref({})
+const stopping = computed(() => !!stoppingBySession.value[sessionId.value])
+
+function setStopping(sid, v) {
+  if (!sid) return
+  const next = { ...stoppingBySession.value }
+  if (v) next[sid] = true
+  else delete next[sid]
+  stoppingBySession.value = next
+}
 
 // 请求快照查看（排障用）：显示实际发出的 message 列表
 const reqPreviewVisible = ref(false)
 
 // 上下文用量（后端算的近似值）。用于显示占用比例；点它可直接触发压缩。
-const contextStat = ref(null)
+//
+// **按会话存**（在 chat store 里）：它是某一次运行回传的数字，后台会话跑完回传的
+// 用量不该显示在当前会话的指示器上。改造前它是本组件的一个 ref，于是切会话时
+// 后台会话的用量会覆盖当前会话的显示。
+const contextStat = computed(() => chatStore.contextStat)
 
-function updateContextStat(st) {
-  if (st) contextStat.value = st
+function updateContextStat(sid, st) {
+  if (sid && st) chatStore.setContextStat(sid, st)
 }
 
 const contextPercent = computed(() => {
@@ -65,7 +82,8 @@ const contextTitle = computed(() => {
 
 // 点用量指示 = 手动压缩：复用发送路径，后端把 /compact 当上下文维护操作拦截
 function requestCompact() {
-  if (!sessionId.value || chatStore.isGenerating) return
+  const sid = sessionId.value
+  if (!sid || chatStore.isGeneratingIn(sid)) return
   input.value = '/compact'
   sendMessage()
 }
@@ -439,8 +457,7 @@ watch(
     askStore.loadPending(id)
     // 上下文用量是「打开会话就该看到」的信息，跟着会话一起加载。
     // 它在后端是近似值，取不到就不显示，不打扰用户。
-    contextStat.value = null
-    if (id) getContextStat(id).then(updateContextStat)
+    if (id) getContextStat(id).then((st) => updateContextStat(id, st))
   },
   { immediate: true }
 )
@@ -509,7 +526,10 @@ async function sendMessage() {
   const sid = sessionId.value
   const pending = pendingFiles.value.slice()
   // 纯图片消息（不写一个字就发一张图）必须允许——"这张报错图怎么回事"是常见开场
-  if ((!text && !pending.length) || !sid || chatStore.isGenerating) return
+  //
+  // 守卫只看**本会话**：别的会话在跑不该拦住这条会话（这正是多会话并行的用法）。
+  // 同一会话的重复发送由后端 beginExclusive 兜底——前端状态永远只是提示，不是保证。
+  if ((!text && !pending.length) || !sid || chatStore.isGeneratingIn(sid)) return
 
   // 计划模式走的是无工具的文本规划器（见 ChatPlan），图片到不了它那里：
   // 与其发出一份"看不见图"的计划，不如说明白并改走普通对话。
@@ -520,9 +540,15 @@ async function sendMessage() {
   }
 
   input.value = ''
-  chatStore.isGenerating = true
-  stopping.value = false
+  // 运行状态按会话落库：切到别的会话时，这条会话仍显示"运行中"，
+  // 而别的会话不会被它带成"生成中"。
+  chatStore.markRunStarted(sid)
+  setStopping(sid, false)
   const startAt = Date.now()
+  // 本次运行的流式占位消息 id。**局部变量而不是组件级的 ref**：
+  // 用户可以在本次运行还没结束时就去另一条会话发消息，组件的 ref 会被覆盖，
+  // 之后"替换占位"就会替换错人（或者谁也找不到）。
+  let placeholderId = null
 
   try {
     // 1. 先落附件、再落消息：消息里挂的引用因此一定是完整的，
@@ -549,10 +575,12 @@ async function sendMessage() {
       content: text,
       attachments: attachments.length ? attachments : undefined,
     })
-    chatStore.addLocalMessage(savedUserMsg)
-    // 本地同步会话标题与活跃时间
-    const cur = sessionStore.currentSession
-    if (cur && (!cur.title || cur.title === '新会话')) {
+    // 消息一律写进 **sid 的桶**：await 期间用户完全可能切走，
+    // 写"当前会话"就会把这条会话的内容塞进另一条（改造前最典型的串台）。
+    chatStore.addLocalMessage(sid, savedUserMsg)
+    // 本地同步会话标题与活跃时间（注意取的是 sid 那条会话，不是当前显示的）
+    const target = sessionStore.sessions.find((s) => s.id === sid)
+    if (target && (!target.title || target.title === '新会话')) {
       // 纯图片消息没有正文可作标题，用图片文件名兜底（否则会话列表里会出现一行空白）
       const src = text || (attachments[0] && attachments[0].name) || '（图片）'
       const flat = src.replace(/\s+/g, ' ').trim()
@@ -568,15 +596,16 @@ async function sendMessage() {
       const result = await chat(sid, text, {
         stream: false, // 规划器固定非流式；免计划直答取完整回复
         plan: true,
-        onPlanUpdate: (p) => planStore.applyUpdate(p),
+        onPlanUpdate: (p) => planStore.applyUpdate(sid, p),
       })
-      updateContextStat(result?.context)
+      updateContextStat(sid, result?.context)
       if (result?.plan) {
-        planStore.applyUpdate(result.plan)
-        planMode.value = false // 计划是单次意图，生成后自动复位
+        planStore.applyUpdate(sid, result.plan)
+        // 计划是单次意图，生成后自动复位（只复位当前正在看的这条会话的开关）
+        if (sessionId.value === sid) planMode.value = false
         paneStore.openPane(sid, 'plan')
       } else if (result?.reply) {
-        chatStore.addLocalMessage({
+        chatStore.addLocalMessage(sid, {
           id: `assistant-${Date.now()}`,
           role: 'assistant',
           content: result.reply,
@@ -584,7 +613,7 @@ async function sendMessage() {
           streaming: false,
         })
       } else if (result?.error) {
-        chatStore.addLocalMessage({
+        chatStore.addLocalMessage(sid, {
           id: `plan-gen-error-${Date.now()}`,
           role: 'assistant',
           content: `生成计划失败：${result.error}`,
@@ -597,31 +626,35 @@ async function sendMessage() {
     }
 
     // 2. 创建本地 AI 消息占位（流式显示用，展示工具调用中间状态）
-    const localMsg = chatStore.addLocalMessage({
-      id: `local-${Date.now()}`,
+    //
+    // 占位消息活在 **sid 的桶**里（不是组件的一个 ref）：它既是流式文本的落点，
+    // 也是"切走再切回来仍能看到进度"的载体。用一个 ref 记住它的 id 是不够的——
+    // 用户可以在本次运行还没结束时就去另一条会话发消息，那个 ref 会被覆盖。
+    const localMsg = chatStore.addLocalMessage(sid, {
+      id: `local-${sid}-${Date.now()}`,
       role: 'assistant',
       content: '',
       toolCalls: [],
       createdAt: Date.now(),
       streaming: true,
     })
-    streamingMessageId.value = localMsg.id
+    placeholderId = localMsg.id
 
     // 3. 调用后端 Chat 方法（真实 LLM 调用 + 工具执行）
     // 后端会持久化所有中间消息（assistant+tool_calls, tool结果, 最终回复）
     const result = await chat(sid, text, {
       stream: settingStore.settings.streamResponse,
       onReplyDelta: (chunk) => {
-        chatStore.appendStreamContent(localMsg.id, chunk)
+        chatStore.appendStreamContent(sid, localMsg.id, chunk)
       },
       onToolCallStart: (tc) => {
-        chatStore.addToolCall(localMsg.id, tc)
+        chatStore.addToolCall(sid, localMsg.id, tc)
         // 派生子代理时自动打开子代理面板：子代理的中间过程不在聊天流里（它跑在自己
         // 独立的上下文里，只有结论会回到聊天），不打开面板用户就完全看不到它在做什么
         if (tc?.name === 'spawn_agent') paneStore.openPane(sid, 'subagent')
       },
       onToolCallEnd: (tc) => {
-        chatStore.updateToolCall(localMsg.id, tc.id, {
+        chatStore.updateToolCall(sid, localMsg.id, tc.id, {
           status: tc.status,
           duration: tc.duration,
           result: tc.result,
@@ -630,13 +663,15 @@ async function sendMessage() {
       onContextCompacted: (ev) => {
         // 上下文被自动压缩：用量会骤降，不解释一句用户会以为对话被截断了。
         // 走事件而不是落库消息——它是解释，不是对话内容（/compact 才是用户主动、落库的那条）。
-        updateContextStat(ev?.context)
+        updateContextStat(sid, ev?.context)
         const c = ev?.compact || {}
         const pct = ev?.context?.windowTokens
           ? Math.round((ev.context.usedTokens / ev.context.windowTokens) * 100)
           : null
+        // 后台会话的压缩提示带上会话标题：否则用户会以为当前这条会话被压缩了
+        const tail = sessionId.value === sid ? '' : `（会话「${sessionTitleOf(sid)}」）`
         ui.notify(
-          `上下文已自动压缩：前 ${c.coveredMsgs ?? 0} 条消息合并为摘要` +
+          `上下文已自动压缩${tail}：前 ${c.coveredMsgs ?? 0} 条消息合并为摘要` +
             (pct === null ? '' : `，用量降至 ${pct}%`) +
             '，原文仍完整保留（输入 /context-stat 查看明细）',
           'info'
@@ -644,41 +679,39 @@ async function sendMessage() {
       },
       // 被用户停止：立刻收尾流式气泡，否则它会一直停在"正在输入"
       onCancelled: () => {
-        if (streamingMessageId.value) {
-          chatStore.updateLocalMessage(streamingMessageId.value, { streaming: false })
-        }
+        chatStore.updateLocalMessage(sid, localMsg.id, { streaming: false })
       },
     })
-    updateContextStat(result?.context)
+    updateContextStat(sid, result?.context)
 
     // 4. 移除流式占位消息，用后端持久化的消息替换
-    const placeholderIdx = chatStore.messages.findIndex((m) => m.id === streamingMessageId.value)
-    if (placeholderIdx > -1) {
-      chatStore.messages.splice(placeholderIdx, 1)
-    }
-
-    // 5. 添加后端持久化的消息（过滤 role=tool，工具结果已显示在 toolCalls 卡片中）
-    if (result.messages && result.messages.length > 0) {
-      for (const msg of result.messages) {
-        if (msg.role !== 'tool') {
-          chatStore.addLocalMessage({ ...msg, streaming: false })
-        }
+    // 4. 移除流式占位消息，用后端持久化的消息替换（都写在 sid 的桶里）
+    //
+    // 改造前这里用 findIndex 在"当前会话"的消息里找占位、再往"当前会话"追加结果，
+    // 于是 A 跑完的回复被追加进了 B——本次修复要挡住的正是这一条。
+    // replacePlaceholder 找不到占位时返回 false（用户在运行期间刷新过），
+    // 这时退回"直接追加"，至少不让这段回复丢掉。
+    const persisted = (result.messages || []).filter((m) => m.role !== 'tool')
+    const replaced = chatStore.replacePlaceholder(sid, localMsg.id, persisted)
+    if (!replaced) {
+      for (const msg of persisted) {
+        chatStore.addLocalMessage(sid, { ...msg, streaming: false })
       }
     }
 
     // 6. 被取消 / 出错。取消是用户的主动行为，不能显示成"调用失败"——
     //    这也是后端把取消从错误路径里摘出来的原因（见 App.Chat）。
     if (result.cancelled) {
-      chatStore.addLocalMessage({
-        id: `cancelled-${Date.now()}`,
+      chatStore.addLocalMessage(sid, {
+        id: `cancelled-${sid}-${Date.now()}`,
         role: 'assistant',
         content: result.cancelKind === 'hard' ? '已强制停止。' : '已停止（当前步骤执行完即停）。',
         createdAt: Date.now(),
         streaming: false,
       })
     } else if (result.error && !result.reply) {
-      chatStore.addLocalMessage({
-        id: `error-${Date.now()}`,
+      chatStore.addLocalMessage(sid, {
+        id: `error-${sid}-${Date.now()}`,
         role: 'assistant',
         content: `调用失败：${result.error}`,
         createdAt: Date.now(),
@@ -696,7 +729,7 @@ async function sendMessage() {
 
     sessionStore.touchSession(sid)
 
-    // 8. 联动 DiffPane：重新加载差异，有改动则自动展开右侧面板
+    // 8. 联动 DiffPane：重新加载差异，有改动则自动展开右侧面板（都以 sid 为准）
     try {
       const changed = await diffStore.load(sid)
       if (changed > 0) paneStore.openPane(sid, 'diff')
@@ -705,34 +738,54 @@ async function sendMessage() {
     }
   } catch (e) {
     console.error('发送消息失败:', e)
-    if (streamingMessageId.value) {
-      chatStore.updateLocalMessage(streamingMessageId.value, {
+    // placeholderId 可能还是 null（落附件/落用户消息阶段就失败了）
+    if (placeholderId) {
+      chatStore.updateLocalMessage(sid, placeholderId, {
         content: `发送失败：${e.message || e}`,
         streaming: false,
       })
+    } else if (sessionId.value === sid) {
+      // 只在用户正看着这条会话时用提示条：后台会话失败不该打断他手上的事
+      ui.notify(`发送失败：${e.message || e}`, 'error')
     } else {
-      alert(`发送失败：${e.message || e}`)
+      chatStore.addLocalMessage(sid, {
+        id: `error-${sid}-${Date.now()}`,
+        role: 'assistant',
+        content: `发送失败：${e.message || e}`,
+        createdAt: Date.now(),
+        streaming: false,
+      })
     }
   } finally {
-    chatStore.isGenerating = false
-    stopping.value = false
-    streamingMessageId.value = null
+    // 只结束 sid 那一条的运行状态：别的会话该跑还在跑
+    chatStore.markRunEnded(sid)
+    setStopping(sid, false)
   }
+}
+
+/** 取会话标题（提示文案里点名"是哪条会话"用的；找不到就退回占位文案） */
+function sessionTitleOf(sid) {
+  const s = sessionStore.sessions.find((x) => x.id === sid)
+  return s?.title || '未命名会话'
 }
 
 /**
  * 把「正在运行」的工具卡片标为等待授权（后端阻塞在授权/提问上）。
- * 工具循环是串行执行的，所以匹配最后一个同名 running 卡片是准确的
+ *
+ * 工具循环是串行执行的，所以匹配该会话里最后一个同名 running 卡片是准确的
  * （事件里没有工具调用 ID）；从后往前找也天然适配计划执行期间的多条消息。
+ *
+ * **按请求自带的会话找**：授权可能来自后台会话，而用户此刻看的是另一条——
+ * 扫"当前会话"会标错卡片（改造前的行为）。
  */
-function markPendingToolCard(tool) {
-  if (!tool) return
-  const msgs = chatStore.messages
+function markPendingToolCard(tool, sid) {
+  if (!tool || !sid) return
+  const msgs = chatStore.messagesOf(sid)
   for (let mi = msgs.length - 1; mi >= 0; mi--) {
     const calls = msgs[mi].toolCalls || []
     for (let i = calls.length - 1; i >= 0; i--) {
       if (calls[i].status === 'running' && calls[i].name === tool) {
-        chatStore.updateToolCall(msgs[mi].id, calls[i].id, { status: 'pending' })
+        chatStore.updateToolCall(sid, msgs[mi].id, calls[i].id, { status: 'pending' })
         return
       }
     }
@@ -746,62 +799,75 @@ function markPendingToolCard(tool) {
 // 改造前这里只把 chatStore.isGenerating 置 false——纯客户端标志位，
 // 后端那一轮循环仍在跑、仍在写文件、仍在起子进程。
 async function stopGeneration() {
+  const sid = sessionId.value
+  if (!sid) return
   // 挂起的提问 / 授权：必须先结掉，否则后端还卡在等待里，"停止"看起来毫无反应。
   // 这两条是"用户在弹窗上的选择"，与"停止运行"是两件事，所以要前置处理。
+  // 都按当前会话结：结掉的是"这条会话正在等的那一条"。
   if (askStore.hasPending) {
-    await askStore.skip(sessionId.value)
+    await askStore.skip(sid)
   }
   if (permissionStore.hasPending) {
-    await permissionStore.cancel(sessionId.value)
+    await permissionStore.cancel(sid)
   }
 
   // 计划执行中：交给计划取消（后端是同一套取消机制，走软取消）
   if (planStore.executing && plan.value) {
     await planStore.cancel(plan.value.id)
-    stopping.value = true
+    setStopping(sid, true)
     return
   }
 
   const hard = stopping.value
   try {
-    const hit = await stopChat(sessionId.value, hard)
+    const hit = await stopChat(sid, hard)
     if (!hit) {
       // 后端已经没有在跑的运行：直接复位，避免按钮卡在"停止中"
-      chatStore.isGenerating = false
-      stopping.value = false
+      chatStore.markRunEnded(sid)
+      setStopping(sid, false)
       return
     }
-    stopping.value = true
+    setStopping(sid, true)
     if (hard) ui.notify('已强制停止', 'info')
   } catch (e) {
     ui.notify(`停止失败：${e.message || e}`, 'error')
   }
 }
 
-// 授权请求被应答后，把对应卡片从「等待授权」还原为「运行中」，
-// 终态（成功/失败）随后由 tool_call_end 事件覆盖
+// 授权请求状态变化时，把该会话对应的工具卡片标成 / 还原成对应状态。
+//
+// **按会话监听**（而不是监听"当前会话的 pending"）：授权可能来自后台会话，
+// 用户此刻看的是另一条——那样标记会落在错误的会话上；而且切会话本身也会让
+// "当前会话的 pending" 变化，会被误当成"授权已结束"。
+// 终态（成功/失败）随后由 tool_call_end 事件覆盖。
 watch(
-  () => permissionStore.pending,
-  (val, old) => {
-    // 新的等待授权请求：把对应工具卡片标成"等待授权"（从 store 派生，不再订阅事件——
-    // 事件通道的监听是进程级常驻的，组件卸载时不许去动它）
-    if (val && !old) {
-      markPendingToolCard(val.tool)
-      return
+  () => permissionStore.pendingSessionIds.join(','),
+  (now, before) => {
+    const nowIds = now ? now.split(',') : []
+    const beforeIds = before ? before.split(',') : []
+    for (const sid of nowIds) {
+      const req = permissionStore.pendingBySession[sid]
+      if (req) markPendingToolCard(req.tool, sid)
     }
-    if (val || !old) return
-    // 应答后把卡片还原为「运行中」，终态随后由 tool_call_end 覆盖。
-    // 不依赖 streamingMessageId：计划执行期间它是空的，但卡片同样需要还原。
-    for (const msg of chatStore.messages) {
-      if (!msg.toolCalls) continue
-      for (const tc of msg.toolCalls) {
-        if (tc.status === 'pending') {
-          chatStore.updateToolCall(msg.id, tc.id, { status: 'running' })
-        }
-      }
+    for (const sid of beforeIds) {
+      if (nowIds.includes(sid)) continue
+      restoreRunningCards(sid)
     }
   }
 )
+
+/** 把某会话里"等待授权"的卡片还原为"运行中"（授权已应答/超时/被停止） */
+function restoreRunningCards(sid) {
+  if (!sid) return
+  for (const msg of chatStore.messagesOf(sid)) {
+    if (!msg.toolCalls) continue
+    for (const tc of msg.toolCalls) {
+      if (tc.status === 'pending') {
+        chatStore.updateToolCall(sid, msg.id, tc.id, { status: 'running' })
+      }
+    }
+  }
+}
 
 // ===== 「/技能名」显式调用补全 =====
 //
@@ -870,7 +936,8 @@ function handleKeydown(e) {
   }
 }
 
-const streamingMessageId = ref(null)
+// 流式占位消息的 id 不再是组件级状态：它按运行存在局部变量里、消息本身活在
+// chat store 的会话桶中（见 sendMessage 里的说明）。
 
 function openDiff() {
   if (sessionId.value) {

@@ -202,6 +202,10 @@ export function ListPlans(arg1) {
   return window['go']['main']['App']['ListPlans'](arg1);
 }
 
+export function ListRunningSessions() {
+  return window['go']['main']['App']['ListRunningSessions']();
+}
+
 export function ListSessions() {
   return window['go']['main']['App']['ListSessions']();
 }

@@ -18,11 +18,13 @@ import {
   GetDiffTurns,
   ListSubagents,
   GetSubagentMessages,
+  ListRunningSessions,
   SaveAttachment,
   GetAttachmentDataURL,
   FetchImageURL,
 } from '@/../wailsjs/go/main/App'
 import { EventsOn, EventsOff } from '@/../wailsjs/runtime/runtime'
+import { subscribeChat } from '@/api/eventbus'
 import { putMockPlan } from '@/api/plan'
 import { DEFAULT_VIEW_MODE } from '@/types'
 
@@ -225,43 +227,25 @@ export async function chat(
   } = {}
 ) {
   if (isWails()) {
-    // 监听工具调用中间状态、流式分片、计划状态与授权请求事件
-    const eventHandler = (eventData) => {
-      if (!eventData) return
-      switch (eventData.type) {
-        case 'reply_delta':
-          onReplyDelta?.(eventData.reply)
-          break
-        case 'tool_call_start':
-          onToolCallStart?.(eventData.toolCall)
-          break
-        case 'tool_call_end':
-          onToolCallEnd?.(eventData.toolCall)
-          break
-        case 'plan_update':
-          onPlanUpdate?.(eventData.plan)
-          break
-        // 自动摘要压缩刚生效：用量会立刻下降。这是设计内行为，但用户只看到数字掉了一半，
-// 不解释一句就会以为对话被截断了。
-        case 'context_compacted':
-          onContextCompacted?.(eventData)
-          break
-        // 被用户停止（软取消或硬取消）：立即通知调用方收尾流式气泡，
-        // 否则它会一直停在"正在输入"的状态
-        case 'cancelled':
-          onCancelled?.(eventData.error)
-          break
-        // 授权请求 / 模型提问走独立的 user:interaction 通道（由 App.vue 统一订阅），
-        // 不在这里分发 —— 否则计划执行等入口会漏（详见 api/interaction.js 的说明）
-      }
-    }
-    EventsOn('chat:event', eventHandler)
+    // 按会话订阅运行事件（工具调用中间状态、流式分片、计划状态、压缩提示、取消）。
+    //
+    // 这里**不再**自己 EventsOn / finally EventsOff：Wails 的 EventsOff 会摘掉该事件名下的
+    // 全部监听，A 会话跑完会把 B 会话那次的监听一起摘掉（多会话并行时必然发生）。
+    // 现在统一由 api/eventbus.js 做进程级单订阅 + 按 sessionId 路由，详见那里的说明。
+    const off = subscribeChat(sessionId, {
+      onReplyDelta,
+      onToolCallStart,
+      onToolCallEnd,
+      onPlanUpdate,
+      onContextCompacted,
+      onCancelled,
+    })
 
     try {
       const result = await Chat(sessionId, query, !!stream, !!plan)
       return result
     } finally {
-      EventsOff('chat:event')
+      off()
     }
   }
 
@@ -509,7 +493,8 @@ export async function getDiffTurns(sessionId) {
 
 /**
  * 订阅 diff 实时更新事件
- * @param {Function} cb 回调，参数为 { diff, turn }
+ * @param {Function} cb 回调，参数为 { diff, turn, sessionId, runId }
+ *   —— sessionId 是归属：调用方必须把它写进对应会话的桶里，而不是"当前显示的那一份"。
  * @returns {Function} 取消订阅函数
  */
 export function onDiffUpdate(cb) {
@@ -531,6 +516,27 @@ export function onDiffUpdate(cb) {
 export async function stopChat(sessionId, hard = false) {
   if (isWails()) return await StopChat(sessionId, !!hard)
   return false // 浏览器 mock 模式没有真实运行可停
+}
+
+/**
+ * 列出当前有活跃运行的会话 ID（可能同时有多条）。
+ *
+ * 页面重载（wails dev 热更新 / 手动刷新）后，前端内存里的"哪条在跑"全丢了，
+ * 而后端的运行还在跑。用它把状态补回来——否则界面会把它们显示成空闲，
+ * 用户再点发送只会收到后端的互斥拒绝，看不出为什么。
+ *
+ * 只能补"在跑"这个事实，补不回已经流出去的那段文字（那只能靠事件流）。
+ *
+ * @returns {Promise<string[]>}
+ */
+export async function listRunningSessions() {
+  if (!isWails()) return []
+  try {
+    return (await ListRunningSessions()) || []
+  } catch (e) {
+    console.warn('查询运行中的会话失败:', e)
+    return []
+  }
 }
 
 /**
