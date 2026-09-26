@@ -143,6 +143,38 @@ export namespace main {
 		    return a;
 		}
 	}
+	export class Attachment {
+	    id: string;
+	    kind: string;
+	    name: string;
+	    mediaType: string;
+	    bytes: number;
+	    width?: number;
+	    height?: number;
+	    source?: string;
+	    changed?: boolean;
+	    path?: string;
+	    createdAt?: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new Attachment(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.kind = source["kind"];
+	        this.name = source["name"];
+	        this.mediaType = source["mediaType"];
+	        this.bytes = source["bytes"];
+	        this.width = source["width"];
+	        this.height = source["height"];
+	        this.source = source["source"];
+	        this.changed = source["changed"];
+	        this.path = source["path"];
+	        this.createdAt = source["createdAt"];
+	    }
+	}
 	export class AuditEntry {
 	    time: number;
 	    sessionId: string;
@@ -382,6 +414,7 @@ export namespace main {
 	    toolCalls?: ToolCall[];
 	    toolCallId?: string;
 	    createdAt: number;
+	    attachments?: Attachment[];
 	
 	    static createFrom(source: any = {}) {
 	        return new Message(source);
@@ -395,6 +428,7 @@ export namespace main {
 	        this.toolCalls = this.convertValues(source["toolCalls"], ToolCall);
 	        this.toolCallId = source["toolCallId"];
 	        this.createdAt = source["createdAt"];
+	        this.attachments = this.convertValues(source["attachments"], Attachment);
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -423,6 +457,7 @@ export namespace main {
 	    duration?: number;
 	    result?: string;
 	    files?: string[];
+	    images?: string[];
 	
 	    static createFrom(source: any = {}) {
 	        return new ToolCall(source);
@@ -437,6 +472,7 @@ export namespace main {
 	        this.duration = source["duration"];
 	        this.result = source["result"];
 	        this.files = source["files"];
+	        this.images = source["images"];
 	    }
 	}
 	export class ChatResult {
@@ -631,6 +667,18 @@ export namespace main {
 	        this.timeout = source["timeout"];
 	    }
 	}
+	export class LLMImage {
+	
+	
+	    static createFrom(source: any = {}) {
+	        return new LLMImage(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	
+	    }
+	}
 	export class LLMToolFunction {
 	    name: string;
 	    arguments: string;
@@ -684,6 +732,7 @@ export namespace main {
 	    content: string;
 	    tool_call_id?: string;
 	    tool_calls?: LLMToolCall[];
+	    images?: LLMImage[];
 	
 	    static createFrom(source: any = {}) {
 	        return new LLMMessage(source);
@@ -695,6 +744,7 @@ export namespace main {
 	        this.content = source["content"];
 	        this.tool_call_id = source["tool_call_id"];
 	        this.tool_calls = this.convertValues(source["tool_calls"], LLMToolCall);
+	        this.images = this.convertValues(source["images"], LLMImage);
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -1087,6 +1137,11 @@ export namespace main {
 	    contextSummary?: string;
 	    contextCoveredUpTo?: number;
 	    contextSummaryAt?: number;
+	    workingMemory?: string;
+	    workingMemoryUpTo?: number;
+	    surfacedMemoryIDs?: string[];
+	    ignoreMemory?: boolean;
+	    lastExtractMessageID?: string;
 	    parentId?: string;
 	    subagent?: SubagentInfo;
 	
@@ -1116,6 +1171,11 @@ export namespace main {
 	        this.contextSummary = source["contextSummary"];
 	        this.contextCoveredUpTo = source["contextCoveredUpTo"];
 	        this.contextSummaryAt = source["contextSummaryAt"];
+	        this.workingMemory = source["workingMemory"];
+	        this.workingMemoryUpTo = source["workingMemoryUpTo"];
+	        this.surfacedMemoryIDs = source["surfacedMemoryIDs"];
+	        this.ignoreMemory = source["ignoreMemory"];
+	        this.lastExtractMessageID = source["lastExtractMessageID"];
 	        this.parentId = source["parentId"];
 	        this.subagent = this.convertValues(source["subagent"], SubagentInfo);
 	    }

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -16,13 +17,113 @@ import (
 
 // ===== LLM 请求数据结构（OpenAI 兼容格式）=====
 
-// LLMMessage LLM API 的消息格式
+// LLMMessage LLM API 的消息格式。
+//
+// Images 是**协议中立**的载荷：这里只声明"这条消息带了这几张图"，
+// 具体拼成什么形状由各自的适配器决定（chat.go 的 MarshalJSON 负责 OpenAI 的
+// content 数组；anthropic.go 负责 image 块）。这一点很重要——两条协议对
+// "图片能出现在哪"的规定并不相同（见 buildLLMMessages 里工具结果那段说明）。
 type LLMMessage struct {
 	Role       string        `json:"role"`
 	Content    string        `json:"content"`
 	ToolCallID string        `json:"tool_call_id,omitempty"`
 	ToolCalls  []LLMToolCall `json:"tool_calls,omitempty"`
+	Images     []LLMImage    `json:"images,omitempty"`
 }
+
+// LLMImage 一次请求里携带的一张图片
+type LLMImage struct {
+	MediaType string `json:"-"`
+	Data      []byte `json:"-"`
+	// Bytes/Width/Height 只是元数据：Data 被清空（快照脱敏）之后，
+	// 界面上还要能显示"这里原本有一张多大的图"。
+	Bytes  int `json:"-"`
+	Width  int `json:"-"`
+	Height int `json:"-"`
+	// Redacted 为 true 时不做 base64 编码，只输出一行占位说明。
+	// 只有请求快照会置它——把几 MB 的图片塞进排障视图毫无意义。
+	Redacted bool `json:"-"`
+}
+
+// dataURL 拼成 data URL（OpenAI 兼容协议用这个形状传图）
+func (img LLMImage) dataURL() string {
+	mt := img.MediaType
+	if mt == "" {
+		mt = "image/png"
+	}
+	return "data:" + mt + ";base64," + base64.StdEncoding.EncodeToString(img.Data)
+}
+
+// describe 一行人类可读描述（脱敏占位与日志都用它）
+func (img LLMImage) describe() string {
+	dim := ""
+	if img.Width > 0 && img.Height > 0 {
+		dim = fmt.Sprintf("%d×%d，", img.Width, img.Height)
+	}
+	return fmt.Sprintf("图片已省略：%s%s，%.0f KB", dim, img.MediaType, float64(img.Bytes)/1024)
+}
+
+// imageOnlyTextPart 纯图片消息补的那个文本块。
+// 写成一句有信息量的话而不是空串：模型由此知道"用户只发了图、没别的话"，
+// 不至于反过来猜"用户是不是发了链接"。
+const imageOnlyTextPart = "（用户发来一张图片，没有附加文字）"
+
+// textPartFor 返回这条消息应当写入的文本块内容。
+//
+// **带图的消息必须同时带一个文本块**，哪怕用户一个字都没写。
+// 这是真机上踩出来的（见 docs/image-input-design.md §6.4）：同一次对话里，
+// 用户纯图片消息（内容数组里只有 image 块）模型读不到，而 read_image 工具结果的图
+// （带一句说明文本）能读到——两者的差别正是有没有文本块。
+// 多一个文本块对 OpenAI 与 Anthropic 两条协议都无害，缺了却可能整张图失效。
+func textPartFor(content string, images []LLMImage) string {
+	if len(images) == 0 || strings.TrimSpace(content) != "" {
+		return content
+	}
+	return imageOnlyTextPart
+}
+
+// MarshalJSON 序列化一条消息。
+//
+// 无图时走 plain 结构体——**输出必须与加 Images 字段之前逐字节一致**：
+// 请求快照、测试断言、各家网关都依赖这个形状。
+// 有图时 content 变成块数组（OpenAI 的视觉输入形状）：
+//
+//	{"role":"user","content":[{"type":"text","text":"..."},
+//	                          {"type":"image_url","image_url":{"url":"data:image/png;base64,..."}}]}
+//
+// 注意：只有 user 角色的消息会带图。工具产出的图由 buildLLMMessages 拆成一条
+// 独立的 user 消息承载——OpenAI 的 tool 消息 content 只能是字符串，塞数组会被网关拒。
+func (m LLMMessage) MarshalJSON() ([]byte, error) {
+	if len(m.Images) == 0 {
+		// 用一个没有方法的别名类型，避免 json.Marshal 再次进到本函数（无限递归）
+		type plain LLMMessage
+		return json.Marshal(plain(m))
+	}
+	parts := make([]map[string]interface{}, 0, len(m.Images)+1)
+	// textPartFor：纯图片消息也要补一个文本块（见该函数的说明）
+	if text := textPartFor(m.Content, m.Images); strings.TrimSpace(text) != "" {
+		parts = append(parts, map[string]interface{}{"type": "text", "text": text})
+	}
+	for _, img := range m.Images {
+		url := img.dataURL()
+		if img.Redacted {
+			url = img.describe()
+		}
+		parts = append(parts, map[string]interface{}{
+			"type":      "image_url",
+			"image_url": map[string]interface{}{"url": url},
+		})
+	}
+	out := map[string]interface{}{"role": m.Role, "content": parts}
+	if m.ToolCallID != "" {
+		out["tool_call_id"] = m.ToolCallID
+	}
+	if len(m.ToolCalls) > 0 {
+		out["tool_calls"] = m.ToolCalls
+	}
+	return json.Marshal(out)
+}
+
 
 // LLMToolCall LLM 返回的工具调用
 type LLMToolCall struct {
@@ -353,7 +454,10 @@ func callLLMStream(ctx context.Context, url, token string, req *LLMReq, onConten
 // startDeltaFlusher 启动文本分片节流推送器：
 // 首个分片立即推送，之后 50ms 或累计 ≥20 字符合并推送一次，避免高频 IPC。
 // 返回的 enqueue 非阻塞入队；调用方在流结束后调 shutdown 等待残余分片发完。
-func (a *App) startDeltaFlusher() (enqueue func(string), shutdown func()) {
+//
+// sessionID / runID 必须由调用方给出：这条 goroutine 是**脱离调用栈**推送的，
+// 它发出去的分片同样是"某次运行的输出"，前端要靠归属把它贴到正确的会话上。
+func (a *App) startDeltaFlusher(sessionID, runID string) (enqueue func(string), shutdown func()) {
 	ch := make(chan string, 256)
 	done := make(chan struct{})
 
@@ -368,8 +472,10 @@ func (a *App) startDeltaFlusher() (enqueue func(string), shutdown func()) {
 				return
 			}
 			wailsRuntime.EventsEmit(a.ctx, "chat:event", ChatEvent{
-				Type:  "reply_delta",
-				Reply: sb.String(),
+				Type:      "reply_delta",
+				SessionID: sessionID,
+				RunID:     runID,
+				Reply:     sb.String(),
 			})
 			sb.Reset()
 		}
@@ -412,10 +518,18 @@ func (a *App) startDeltaFlusher() (enqueue func(string), shutdown func()) {
 
 // ===== 对话流程（借鉴 01agent 的状态机，简化为循环）=====
 
-// ChatEvent 推送给前端的事件数据
 // ChatEvent 聊天过程事件（经 "chat:event" 通道推送给前端）
+//
+// **归属不变式**：所有事件都必须带 SessionID。前端只订阅一次这条进程级通道，
+// 再按 SessionID 分发给对应会话的视图状态；没有归属的事件在前端会被丢弃
+// （见 docs/session-scoped-events-design.md 的不变式 1 与 4）。
+// 为了让"忘记带归属"变成不可能，本包的出口只有两个：emitChatEvent 与 emitInteraction
+// （外加运行期的 runRecorder 实现），三者的签名都**强制**要求传会话 ID——
+// 漏传是编译错误，而不是运行期的静默串台。
 type ChatEvent struct {
 	Type      string     `json:"type"` // tool_call_start / tool_call_end / reply_delta / done / error / diff_update / plan_update / permission_request / ask_user
+	SessionID string     `json:"sessionId,omitempty"`
+	RunID     string     `json:"runId,omitempty"`
 	ToolCall  *ToolCall  `json:"toolCall,omitempty"`
 	Reply     string     `json:"reply,omitempty"`
 	Error     string     `json:"error,omitempty"`
@@ -452,7 +566,24 @@ const (
 	ChatEventContextCompacted = "context_compacted"
 )
 
-// emitChatEvent 向前端推送一个聊天事件（无 Wails 上下文时静默跳过）
+// emitChatEvent 向前端推送一个聊天事件（无 Wails 上下文时静默跳过）。
+//
+// sessionID / runID 由调用方显式给出，并在这里写进载荷：**归属只在出口盖一次章**，
+// 运行期事件走 runRecorder（见 agentrun.go），两条路都收敛到这几行。
+// 改成强制传参是刻意的：多会话并行下，"这条事件属于谁"没有默认值可猜。
+func (a *App) emitChatEvent(sessionID, runID string, ev ChatEvent) {
+	if a.ctx == nil {
+		return
+	}
+	if ev.SessionID == "" {
+		ev.SessionID = sessionID
+	}
+	if ev.RunID == "" {
+		ev.RunID = runID
+	}
+	wailsRuntime.EventsEmit(a.ctx, "chat:event", ev)
+}
+
 // EventUserInteraction 需要用户交互的阻塞式请求（授权 / 提问）专用事件名。
 //
 // 为什么不复用 "chat:event"：前端每次调用结束都会 EventsOff("chat:event")，而 Wails 的
@@ -468,9 +599,15 @@ const EventUserInteraction = "user:interaction"
 // 或只重建了一侧），就会出现"后端在新通道喊、前端在旧通道听"（或反之），
 // 表现为弹窗永不出现、工具卡片一直卡在"运行中"直到超时。
 // 两条通道都发，新前端听 user:interaction、旧前端听 chat:event，各自只收到一次。
-func (a *App) emitInteraction(ev ChatEvent) {
+//
+// 归属同样在这里盖章：前端要据此决定"这个弹窗是不是当前会话的"，
+// 并把它记到对应会话的挂起表里（后台会话的请求只出列表标记，不弹窗）。
+func (a *App) emitInteraction(sessionID string, ev ChatEvent) {
 	if a.ctx == nil {
 		return
+	}
+	if ev.SessionID == "" {
+		ev.SessionID = sessionID
 	}
 	wailsRuntime.EventsEmit(a.ctx, EventUserInteraction, ev)
 	wailsRuntime.EventsEmit(a.ctx, "chat:event", ev) // 兼容旧前端产物
@@ -478,11 +615,122 @@ func (a *App) emitInteraction(ev ChatEvent) {
 	fmt.Printf("[交互] 已推送 %s，等待界面应答（若弹窗没出现，请确认前端产物与二进制来自同一次构建）\n", ev.Type)
 }
 
-func (a *App) emitChatEvent(ev ChatEvent) {
-	if a.ctx == nil {
-		return
+// imageLoader 把消息里的附件引用读成可发送的图片。
+//
+// 返回 (图片, 载入失败的说明)。失败必须能被调用方看见并写进消息文本——
+// "图读不出来"和"这条消息本来就没有图"对模型是两件完全不同的事，
+// 静默跳过会让模型对着一张不存在的图瞎答。
+//
+// 这是一个**依赖注入点**而不是直接调 AttachmentStore：buildLLMMessages 是取消息序列的
+// 纯组装函数，测试可以传一个假 loader 精确构造"图片读取失败"这类场景。
+type imageLoader func(atts []Attachment) ([]LLMImage, []string)
+
+// LoadImages 读取一批附件，返回图片与逐条失败说明。
+// 接收者可以为 nil（未初始化附件存储）：此时返回空并在说明里点出原因，
+// 而不是静默返回空——生产链路漏传附件存储就会立刻显形，而不是表现为"图不见了"。
+func (s *AttachmentStore) LoadImages(atts []Attachment) ([]LLMImage, []string) {
+	if len(atts) == 0 {
+		return nil, nil
 	}
-	wailsRuntime.EventsEmit(a.ctx, "chat:event", ev)
+	if s == nil {
+		return nil, []string{fmt.Sprintf("（%d 张图片未能载入：附件存储未初始化）", len(atts))}
+	}
+	images := make([]LLMImage, 0, len(atts))
+	var notes []string
+	for _, att := range atts {
+		if att.Kind != "" && att.Kind != attachmentKindImage {
+			notes = append(notes, fmt.Sprintf("（附件 %s 类型不受支持，已忽略）", att.Describe()))
+			continue
+		}
+		data, err := s.Load(att)
+		if err != nil {
+			notes = append(notes, fmt.Sprintf("（图片 %s 未能载入：%v）", att.Describe(), err))
+			// 同步打一行日志：消息里那句"未能载入"用户未必会看，
+			// 而"附件没落盘"与"附件落盘了但读不回来"是两种完全不同的故障，日志是第一现场。
+			fmt.Printf("[附件] 读取失败 id=%s name=%q path=%q: %v\n", att.ID, att.Name, att.Path, err)
+			continue
+		}
+		images = append(images, LLMImage{
+			MediaType: att.MediaType,
+			Data:      data,
+			Bytes:     len(data),
+			Width:     att.Width,
+			Height:    att.Height,
+		})
+	}
+	return images, notes
+}
+
+// resolveImages 走 loader 读图，并把失败说明拼成一行附注。
+func resolveImages(loader imageLoader, atts []Attachment) ([]LLMImage, string) {
+	if len(atts) == 0 {
+		return nil, ""
+	}
+	if loader == nil {
+		// 没有 loader 说明这条链路不携带图片。仍然显式说一句：
+		// 日后若有人在生产路径漏传 loader，现象会是"图没了但有提示"，而不是无声无息。
+		return nil, fmt.Sprintf("（有 %d 张图片未能载入：当前链路未装配附件存储）", len(atts))
+	}
+	images, notes := loader(atts)
+	if len(notes) == 0 {
+		return images, ""
+	}
+	return images, strings.Join(notes, "；")
+}
+
+// toolImageNote 工具产图时那条附注：把图与"它是哪个工具给的"绑在一起。
+// 少了这句，模型只看到一张孤立的图，无从判断它从哪来、该拿它做什么。
+func toolImageNote(toolName string) string {
+	if strings.TrimSpace(toolName) == "" {
+		return "（以下是上面工具返回的图片）"
+	}
+	return fmt.Sprintf("（以下是 %s 返回的图片）", toolName)
+}
+
+// appendNote 把一行附注接到消息文本上（原本没有正文时就直接作为正文）
+func appendNote(content, note string) string {
+	if strings.TrimSpace(content) == "" {
+		return note
+	}
+	return strings.TrimRight(content, "\n") + "\n" + note
+}
+
+// appendToolResultMessages 追加一次工具结果：先文本，再（若有图）一条承载图片的 user 消息。
+//
+// 这个形状由两条协议的硬约束逼出来，所以不能让调用方各写一份：
+//   - OpenAI 的 tool 消息 content 只能是字符串，塞数组会被网关直接拒；
+//   - Anthropic 的 tool_result 块本身能装图片，而适配器会把相邻的同角色消息并进同一个
+//     user 回合（见 appendAnthropicMessage）——那条 user 消息于是自动并进 tool_result
+//     所在的那一轮，不会多出一个回合。
+//
+// **两处必须共用它**：工具循环（运行中刚产生的这条结果）与 buildLLMMessages
+// （下一轮从会话重建的同一批历史）。各写一份的话，第二轮请求里的这条消息就会与
+// 第一轮长得不一样——而人只有在"图片突然不见了"时才会发现。
+func appendToolResultMessages(messages []LLMMessage, toolName, content, toolCallID string,
+	atts []Attachment, loader imageLoader) []LLMMessage {
+
+	images, note := resolveImages(loader, atts)
+	if note != "" {
+		content = appendNote(content, note)
+	}
+	messages = append(messages, LLMMessage{Role: RoleTool, Content: content, ToolCallID: toolCallID})
+	if len(images) > 0 {
+		messages = append(messages, LLMMessage{
+			Role:    RoleUser,
+			Content: toolImageNote(toolName),
+			Images:  images,
+		})
+	}
+	return messages
+}
+
+// countImages 统计消息序列里一共带了几张图（排障日志用）
+func countImages(messages []LLMMessage) int {
+	n := 0
+	for _, m := range messages {
+		n += len(m.Images)
+	}
+	return n
 }
 
 // buildLLMMessages 从历史消息构造 LLM messages 数组
@@ -490,10 +738,18 @@ func (a *App) emitChatEvent(ev ChatEvent) {
 // systemPrompt 由调用方拼接（基础人设 + L1 技能清单 + 强制注入正文）
 // 约定：当前这条用户输入（普通聊天由前端、计划步骤由执行器）已持久化在 history 末尾，
 // 此处不再重复追加，避免同一句话在模型上下文中出现两次。
-func buildLLMMessages(history []Message, systemPrompt string) []LLMMessage {
+//
+// loader 是附件读取口（可为 nil，见 imageLoader 的说明）。
+// 这里是**唯一**把 Message.Attachments 变成协议图片的地方——用户贴的图与工具读到的图
+// 走的是同一条路，因此"怎么存"与"怎么发"各自只有一处实现。
+func buildLLMMessages(history []Message, systemPrompt string, loader imageLoader) []LLMMessage {
 	messages := []LLMMessage{
 		{Role: RoleSystem, Content: systemPrompt},
 	}
+
+	// tool_call_id → 工具名。工具结果消息本身不带工具名，而"这是谁返回的图"
+	// 恰恰是模型最需要的上下文，只能从前面那条 assistant(tool_calls) 里反查。
+	toolNames := map[string]string{}
 
 	// 添加历史消息
 	for _, msg := range history {
@@ -518,9 +774,23 @@ func buildLLMMessages(history []Message, systemPrompt string) []LLMMessage {
 						Arguments: string(argsBytes),
 					},
 				})
+				toolNames[tc.ID] = tc.Name
 			}
 			m.ToolCalls = calls
 		}
+
+		if msg.Role == RoleTool {
+			// 工具结果（可能带图）固定走同一个追加函数
+			messages = appendToolResultMessages(messages, toolNames[msg.ToolCallID],
+				m.Content, m.ToolCallID, msg.Attachments, loader)
+			continue
+		}
+
+		images, note := resolveImages(loader, msg.Attachments)
+		if note != "" {
+			m.Content = appendNote(m.Content, note)
+		}
+		m.Images = images
 		messages = append(messages, m)
 	}
 
@@ -544,8 +814,13 @@ func (a *App) executeChat(sessionID, query string, useStream bool) *ChatResult {
 	if err != nil {
 		return &ChatResult{Error: err.Error()}
 	}
-	// 登记为可取消的运行：前端「停止」经 StopChat 命中它（软取消 / 硬取消）
-	run := a.runs.begin(sessionID, "")
+	// 登记为可取消的运行：前端「停止」经 StopChat 命中它（软取消 / 硬取消）。
+	// 用 beginExclusive：同一会话已经在跑时直接拒绝——多会话并行是允许的，
+	// 同一会话并行会互相破坏消息序列与 diff 归因（见 errSessionBusy 的说明）。
+	run, berr := a.runs.beginExclusive(sessionID, "")
+	if berr != nil {
+		return &ChatResult{Error: berr.Error()}
+	}
 	defer a.runs.end(run)
 	return runToolLoop(a.newMainAgentRun(run, session, dir, prompt, &model, useStream, false))
 }
@@ -564,6 +839,22 @@ func (a *App) buildBasePrompt(session *Session, dir string) string {
 		"读写文件请用 read_file / write_file / edit_file（相对路径相对于工作区目录）；" +
 		"查找文件用 glob、搜索内容用 grep、查看目录用 list_dir。这些工具要么只读、要么按路径精确操作，" +
 		"比 shell 命令更安全，也不会被 shell 语法（引号、重定向、命令替换）影响。\n" +
+		"要看**图片**的内容（截图、报错图、设计稿、图表）用 read_image——read_file 只返回文本、读不了二进制，" +
+		"而 read_image 会把图作为图像内容交给你，你可以直接描述和分析其中内容。\n" +
+		// 这条是实测补上的：真机上曾出现"消息里只有一串图片 URL"的情况（粘贴没落到图片通道），
+		// 而模型当时声称「让我尝试通过工具下载或查看它」，白耗一轮之后还是要用户重来。
+		// 把事实写清楚，模型就不会假装有抓取能力。
+		"用户贴的图片会**作为图像内容**直接出现在消息里，你直接就能看到，不需要任何工具。" +
+		// 这段是实测改的。原来的写法说"你没有抓取外部链接的能力，不要花轮次尝试"——
+		// 那是错的：exec_shell 就在工具列表里，curl 真能跑通，模型也因此真的去下载了。
+		// 把能力说清楚、并给出边界，比说一句不成立的话更有效。
+		"顺序上先看消息里**有没有图像内容**：有图就直接看，不要再去下载任何链接。" +
+		"只有当消息里只有一个链接、完全没有图像内容时，才考虑取图——你可以用 exec_shell 跑 curl " +
+		"把它下载到工作区再用 read_image 看（会按 exec_shell 的权限规则询问）；" +
+		"但链接未必指向用户这次想给你看的那张图（它可能来自更早的对话），所以动手前先跟用户确认一句。" +
+		"read_image 只能读工作区内的文件，读不了 URL。" +
+		"另外，如果你收到一条本该带图的消息却看不到任何图像内容，就如实说「我这边没有收到图像内容」，" +
+		"**不要编造原因**（例如猜用户发的是链接、或说图太大）；用户可以用 /vision 自检模型能不能看图。\n" +
 		"exec_shell 留给构建、测试、git 等真正的命令；不要用它做 cat / sed -i / echo > 这类文件读写。\n" +
 		"遇到会产生大量中间过程、且与当前主线关系不大的任务（把一个模块摸清楚、独立调研一个问题），" +
 		"可以用 spawn_agent 派一个子代理去做：它有自己独立的上下文，你只收到一份结论，" +
@@ -582,7 +873,9 @@ func (a *App) buildBasePrompt(session *Session, dir string) string {
 		"已经确认过的命令也不要再跑一遍去'再验证'。\n" +
 		"4. 先用 glob / grep 定位到具体文件与行，再 read_file 精读；不要盲目通读整个目录。\n" +
 		"5. 上面「工具使用偏好」里已点名的工具都可直接调用，不必先经 tool_router 去 list / describe；" +
-		"只有不确定有哪些工具、或不确定某工具的完整参数时，才用 tool_router 发现。"
+		"只有不确定有哪些工具、或不确定某工具的完整参数时，才用 tool_router 发现。\n" +
+		"跨会话偏好与项目事实用 memory_search 查阅、memory_save 写入、memory_forget 删除；" +
+		"不要用 write_file 去改记忆目录。"
 
 	if a.skillStore != nil {
 		enabled := a.enabledSkillsForSession(session)
@@ -591,6 +884,9 @@ func (a *App) buildBasePrompt(session *Session, dir string) string {
 				"当请求与下列技能的描述匹配时，先调用 read_skill 取回该技能的完整说明，再按说明执行；" +
 				"技能自带的 references/ 文档用 read_skill_file 读取，scripts/ 下的脚本用 exec_shell 执行：\n" + idx
 		}
+	}
+	if mem := a.memoryIndexBlock(session); mem != "" {
+		prompt += "\n\n" + mem
 	}
 	return prompt
 }
@@ -602,14 +898,14 @@ func (a *App) buildBasePrompt(session *Session, dir string) string {
 func (a *App) buildBasePromptWithSkill(session *Session, dir, query string) (string, error) {
 	prompt := a.buildBasePrompt(session, dir)
 	if a.skillStore == nil {
-		return prompt, nil
+		return a.attachMemoryRecall(session, query, prompt), nil
 	}
 	res := a.skillStore.ResolveSkillCommand(query)
 	if res.Reason != "" {
 		return "", fmt.Errorf("%s", res.Reason)
 	}
 	if !res.Ok || res.Skill == nil {
-		return prompt, nil
+		return a.attachMemoryRecall(session, query, prompt), nil
 	}
 	// 会话白名单同样约束显式调用：本会话没开放的技能不该被 /名称 绕过
 	if !a.skillAllowedInSession(session, res.Skill.ID) {
@@ -619,7 +915,7 @@ func (a *App) buildBasePromptWithSkill(session *Session, dir, query string) (str
 	if err != nil {
 		return "", err
 	}
-	return prompt + BuildExplicitSkillBlock(res.Skill, body), nil
+	return a.attachMemoryRecall(session, query, prompt+BuildExplicitSkillBlock(res.Skill, body)), nil
 }
 
 // skillAllowedInSession 会话技能白名单是否放行该技能（白名单为空=全部放行）
@@ -702,7 +998,16 @@ func runToolLoop(ar *agentRun) *ChatResult {
 
 	// 3. 组装发给模型的消息序列：摘要前缀替换（若会话有生效摘要）+ 单条工具结果预算。
 	//    compact=true 是降级/调试开关，强制走确定性截断，不是常规路径。
-	messages := buildRunMessages(session, systemPrompt, compact)
+	//
+	// 先补系统提示词那句话说（如果 /vision 已证明这个模型看不到图）：
+	// 放在 buildRunMessages **之前**，循环内部每次重建 messages 都会继承它。
+	if ar.VisionUnsupported {
+		systemPrompt += visionUnsupportedNote
+	}
+	messages := buildRunMessages(session, systemPrompt, compact, ar.Attachments.LoadImages)
+	// 一行日志：**本次请求实际带了几张图**。
+	// "贴了图没进来 / 进来了没发出去"这两类故障长得很像，而这一行就能当场分辨。
+	fmt.Printf("[请求] 会话 %s：携带 %d 张图片，共 %d 条消息\n", sessionID, countImages(messages), len(messages))
 
 	// 4. 工具视图由调用方装配（见 newMainAgentRun）。
 	// 这里是子代理唯一需要与主会话不同的地方——它要用自己的权限网关与工具子集，
@@ -763,14 +1068,14 @@ func runToolLoop(ar *agentRun) *ChatResult {
 			case out.Degraded:
 				fmt.Printf("[context] 摘要不可用，本run改用确定性截断: %s\n", out.Reason)
 				summaryBroken = true
-				messages = buildRunMessages(session, systemPrompt, true)
+				messages = buildRunMessages(session, systemPrompt, true, ar.Attachments.LoadImages)
 				ctxStat = contextStatOf(session, messages, window, nil, toolTokens, calib)
 			case !out.Compressed:
 				fmt.Printf("[context] 未压缩: %s\n", out.Reason)
 			default:
 				if s2, e2 := ar.Store.GetSession(sessionID); e2 == nil {
 					session = s2
-					messages = buildRunMessages(session, systemPrompt, compact)
+					messages = buildRunMessages(session, systemPrompt, compact, ar.Attachments.LoadImages)
 					anchor = nil
 					ctxStat = contextStatOf(session, messages, window, nil, toolTokens, calib)
 					compactedThisTurn = true
@@ -833,7 +1138,7 @@ func runToolLoop(ar *agentRun) *ChatResult {
 					if cerr == nil && out.Compressed {
 						if s2, e2 := ar.Store.GetSession(sessionID); e2 == nil {
 							session = s2
-							messages = buildRunMessages(session, systemPrompt, compact)
+							messages = buildRunMessages(session, systemPrompt, compact, ar.Attachments.LoadImages)
 							anchor = nil
 							fmt.Printf("[context] 上下文超限，已摘要压缩（覆盖 %d 条消息）后重试\n", out.CoveredMsgs)
 							// 超限才压缩说明前面的阈值判断没兜住，用户更该知道
@@ -852,7 +1157,7 @@ func runToolLoop(ar *agentRun) *ChatResult {
 					}
 				}
 				// 摘要压不出来（消息太少 / 摘要器不可用）：退回确定性截断再试一次
-				messages = buildRunMessages(session, systemPrompt, true)
+				messages = buildRunMessages(session, systemPrompt, true, ar.Attachments.LoadImages)
 				anchor = nil
 				fmt.Printf("[context] 上下文超限，改用确定性截断后重试\n")
 				continue
@@ -894,6 +1199,9 @@ func runToolLoop(ar *agentRun) *ChatResult {
 			// === 持久化 assistant 消息（含 tool_calls 记录）===
 			// 先执行所有工具，收集执行记录，再持久化 assistant 消息
 			var executedToolCalls []ToolCall
+			// 本次轮次里"哪次工具调用产出了哪些图"。工具结果消息要靠它挂上附件——
+			// 组装下一轮请求时读的正是那份附件，而不是这里的临时变量。
+			producedByCall := map[string][]Attachment{}
 
 			for _, tc := range choice.Message.ToolCalls {
 				var args map[string]interface{}
@@ -919,6 +1227,9 @@ func runToolLoop(ar *agentRun) *ChatResult {
 				ar.Diff.NoteActivity(sessionID, dir, false)
 				// 执行工具：必须传运行 ctx —— 硬取消靠它切断权限等待、子进程与在途请求
 				result, execErr := toolView.ExecuteToolCtx(run.Ctx(), tc.Function.Name, args)
+				// 立刻取走本次调用产出的图片（read_image 之类）：收集器是整个工具视图共用的，
+				// 中间不取走就再也分不清哪张图是哪次调用产的。
+				producedImages := toolView.TakeImages()
 				ar.Diff.NoteActivity(sessionID, dir, true)
 				// 子代理在本次调用期间改的文件不该算作本会话的改动（见 runSubagent 与
 				// runControl.noteExcludedPaths）。剔除必须放在这里——归因是上面这一句
@@ -933,6 +1244,11 @@ func runToolLoop(ar *agentRun) *ChatResult {
 						files = append(files, c.Rel)
 					}
 					toolCallRecord.Files = files
+				}
+				// 产出的图片：卡片上挂 ID（界面画缩略图），消息上挂完整引用（组装请求时用）
+				if len(producedImages) > 0 {
+					toolCallRecord.Images = attachmentIDs(producedImages)
+					producedByCall[tc.ID] = producedImages
 				}
 
 				if execErr != nil {
@@ -994,9 +1310,10 @@ func runToolLoop(ar *agentRun) *ChatResult {
 				}
 
 				toolMsg := Message{
-					Role:       RoleTool,
-					Content:    toolContent,
-					ToolCallID: tc.ID,
+					Role:        RoleTool,
+					Content:     toolContent,
+					ToolCallID:  tc.ID,
+					Attachments: producedByCall[tc.ID],
 				}
 				savedTool, err := ar.Store.AppendMessage(sessionID, toolMsg)
 				if err != nil {
@@ -1007,12 +1324,11 @@ func runToolLoop(ar *agentRun) *ChatResult {
 					}
 				}
 				persistedMsgs = append(persistedMsgs, *savedTool)
-				// 同步到内存消息列表
-				messages = append(messages, LLMMessage{
-					Role:       RoleTool,
-					Content:    toolContent,
-					ToolCallID: tc.ID,
-				})
+				// 同步到内存消息列表。**必须走 appendToolResultMessages**：它与下一轮
+				// 从会话重建出来的那条结果形状完全一致（工具文本 + 承载图片的 user 消息）。
+				// 这里手写一遍的话，本轮与下一轮的请求序列就会不一样。
+				messages = appendToolResultMessages(messages, tc.Function.Name, toolContent, tc.ID,
+					producedByCall[tc.ID], ar.Attachments.LoadImages)
 			}
 
 			// 继续循环，重新调用 LLM（带工具结果）
@@ -1083,14 +1399,19 @@ func runToolLoop(ar *agentRun) *ChatResult {
 // ===== Plan & Execute（规划-执行模式）=====
 
 // emitPlanUpdate 推送计划状态变更事件（plan_update，全量携带最新计划）
+//
+// 归属直接取自计划本身（plan.SessionID）：调用点分布很广（规划、执行、取消、异常收尾），
+// 让它们各自记住"这条计划属于哪个会话"是多余的，计划里本来就写着。
 func (a *App) emitPlanUpdate(plan *Plan, stepIndex int) {
-	if a.ctx != nil {
-		wailsRuntime.EventsEmit(a.ctx, "chat:event", ChatEvent{
-			Type:      "plan_update",
-			Plan:      plan,
-			StepIndex: stepIndex,
-		})
+	if a.ctx == nil || plan == nil {
+		return
 	}
+	wailsRuntime.EventsEmit(a.ctx, "chat:event", ChatEvent{
+		Type:      "plan_update",
+		SessionID: plan.SessionID,
+		Plan:      plan,
+		StepIndex: stepIndex,
+	})
 }
 
 // ChatPlan 规划流程：调用规划器产出结构化计划（或平凡请求直答）。
@@ -1113,7 +1434,10 @@ func (a *App) ChatPlan(sessionID, query string, useStream bool) *ChatResult {
 
 	// 登记为可取消的运行：规划期的 LLM 调用同样要能被停止
 	// （硬取消会断开在途的规划请求，而不是让用户白等一次 120s 超时）
-	run := a.runs.begin(sessionID, "")
+	run, berr := a.runs.beginExclusive(sessionID, "")
+	if berr != nil {
+		return &ChatResult{Error: berr.Error()}
+	}
 	defer a.runs.end(run)
 
 	// 2. 规划器调用：无工具、非流式、低温；失败重试一次
@@ -1211,7 +1535,11 @@ func (a *App) executePlan(planID string, useStream bool) (result *ChatResult) {
 
 	// 3. 登记为可取消的运行。计划执行与普通聊天共用同一套取消机制
 	// （原先自己一套 planCancels），因此 CancelPlan 也能升级为硬取消。
-	run := a.runs.begin(plan.SessionID, planID)
+	// 同样是互斥登记：计划在执行时，这条会话不该再接受第二次发送。
+	run, berr := a.runs.beginExclusive(plan.SessionID, planID)
+	if berr != nil {
+		return &ChatResult{Error: berr.Error()}
+	}
 	defer a.runs.end(run)
 	checkCancel := func() bool { return run.SoftRequested() }
 
@@ -1290,7 +1618,7 @@ func (a *App) executePlan(planID string, useStream bool) (result *ChatResult) {
 			return &ChatResult{Plan: plan, Error: step.Error}
 		}
 
-		sys := buildPlanSystemPrompt(basePrompt, plan, step)
+		sys := buildPlanSystemPrompt(a.attachMemoryRecall(session, buildPlanStepQuery(plan, step), basePrompt), plan, step)
 		res := runToolLoop(a.newMainAgentRun(run, session, dir, sys, &model, useStream, true /*compact*/))
 
 		// 步骤中途取消：按本步实际结果落状态，计划置 cancelled

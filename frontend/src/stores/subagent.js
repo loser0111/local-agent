@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import { listSubagents, getSubagentMessages, onSubagentEvent } from '@/api/session'
+import { useSessionStore } from '@/stores/session'
 
 /**
  * 子代理 Store（spawn_agent 派生的代理）
@@ -11,31 +12,39 @@ import { listSubagents, getSubagentMessages, onSubagentEvent } from '@/api/sessi
  * "以 runId 为准做 upsert"：实时事件只带概况，拉取回来的那份是权威。
  *
  * 列表里的历史记录来自子代理的会话文件（后端已落盘），因此应用重启后依然在。
+ *
+ * 列表按**父会话**分桶：事件是全局广播的（带 parentId），多会话并行时
+ * A 的子代理进度不该出现在 B 的面板里；分桶还让"切走再切回"立刻是热的，
+ * 而不是先空一下再等一次拉取。
  */
 export const useSubagentStore = defineStore('subagent', () => {
-  const runs = ref([])
+  const sessionStore = useSessionStore()
+
+  // parentId -> SubagentInfo[]
+  const runsByParent = ref({})
   const loadedSessionId = ref(null)
   const loading = ref(false)
   const expanded = ref({}) // runId -> 是否展开
   const messages = ref({}) // runId -> Message[]
   const messagesLoading = ref({}) // runId -> 是否正在拉消息
 
+  const runs = computed(() => runsByParent.value[sessionStore.currentSessionId] || [])
+  const runningCount = computed(() => runs.value.filter((r) => r.status === 'running').length)
+
   // 全局只订阅一次：事件是应用级的，而面板可能反复开关
   let unsubscribed = null
-
-  const runningCount = computed(() => runs.value.filter((r) => r.status === 'running').length)
 
   /** 加载某主会话的子代理列表（打开面板时调用；同时挂上实时进度订阅） */
   async function load(sessionId) {
     subscribe()
     if (!sessionId) {
-      runs.value = []
       loadedSessionId.value = null
       return
     }
     loading.value = true
     try {
-      runs.value = (await listSubagents(sessionId)) || []
+      const list = (await listSubagents(sessionId)) || []
+      runsByParent.value = { ...runsByParent.value, [sessionId]: list }
       loadedSessionId.value = sessionId
     } catch (e) {
       console.error('加载子代理列表失败:', e)
@@ -53,14 +62,14 @@ export const useSubagentStore = defineStore('subagent', () => {
     unsubscribed = onSubagentEvent(applyEvent)
   }
 
-  /** 处理一条实时概况（按 runId 合并） */
+  /** 处理一条实时概况（按 runId 合并进它所属父会话的桶） */
   function applyEvent(info) {
-    if (!info || !info.runId) return
-    // 事件是全局的：只接受当前面板所在会话的（后端可能同时在跑别的会话的子代理）
-    if (loadedSessionId.value && info.parentId !== loadedSessionId.value) return
-    const idx = runs.value.findIndex((r) => r.runId === info.runId)
-    if (idx > -1) runs.value[idx] = { ...runs.value[idx], ...info }
-    else runs.value.unshift(info)
+    if (!info || !info.runId || !info.parentId) return
+    const list = (runsByParent.value[info.parentId] || []).slice()
+    const idx = list.findIndex((r) => r.runId === info.runId)
+    if (idx > -1) list[idx] = { ...list[idx], ...info }
+    else list.unshift(info)
+    runsByParent.value = { ...runsByParent.value, [info.parentId]: list }
   }
 
   /** 展开/收起某个子代理；展开时按需拉取它的消息流 */
@@ -91,14 +100,17 @@ export const useSubagentStore = defineStore('subagent', () => {
     if (messages.value[runId]) delete messages.value[runId]
   }
 
-  function clear() {
-    runs.value = []
-    expanded.value = {}
-    messages.value = {}
-    loadedSessionId.value = null
+  /** 丢弃某父会话的列表（删除会话时调用，避免桶一直留着） */
+  function clear(sessionId = sessionStore.currentSessionId) {
+    if (!sessionId) return
+    const next = { ...runsByParent.value }
+    delete next[sessionId]
+    runsByParent.value = next
+    if (loadedSessionId.value === sessionId) loadedSessionId.value = null
   }
 
   return {
+    runsByParent,
     runs,
     loading,
     expanded,

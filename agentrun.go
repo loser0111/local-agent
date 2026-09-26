@@ -42,6 +42,14 @@ type agentRun struct {
 	Diff    *DiffService
 	Changes *FileChangeLog
 	ReqLog  *llmRequestLog
+	// Attachments 附件存储（会话里的图片）。循环用它把消息上的附件引用读成
+	// 发给模型的图片；为 nil 时图片会以"未能载入"的文字说明出现在消息里，
+	// 而不是静默消失（见 imageLoader 的说明）。
+	Attachments *AttachmentStore
+	// VisionUnsupported 该会话的模型**已被 /vision 证明**看不到图。
+	// 为 true 时循环会往系统提示词里补一句实话，避免模型在收不到图时去 curl 下载、
+	// 编造图片内容、或让用户另存文件（三种行为在真机上都出现过）。
+	VisionUnsupported bool
 
 	// Compactor 摘要式压缩。为 nil 表示本次运行不做摘要压缩——
 	// 子代理应当关掉它：多条运行同时去改同一份会话的摘要字段会互相打架。
@@ -69,9 +77,15 @@ type runRecorder interface {
 	FlushStream() (enqueue func(string), shutdown func())
 }
 
-// appRecorder 主会话的 recorder：推给 wails 事件通道
+// appRecorder 主会话的 recorder：推给 wails 事件通道。
+//
+// sessionID / runID 在构造时钉死（而不是发射时去问 App"当前是哪个会话"——
+// App 根本没有这个概念，多会话并行时也不该有）：运行期十几处 Recorder.Emit 因此
+// 自动获得归属，不需要每处都记得传。
 type appRecorder struct {
-	app *App
+	app       *App
+	sessionID string
+	runID     string
 }
 
 // Emit 推送聊天事件
@@ -79,7 +93,7 @@ func (r *appRecorder) Emit(ev ChatEvent) {
 	if r == nil || r.app == nil {
 		return
 	}
-	r.app.emitChatEvent(ev)
+	r.app.emitChatEvent(r.sessionID, r.runID, ev)
 }
 
 // EmitDiff 推送差异更新
@@ -88,9 +102,11 @@ func (r *appRecorder) EmitDiff(files []DiffFile, turn int) {
 		return
 	}
 	wailsRuntime.EventsEmit(r.app.ctx, "diff:update", ChatEvent{
-		Type: "diff_update",
-		Diff: files,
-		Turn: turn,
+		Type:      "diff_update",
+		SessionID: r.sessionID,
+		RunID:     r.runID,
+		Diff:      files,
+		Turn:      turn,
 	})
 }
 
@@ -99,7 +115,7 @@ func (r *appRecorder) FlushStream() (func(string), func()) {
 	if r == nil || r.app == nil {
 		return func(string) {}, func() {}
 	}
-	return r.app.startDeltaFlusher()
+	return r.app.startDeltaFlusher(r.sessionID, r.runID)
 }
 
 // newMainAgentRun 组装主会话的一次运行。
@@ -123,6 +139,7 @@ func (a *App) newMainAgentRun(run *runControl, session *Session, dir, systemProm
 		ProjectDir:    dir,
 		SessionID:     sessionID,
 		Changes:       a.fileChanges,
+		Attachments:   a.attachments,
 		Enforcer:      a.newPermissionEnforcer(session, dir),
 		// ask_user 的回路：绑定当前会话（阻塞等待用户作答后把结果回填给模型）
 		Ask: func(ctx context.Context, req AskRequest) (AskAnswer, error) {
@@ -132,6 +149,12 @@ func (a *App) newMainAgentRun(run *runControl, session *Session, dir, systemProm
 		// 子代理自己的视图刻意不设这个回调，于是它无法再次派生（禁止嵌套）。
 		SpawnAgent: func(ctx context.Context, task string, maxTurns int) (*SubagentResult, error) {
 			return a.runSubagent(run, session, dir, model, task, maxTurns)
+		},
+		Memory:        a.memory,
+		MemoryProject: memoryProjectSlug(session.Project),
+		IgnoreMemory:  session.IgnoreMemory || !a.memoryEnabled(),
+		OnMemoryTouch: func(ids []string) {
+			_ = a.sessionStore.AddSurfacedMemoryIDs(sessionID, ids)
 		},
 	})
 
@@ -151,8 +174,12 @@ func (a *App) newMainAgentRun(run *runControl, session *Session, dir, systemProm
 		Diff:         a.diffService,
 		Changes:      a.fileChanges,
 		ReqLog:       a.reqLog,
-		Compactor:    a.compactSession,
-		TokenCalib:   a.tokenCalib,
-		Recorder:     &appRecorder{app: a},
+		Attachments:  a.attachments,
+		// "这个模型看不到图"是**已测出来的事实**（/vision），不是猜测；
+		// 且与端点绑定（换了 ModelID/URL 就自动失效，见 VisionVerdictStore.Get）。
+		VisionUnsupported: a.visionVerdicts.Unsupported(session.Model, modelCallID(model), model.URL),
+		Compactor:         a.compactSession,
+		TokenCalib:        a.tokenCalib,
+		Recorder:          &appRecorder{app: a, sessionID: sessionID, runID: runID},
 	}
 }

@@ -1,11 +1,40 @@
 <script setup>
 import { ref, computed, watch } from 'vue'
+import { useSessionStore } from '@/stores/session'
+import { useChatStore } from '@/stores/chat'
 
 const props = defineProps({
   toolCall: { type: Object, required: true },
   // Verbose 视图模式下默认展开参数与输出（完整展示工具调用过程）
   defaultExpanded: { type: Boolean, default: false },
 })
+
+const sessionStore = useSessionStore()
+const chatStore = useChatStore()
+
+// ===== 工具产出的图片（目前只有 read_image）=====
+//
+// 只存了附件 ID（见 ToolCall.Images）；data URL 按需向后端要，并由 chat store 按
+// `${会话ID}:${附件ID}` 缓存——同一张图在多个轮次里被读到时不重复取。
+const imageIds = computed(() => props.toolCall.images || [])
+const imageUrls = ref({})
+
+watch(
+  () => [sessionStore.currentSessionId, imageIds.value.join(',')],
+  async () => {
+    const sid = sessionStore.currentSessionId
+    if (!sid || !imageIds.value.length) return
+    let changed = false
+    const next = { ...imageUrls.value }
+    for (const id of imageIds.value) {
+      if (next[id] !== undefined) continue
+      next[id] = await chatStore.loadAttachmentUrl(sid, id)
+      changed = true
+    }
+    if (changed) imageUrls.value = next
+  },
+  { immediate: true }
+)
 
 // 用户是否手动切换过（手动操作后不再跟随视图模式）
 const userToggled = ref(false)
@@ -69,6 +98,7 @@ const friendlyName = computed(() => {
     glob: '查找文件',
     grep: '搜索内容',
     list_dir: '列出目录',
+    read_image: '查看图片',
   }
   return map[props.toolCall.name] || props.toolCall.name
 })
@@ -103,6 +133,16 @@ const argSummary = computed(() => {
       </span>
       <span class="expand-icon">{{ expanded ? '▼' : '▶' }}</span>
     </button>
+
+    <!-- 产出的图片：**不随折叠隐藏**。对 read_image 来说这张图就是结果本身，
+         折起来就只剩一行"完成"，等于把它藏了。 -->
+    <div v-if="imageIds.length" class="tool-images">
+      <template v-for="id in imageIds" :key="id">
+        <img v-if="imageUrls[id]" :src="imageUrls[id]" alt="工具返回的图片" />
+        <div v-else-if="imageUrls[id] === ''" class="tool-image-missing">图片已丢失</div>
+        <div v-else class="tool-image-loading">加载中…</div>
+      </template>
+    </div>
 
     <div v-if="expanded" class="tool-call-detail">
       <div v-if="toolCall.args && Object.keys(toolCall.args).length" class="detail-section">
@@ -232,6 +272,38 @@ const argSummary = computed(() => {
   padding: $space-sm $space-md;
   border-top: 1px solid $color-border;
   background-color: $color-bg-primary;
+}
+
+// 工具产出的图片（read_image）：紧贴标题栏，始终可见
+.tool-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: $space-sm;
+  padding: 0 $space-md $space-sm;
+
+  img {
+    display: block;
+    max-width: 220px;
+    max-height: 160px;
+    border-radius: $radius-sm;
+    border: 1px solid $color-border;
+    background-color: $color-bg-tertiary;
+  }
+}
+
+.tool-image-missing,
+.tool-image-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 110px;
+  height: 64px;
+  padding: 0 $space-sm;
+  font-size: $font-size-xs;
+  color: $color-text-muted;
+  border: 1px dashed $color-border;
+  border-radius: $radius-sm;
+  background-color: $color-bg-tertiary;
 }
 
 .detail-section {

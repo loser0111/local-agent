@@ -36,6 +36,7 @@ const (
 	toolGlob      = "glob"
 	toolGrep      = "grep"
 	toolListDir   = "list_dir"
+	toolReadImage = "read_image"
 )
 
 // directToolOrder 直出给模型的工具顺序（固定顺序便于断言与提示缓存）。
@@ -46,6 +47,9 @@ const (
 // 甚至照着名字瞎猜参数——两者不一致正是"模型报找不到某工具"这类问题的来源。
 var directToolOrder = []string{
 	toolReadFile, toolWriteFile, toolEditFile, toolGlob, toolGrep, toolListDir, toolAskUser,
+	// read_image 直出：buildBasePrompt 点名了它（"图片要看内容就调 read_image"）。
+	// 它是文件六件套里"读"的那一支，参数形状与 read_file 一致，直出的 prompt 代价极小。
+	toolReadImage,
 	// exec_shell 直出：buildBasePrompt 明确点名了它（"exec_shell 留给构建、测试、git 等
 	// 真正的命令"），却曾因不在本名录而退化成"要先经 tool_router 发现"。构建/测试/git 是
 	// 高频操作，每次首用都可能多耗 1-2 轮；它只有一个 cmd 参数，直出的 prompt 代价极小。
@@ -54,6 +58,8 @@ var directToolOrder = []string{
 	// "可以用 spawn_agent 派子代理"），若工具列表里没有它的 schema，模型只能先花一轮
 	// 去 tool_router 里 list/describe，否则就是照着名字瞎猜参数。
 	toolSpawnAgent,
+	// 记忆工具直出：buildBasePrompt 点名 memory_search / memory_save / memory_forget。
+	toolMemorySearch, toolMemorySave, toolMemoryForget,
 }
 
 // 各类上限：避免一次工具调用把上下文或内存撑爆
@@ -82,6 +88,12 @@ type fileToolContext struct {
 	root      string         // 工作区目录；为空时用进程工作目录
 	sessionID string         // 会话 ID（归因记录用）
 	changes   *FileChangeLog // 可为 nil（不记录）
+	// attachments 附件存储。只有 read_image 用它——它把工作区里的图片**复制**成
+	// 会话附件（复制而不是引用工作区路径，见 readImageTool 的说明）。
+	attachments *AttachmentStore
+	// imageOut 产图通道：read_image 把存好的附件引用放进来，工具循环取走后
+	// 落到该次调用结果的消息上。
+	imageOut *imageCollector
 }
 
 func (c fileToolContext) baseDir() string {
@@ -452,6 +464,100 @@ func (t *readFileTool) Execute(ctx context.Context, args map[string]interface{})
 	}
 	if end < total {
 		fmt.Fprintf(&sb, "…（还有 %d 行未显示，可用 offset=%d 继续）\n", total-end, end+1)
+	}
+	return sb.String(), nil
+}
+
+// ===== read_image =====
+
+// readImageTool 读取工作区内的图片，交给模型"看"。
+//
+// 与 read_file 的关系：read_file 只返回文本，而且**刻意**对二进制文件报错
+// （looksBinary 拦下），图片正属于这一类。所以"看图"必须是一条独立的工具——
+// 它的结果不只是文本，还有一张要挂到消息上的图。
+//
+// 为什么把图**复制**成会话附件，而不是在发送时按工作区路径去读：
+//
+//  1. 入站即规整：尺寸/格式在上限内统一，发送路径零转换（见 imageproc.go）。
+//  2. 历史可回放：工作区里的文件随时会被改掉、删掉或切分支。"当时模型看到的那张图"
+//     属于对话记录，应当与对话一起稳定存在；否则回看历史时模型对着一张已经不存在的
+//     图作答，人却无从察觉。
+//  3. 作用域干净：附件目录是应用私有数据，不进 diff 归因，也不会因为用户回退一轮
+//     代码而"被回退"。反过来，若引用工作区路径，就还得决定"工作区外能不能读"，
+//     而现在这个问题由权限层按路径统一回答（见 PermissionSubject）。
+//
+// 代价是同一张图可能在工作区与附件目录各存一份。对"看几张图"这个量级可以接受。
+type readImageTool struct {
+	*BaseTool
+	ctx      fileToolContext
+	required []string
+}
+
+func newReadImageTool(bc buildContext) *readImageTool {
+	params, required := fileToolParams([]fileArg{
+		{Name: "path", Type: "string", Description: "要查看的图片路径（相对工作区目录或绝对路径）", Required: true},
+	})
+	return &readImageTool{
+		BaseTool: &BaseTool{
+			Name: toolReadImage,
+			Description: "查看工作区内的一张图片（PNG / JPEG / GIF）——截图、报错图、设计稿、图表都走它。" +
+				"图片会作为图像内容返回，你可以直接描述或分析其中的内容；读取文本文件请用 read_file。" +
+				"单张图最长边超过 1568px 会被等比缩小后返回。",
+			Parameters: params,
+		},
+		ctx:      bc.fileCtx,
+		required: required,
+	}
+}
+
+func (t *readImageTool) RequiredParams() []string { return t.required }
+
+// PermissionSubject 路径类主体（读）：读图不改变工作区状态，与 read_file 同级。
+// 刻意不做成"工具级只读放行"——按路径判定，读工作区之外的图才会照样落到规则上。
+func (t *readImageTool) PermissionSubject(args map[string]interface{}) Subject {
+	return pathSubjectFor(t.GetName(), SubjectActionRead, t.ctx, args)
+}
+
+func (t *readImageTool) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
+	raw, _ := args["path"].(string)
+	path, err := t.ctx.resolve(raw)
+	if err != nil {
+		return "", err
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", fmt.Errorf("文件不存在: %s", t.ctx.rel(path))
+		}
+		return "", fmt.Errorf("读取文件信息失败: %w", err)
+	}
+	if info.IsDir() {
+		return "", fmt.Errorf("%s 是目录；找图片文件请用 glob（如 glob **/*.png）", t.ctx.rel(path))
+	}
+	if info.Size() > maxImageSourceBytes {
+		return "", fmt.Errorf("图片过大（%.1f MB，上限 %d MB）: %s",
+			float64(info.Size())/(1<<20), maxImageSourceBytes>>20, t.ctx.rel(path))
+	}
+	if t.ctx.attachments == nil {
+		return "", fmt.Errorf("当前会话未装配附件存储，无法读取图片")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("读取失败: %w", err)
+	}
+	att, err := t.ctx.attachments.Save(t.ctx.sessionID, filepath.Base(path), data, attachmentSourceTool)
+	if err != nil {
+		return "", err
+	}
+	// 交给工具循环：它会把这条引用落到本次调用结果消息的 Attachments 上，
+	// 由 buildLLMMessages 转成真正的图片内容发出去。
+	t.ctx.imageOut.add(*att)
+
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "已读取图片 %s（%d×%d，%s，%.0f KB），图像内容附在本条结果之后，可直接查看。",
+		t.ctx.rel(path), att.Width, att.Height, att.MediaType, float64(att.Bytes)/1024)
+	if att.Changed {
+		sb.WriteString("原图超过尺寸上限，已等比缩小后使用。")
 	}
 	return sb.String(), nil
 }

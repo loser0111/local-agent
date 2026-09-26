@@ -84,6 +84,14 @@ func defaultSources() []*ToolSource {
 			},
 		},
 		{
+			ID: toolReadImage, Name: toolReadImage, Label: "查看图片",
+			Description: "查看工作区内的一张图片（PNG/JPEG/GIF）：截图、报错图、设计稿、图表。图片会作为图像内容返回，可直接分析其中内容",
+			Kind:        SourceBuiltin, Icon: "image", Enabled: true, Builtin: true,
+			Parameters: []ToolParamConfig{
+				{Name: "path", Description: "图片路径（相对工作区目录或绝对路径）", Required: true},
+			},
+		},
+		{
 			ID: "write_file", Name: "write_file", Label: "写入文件",
 			Description: "新建或整体覆盖一个文本文件",
 			Kind:        SourceBuiltin, Icon: "file-plus", Enabled: true, Builtin: true,
@@ -138,6 +146,34 @@ func defaultSources() []*ToolSource {
 			Kind:        SourceBuiltin, Icon: "folder", Enabled: true, Builtin: true,
 			Parameters: []ToolParamConfig{
 				{Name: "path", Description: "要列出的目录（默认工作区根目录）"},
+			},
+		},
+		{
+			ID: toolMemorySearch, Name: toolMemorySearch, Label: "检索记忆",
+			Description: "检索跨会话长期记忆。query 可以是自然语言或记忆 id。",
+			Kind:        SourceBuiltin, Icon: "book", Enabled: true, Builtin: true,
+			Parameters: []ToolParamConfig{
+				{Name: "query", Description: "检索词或记忆 id", Required: true},
+			},
+		},
+		{
+			ID: toolMemorySave, Name: toolMemorySave, Label: "保存记忆",
+			Description: "把对未来会话仍有用的事实写入长期记忆",
+			Kind:        SourceBuiltin, Icon: "bookmark", Enabled: true, Builtin: true,
+			Parameters: []ToolParamConfig{
+				{Name: "content", Description: "记忆正文", Required: true},
+				{Name: "title", Description: "短标题"},
+				{Name: "type", Description: "user / feedback / project / reference"},
+				{Name: "scope", Description: "user 或 project"},
+				{Name: "tags", Description: "逗号分隔标签"},
+			},
+		},
+		{
+			ID: toolMemoryForget, Name: toolMemoryForget, Label: "删除记忆",
+			Description: "删除一条长期记忆。优先传记忆 id。",
+			Kind:        SourceBuiltin, Icon: "eraser", Enabled: true, Builtin: true,
+			Parameters: []ToolParamConfig{
+				{Name: "target", Description: "记忆 id 或检索词", Required: true},
 			},
 		},
 		{

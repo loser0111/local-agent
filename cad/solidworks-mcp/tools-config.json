@@ -1,0 +1,237 @@
+{
+  "sources": [
+    {
+      "id": "sw_create_part",
+      "name": "sw_create_part",
+      "label": "SolidWorks 创建零件",
+      "description": "在 SolidWorks 中创建一个新的零件文档。参数: template(可选, 'mm'或'in', 默认'mm')。返回 JSON 结果。",
+      "kind": "cli",
+      "icon": "box",
+      "enabled": true,
+      "exposure": "direct",
+      "parameters": [
+        {"name": "template", "description": "模板类型: mm(公制,默认) 或 in(英制)", "required": false}
+      ],
+      "cli": {
+        "command": "python \"C:\\path\\to\\cad\\solidworks-mcp\\sw_cli.py\" '{\"action\":\"create_part\",\"template\":\"{{template}}\"}'",
+        "timeout": 30
+      }
+    },
+    {
+      "id": "sw_sketch_rectangle",
+      "name": "sw_sketch_rectangle",
+      "label": "SolidWorks 画矩形",
+      "description": "在 SolidWorks 草图中绘制矩形(中心在原点)。参数: width(宽度mm), height(高度mm)。返回 JSON 结果。",
+      "kind": "cli",
+      "icon": "square",
+      "enabled": true,
+      "exposure": "direct",
+      "parameters": [
+        {"name": "width", "description": "矩形宽度(毫米)", "required": true},
+        {"name": "height", "description": "矩形高度(毫米)", "required": true}
+      ],
+      "cli": {
+        "command": "python \"C:\\path\\to\\cad\\solidworks-mcp\\sw_cli.py\" '{\"action\":\"sketch_rectangle\",\"width\":{{width}},\"height\":{{height}},\"unit\":\"mm\"}'",
+        "timeout": 30
+      }
+    },
+    {
+      "id": "sw_sketch_circle",
+      "name": "sw_sketch_circle",
+      "label": "SolidWorks 画圆",
+      "description": "在 SolidWorks 草图中绘制圆(圆心在原点)。参数: radius(半径mm)。返回 JSON 结果。",
+      "kind": "cli",
+      "icon": "circle",
+      "enabled": true,
+      "exposure": "direct",
+      "parameters": [
+        {"name": "radius", "description": "圆的半径(毫米)", "required": true}
+      ],
+      "cli": {
+        "command": "python \"C:\\path\\to\\cad\\solidworks-mcp\\sw_cli.py\" '{\"action\":\"sketch_circle\",\"radius\":{{radius}},\"unit\":\"mm\"}'",
+        "timeout": 30
+      }
+    },
+    {
+      "id": "sw_extrude",
+      "name": "sw_extrude",
+      "label": "SolidWorks 拉伸",
+      "description": "将当前 SolidWorks 草图拉伸为实体。参数: depth(拉伸深度mm)。返回 JSON 结果。",
+      "kind": "cli",
+      "icon": "layers",
+      "enabled": true,
+      "exposure": "direct",
+      "parameters": [
+        {"name": "depth", "description": "拉伸深度(毫米)", "required": true}
+      ],
+      "cli": {
+        "command": "python \"C:\\path\\to\\cad\\solidworks-mcp\\sw_cli.py\" '{\"action\":\"extrude\",\"depth\":{{depth}},\"unit\":\"mm\"}'",
+        "timeout": 30
+      }
+    },
+    {
+      "id": "sw_extrude_cut",
+      "name": "sw_extrude_cut",
+      "label": "SolidWorks 切除拉伸",
+      "description": "从当前 SolidWorks 草图切除材料(挖孔/切槽)。参数: depth(切除深度mm)。返回 JSON 结果。",
+      "kind": "cli",
+      "icon": "minus-circle",
+      "enabled": true,
+      "exposure": "direct",
+      "parameters": [
+        {"name": "depth", "description": "切除深度(毫米)", "required": true}
+      ],
+      "cli": {
+        "command": "python \"C:\\path\\to\\cad\\solidworks-mcp\\sw_cli.py\" '{\"action\":\"extrude_cut\",\"depth\":{{depth}},\"unit\":\"mm\"}'",
+        "timeout": 30
+      }
+    },
+    {
+      "id": "sw_save",
+      "name": "sw_save",
+      "label": "SolidWorks 保存",
+      "description": "保存当前 SolidWorks 文档。参数: path(可选,完整保存路径)。返回 JSON 结果。",
+      "kind": "cli",
+      "icon": "save",
+      "enabled": true,
+      "exposure": "direct",
+      "parameters": [
+        {"name": "path", "description": "保存路径(完整路径含扩展名SLDPRT)", "required": false}
+      ],
+      "cli": {
+        "command": "python \"C:\\path\\to\\cad\\solidworks-mcp\\sw_cli.py\" '{\"action\":\"save\",\"path\":\"{{path}}\"}'",
+        "timeout": 30
+      }
+    },
+    {
+      "id": "sw_get_info",
+      "name": "sw_get_info",
+      "label": "SolidWorks 文档信息",
+      "description": "获取当前 SolidWorks 活动文档的信息(名称/类型/路径/修改状态)。返回 JSON 结果。",
+      "kind": "cli",
+      "icon": "info",
+      "enabled": true,
+      "exposure": "direct",
+      "parameters": [],
+      "cli": {
+        "command": "python \"C:\\path\\to\\cad\\solidworks-mcp\\sw_cli.py\" '{\"action\":\"get_info\"}'",
+        "timeout": 15
+      }
+    },
+    {
+      "id": "sw_create_flange",
+      "name": "sw_create_flange",
+      "label": "SolidWorks 创建法兰盘",
+      "description": "一步创建法兰盘: 圆盘+中心孔+螺栓孔阵列。参数: outer_radius(外圆半径mm), inner_radius(中心孔半径mm), bolt_radius(螺栓孔半径mm), bolt_count(螺栓孔数量), bolt_circle_radius(螺栓圆半径mm), thickness(厚度mm)。返回 JSON 结果。",
+      "kind": "cli",
+      "icon": "disc",
+      "enabled": true,
+      "exposure": "direct",
+      "parameters": [
+        {"name": "outer_radius", "description": "外圆半径(毫米)", "required": false},
+        {"name": "inner_radius", "description": "中心孔半径(毫米)", "required": false},
+        {"name": "bolt_radius", "description": "螺栓孔半径(毫米)", "required": false},
+        {"name": "bolt_count", "description": "螺栓孔数量", "required": false},
+        {"name": "bolt_circle_radius", "description": "螺栓孔分布圆半径(毫米)", "required": false},
+        {"name": "thickness", "description": "法兰厚度(毫米)", "required": false}
+      ],
+      "cli": {
+        "command": "python \"C:\\path\\to\\cad\\solidworks-mcp\\sw_cli.py\" '{\"action\":\"create_flange\",\"outer_radius\":{{outer_radius}},\"inner_radius\":{{inner_radius}},\"bolt_radius\":{{bolt_radius}},\"bolt_count\":{{bolt_count}},\"bolt_circle_radius\":{{bolt_circle_radius}},\"thickness\":{{thickness}}}'",
+        "timeout": 60
+      }
+    },
+    {
+      "id": "sw_get_feature_tree",
+      "name": "sw_get_feature_tree",
+      "label": "SolidWorks 特征树",
+      "description": "获取当前零件的完整特征树：每个特征的名称/类型/是否被抑制。用于让模型感知'当前零件里有什么'。返回 JSON。",
+      "kind": "cli",
+      "icon": "list-tree",
+      "enabled": true,
+      "exposure": "direct",
+      "parameters": [],
+      "cli": {
+        "command": "python \"C:\\path\\to\\cad\\solidworks-mcp\\sw_cli.py\" '{\"action\":\"get_feature_tree\"}'",
+        "timeout": 15
+      }
+    },
+    {
+      "id": "sw_get_dimensions",
+      "name": "sw_get_dimensions",
+      "label": "SolidWorks 尺寸查询",
+      "description": "获取所有特征的尺寸（名称+值mm）。用于让模型确认'画出来的东西尺寸对不对'。返回 JSON。",
+      "kind": "cli",
+      "icon": "ruler",
+      "enabled": true,
+      "exposure": "direct",
+      "parameters": [],
+      "cli": {
+        "command": "python \"C:\\path\\to\\cad\\solidworks-mcp\\sw_cli.py\" '{\"action\":\"get_dimensions\"}'",
+        "timeout": 15
+      }
+    },
+    {
+      "id": "sw_get_bounding_box",
+      "name": "sw_get_bounding_box",
+      "label": "SolidWorks 包围盒",
+      "description": "获取当前零件的包围盒（最小外接长方体），返回XYZ方向的最小/最大值和总尺寸(mm)。用于判断'东西画大了还是小了'。返回 JSON。",
+      "kind": "cli",
+      "icon": "maximize-2",
+      "enabled": true,
+      "exposure": "direct",
+      "parameters": [],
+      "cli": {
+        "command": "python \"C:\\path\\to\\cad\\solidworks-mcp\\sw_cli.py\" '{\"action\":\"get_bounding_box\"}'",
+        "timeout": 15
+      }
+    },
+    {
+      "id": "sw_get_mass_properties",
+      "name": "sw_get_mass_properties",
+      "label": "SolidWorks 质量属性",
+      "description": "获取当前零件的质量属性：体积/表面积/质量/重心坐标。用于判断'东西是不是画对了'——比如画了实心圆盘却得到接近0的体积说明出了问题。返回 JSON。",
+      "kind": "cli",
+      "icon": "scale",
+      "enabled": true,
+      "exposure": "direct",
+      "parameters": [],
+      "cli": {
+        "command": "python \"C:\\path\\to\\cad\\solidworks-mcp\\sw_cli.py\" '{\"action\":\"get_mass_properties\"}'",
+        "timeout": 15
+      }
+    },
+    {
+      "id": "sw_render_screenshot",
+      "name": "sw_render_screenshot",
+      "label": "SolidWorks 截图渲染",
+      "description": "渲染当前模型的截图并保存为PNG。视角可选: iso(等轴测)/front(前视)/top(俯视)/right(右视)。返回图片路径，供视觉模型(VLM)分析当前形状是否正确。参数: view(视角), output_path(输出路径)。返回 JSON 含图片路径。",
+      "kind": "cli",
+      "icon": "camera",
+      "enabled": true,
+      "exposure": "direct",
+      "parameters": [
+        {"name": "view", "description": "视角: iso(等轴测,默认)/front(前视)/top(俯视)/right(右视)", "required": false},
+        {"name": "output_path", "description": "输出PNG路径（为空则自动生成临时路径）", "required": false}
+      ],
+      "cli": {
+        "command": "python \"C:\\path\\to\\cad\\solidworks-mcp\\sw_cli.py\" '{\"action\":\"render_screenshot\",\"view\":\"{{view}}\",\"output_path\":\"{{output_path}}\"}'",
+        "timeout": 30
+      }
+    },
+    {
+      "id": "sw_diagnose",
+      "name": "sw_diagnose",
+      "label": "SolidWorks 全面诊断",
+      "description": "一键诊断：综合特征树+包围盒+质量属性+错误状态。用于在复杂建模过程中判断当前状态是否正确。返回 JSON。",
+      "kind": "cli",
+      "icon": "stethoscope",
+      "enabled": true,
+      "exposure": "direct",
+      "parameters": [],
+      "cli": {
+        "command": "python \"C:\\path\\to\\cad\\solidworks-mcp\\sw_cli.py\" '{\"action\":\"diagnose\"}'",
+        "timeout": 30
+      }
+    }
+  ]
+}

@@ -277,6 +277,74 @@ func TestFormatInjection(t *testing.T) {
 	}
 }
 
+func TestIndexForPromptAndRecall(t *testing.T) {
+	st, _ := newStore(t, MemoryConfig{StalenessCaveat: true, InjectionMaxChars: 400, IndexMaxItems: 2})
+	if got := st.IndexForPrompt("p"); got != "" {
+		t.Fatalf("空库索引应为空: %q", got)
+	}
+	mustAdd(t, st, MemoryMeta{Title: "用户偏好", Description: "回复别客套", Type: TypeUser, Scope: ScopeUser}, "用户希望回复简洁、不要客套。")
+	mustAdd(t, st, MemoryMeta{Title: "甲项目约定", Description: "ginkgo 测试", Type: TypeProject, Scope: ScopeProject, Project: "projA", Tags: []string{"ginkgo"}}, "甲项目用 ginkgo。")
+	mustAdd(t, st, MemoryMeta{Title: "乙项目约定", Description: "pytest", Type: TypeProject, Scope: ScopeProject, Project: "projB"}, "乙项目用 pytest。")
+
+	idx := st.IndexForPrompt("projA")
+	if !strings.Contains(idx, "## 长期记忆索引") || !strings.Contains(idx, "用户偏好") {
+		t.Fatalf("索引应含用户记忆: %q", idx)
+	}
+	if strings.Contains(idx, "乙项目约定") {
+		t.Fatalf("索引不应含其他项目: %q", idx)
+	}
+
+	hit, err := st.Recall("ginkgo", "projA", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hit) != 1 || hit[0].Meta.Project != "projA" {
+		t.Fatalf("召回应只命中甲项目, got %d", len(hit))
+		for _, e := range hit {
+			t.Logf("  %s %s/%s", e.Meta.ID, e.Meta.Project, e.Meta.Title)
+		}
+	}
+	if filtered := DropSurfaced(hit, []string{hit[0].Meta.ID}); len(filtered) != 0 {
+		t.Fatalf("已展示的应被过滤, got %d", len(filtered))
+	}
+	again, _ := st.Recall("ginkgo", "projA", []string{hit[0].Meta.ID})
+	if len(again) != 0 {
+		t.Fatalf("Recall 应尊重 alreadySurfaced, got %d", len(again))
+	}
+
+	block := st.FormatRecall(hit)
+	if !strings.Contains(block, "甲项目用 ginkgo") {
+		t.Fatalf("召回块应含正文: %q", block)
+	}
+}
+
+func TestFormatRecallBudgetAndStale(t *testing.T) {
+	st, _ := newStore(t, MemoryConfig{RecallMaxChars: 360, StalenessCaveat: true})
+	old := time.Now().Add(-48 * time.Hour).UnixMilli()
+	entries := []*MemoryEntry{{
+		Meta:    MemoryMeta{ID: "mem_1", Title: "旧项目知识", Description: "desc", Scope: ScopeProject, Type: TypeProject, UpdatedAt: old},
+		Content: strings.Repeat("项目事实正文", 40),
+		Age:     "2 days ago",
+		Stale:   true,
+	}}
+	out := st.FormatRecall(entries)
+	if !strings.Contains(out, "已截断") && !strings.Contains(out, "本轮召回") {
+		t.Fatalf("应产出召回块: %q", out)
+	}
+	if !strings.Contains(out, "注意") {
+		t.Fatalf("stale 应带 caveat: %q", out)
+	}
+}
+
+func TestProjectSlug(t *testing.T) {
+	if ProjectSlug("") != "default" {
+		t.Fatal("空路径应为 default")
+	}
+	if got := ProjectSlug("/tmp/my-app"); got != "my-app" {
+		t.Fatalf("ProjectSlug(/tmp/my-app)=%q", got)
+	}
+}
+
 func TestFormatInjectionBudgetAndStale(t *testing.T) {
 	st, _ := newStore(t, MemoryConfig{InjectionMaxChars: 300, StalenessCaveat: true})
 	old := time.Now().Add(-48 * time.Hour).UnixMilli()

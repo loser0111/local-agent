@@ -87,6 +87,33 @@ func (l *llmRequestLog) forget(sessionID string) {
 	delete(l.items, sessionID)
 }
 
+// redactMessages 拷贝一份消息序列，并把图片换成"去掉字节、留下描述"的占位。
+//
+// 请求快照是给人看的排障视图。几 MB 的 base64 进去之后这份快照既没法读
+// （界面与日志都会被撑爆）又占内存，而排障真正需要的只是"这条消息带了几张多大的图"。
+// 底层数组是浅拷贝，但每条带图的消息都换成新的 Images 切片，因此不会改到调用方的数据。
+func redactMessages(messages []LLMMessage) []LLMMessage {
+	out := make([]LLMMessage, len(messages))
+	copy(out, messages)
+	for i := range out {
+		if len(out[i].Images) == 0 {
+			continue
+		}
+		imgs := make([]LLMImage, len(out[i].Images))
+		for j, img := range out[i].Images {
+			imgs[j] = LLMImage{
+				MediaType: img.MediaType,
+				Bytes:     img.Bytes,
+				Width:     img.Width,
+				Height:    img.Height,
+				Redacted:  true,
+			}
+		}
+		out[i].Images = imgs
+	}
+	return out
+}
+
 // summaryMessageIndex 摘要说明消息在序列里的下标；没有摘要时为 -1。
 //
 // 位置是固定的：buildLLMMessages 恒把 system 放在第 0 条，
@@ -105,7 +132,6 @@ func summaryMessageIndex(session *Session, messages []LLMMessage) int {
 // snapshotLLMRequest 组装一次请求快照（内部做浅拷贝，避免与循环里的切片共享底层数组）
 func snapshotLLMRequest(run *runControl, session *Session, turn int, modelID, systemPrompt string,
 	messages []LLMMessage, tools []LLMTool, ctxStat *ContextStat, compactedThisTurn bool) *LLMRequestSnapshot {
-
 	snap := &LLMRequestSnapshot{
 		Turn:              turn,
 		Model:             modelID,
@@ -121,9 +147,9 @@ func snapshotLLMRequest(run *runControl, session *Session, turn int, modelID, sy
 	if session != nil {
 		snap.CoveredMsgs = session.ContextCoveredUpTo
 	}
-	// 必须拷贝：循环随后还会 append/重建 messages，共享底层数组会让快照跟着变
-	snap.Messages = make([]LLMMessage, len(messages))
-	copy(snap.Messages, messages)
+	// 必须拷贝：循环随后还会 append/重建 messages，共享底层数组会让快照跟着变。
+	// 图片另做一次"去掉字节、留下描述"的处理，见 redactMessages。
+	snap.Messages = redactMessages(messages)
 
 	snap.ToolNames = make([]string, 0, len(tools))
 	for _, t := range tools {

@@ -494,9 +494,11 @@ func (a *App) newPermissionEnforcer(session *Session, projectDir string) *permis
 	}
 }
 
-// emitPermissionRequest 把授权请求推给前端
+// emitPermissionRequest 把授权请求推给前端。
+// 归属取自请求自身（req.SessionID）：前端要据此判断"这是不是当前会话在等我"，
+// 后台会话的请求只出列表标记、不弹窗（两个会话同时等人应答是合法状态）。
 func (a *App) emitPermissionRequest(req PermissionAskRequest) {
-	a.emitInteraction(ChatEvent{
+	a.emitInteraction(req.SessionID, ChatEvent{
 		Type:       ChatEventPermission,
 		Permission: &req,
 	})

@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -390,4 +392,131 @@ func waitResult(t *testing.T, done chan *ChatResult) *ChatResult {
 		t.Fatal("运行未在合理时间内结束（取消可能没生效）")
 		return nil
 	}
+}
+
+// ===== 会话级并行与运行归属（多会话并行那一轮）=====
+//
+// 这一组守的是两件事：
+//   ① 同一会话不能被并发启动两次（否则索引被覆盖、前一条停不掉）；
+//   ② 不同会话可以同时跑，且各自的取消互不干扰。
+// runID 的单调性单列一条用例，因为前端靠它丢弃"上一轮的迟到事件"。
+
+// 同一会话第二次登记必须被拒绝
+func TestBeginExclusiveRejectsSecondRunSameSession(t *testing.T) {
+	reg := &runRegistry{}
+	first, err := reg.beginExclusive("s1", "")
+	if err != nil {
+		t.Fatalf("首次登记应成功: %v", err)
+	}
+
+	second, err := reg.beginExclusive("s1", "")
+	if err == nil {
+		t.Fatal("同一会话第二次登记必须被拒绝")
+	}
+	if !errors.Is(err, errSessionBusy) {
+		t.Fatalf("错误应能被 errors.Is 判定为 errSessionBusy，实际: %v", err)
+	}
+	if second != nil {
+		t.Fatal("被拒绝时不应返回可用的运行控制块（调用方会照常 defer end）")
+	}
+	// 最关键的检查点：索引没被覆盖。被覆盖的后果是旧那条运行再也停不掉。
+	if got := reg.bySession("s1"); got != first {
+		t.Fatalf("sessionID 索引被覆盖：期望仍指向首条运行，实际 %p", got)
+	}
+	if hit, _ := reg.stopSession("s1", false); !hit {
+		t.Fatal("首条运行应当仍可被停止")
+	}
+
+	// 结束后可以重新登记（用户点一次停止再发下一条是正常路径）
+	reg.end(first)
+	third, err := reg.beginExclusive("s1", "")
+	if err != nil {
+		t.Fatalf("前一条结束后应能重新登记: %v", err)
+	}
+	if third == nil {
+		t.Fatal("重新登记应返回可用的控制块")
+	}
+}
+
+// 不同会话必须能同时登记——这是"多会话并行"的前提
+func TestBeginExclusiveAllowsDifferentSessions(t *testing.T) {
+	reg := &runRegistry{}
+	r1, err := reg.beginExclusive("s1", "")
+	if err != nil {
+		t.Fatalf("s1 登记失败: %v", err)
+	}
+	r2, err := reg.beginExclusive("s2", "")
+	if err != nil {
+		t.Fatalf("不同会话应当能并行登记，实际: %v", err)
+	}
+	if r1.runID == r2.runID {
+		t.Fatal("两条运行应有不同的 runID（前端靠它区分归属）")
+	}
+	if got := reg.activeCount(); got != 2 {
+		t.Fatalf("活跃运行数应为 2，实际 %d", got)
+	}
+
+	// 停一条不该影响另一条
+	if hit, _ := reg.stopSession("s1", true); !hit {
+		t.Fatal("停止 s1 应当命中")
+	}
+	if r1.Kind() != cancelKindHard {
+		t.Fatal("s1 应被硬取消")
+	}
+	if r2.Kind() != "" || r2.Ctx().Err() != nil {
+		t.Fatal("停止 s1 不应影响 s2 的运行")
+	}
+
+	got := reg.activeSessions()
+	if len(got) != 2 || got[0] != "s1" || got[1] != "s2" {
+		t.Fatalf("activeSessions 应返回稳定排序的 [s1 s2]，实际 %v", got)
+	}
+}
+
+// 无会话归属的运行不参与互斥，也不出现在 activeSessions 里。
+// 这类运行来自测试与工具场景（零值 App、临时构造的控制块），对它们做互斥没有意义。
+func TestBeginExclusiveIgnoresEmptySessionID(t *testing.T) {
+	reg := &runRegistry{}
+	if _, err := reg.beginExclusive("", ""); err != nil {
+		t.Fatalf("无会话归属的运行不应被互斥拦下: %v", err)
+	}
+	if _, err := reg.beginExclusive("", ""); err != nil {
+		t.Fatalf("无会话归属的运行不应被互斥拦下（第二次）: %v", err)
+	}
+	if got := reg.activeSessions(); len(got) != 0 {
+		t.Fatalf("无会话归属的运行不应出现在 activeSessions，实际 %v", got)
+	}
+}
+
+// runID 必须严格单调递增：前端用它丢弃上一轮运行留下的迟到事件。
+// 顺序由「毫秒 + 进程内自增序号」两段共同决定，因此这里按 (毫秒, 序号) 逐段比较，
+// 不能只比字符串（位数不同时字符串比较会得出错误结论）。
+func TestRunIDMonotonicForStalenessFilter(t *testing.T) {
+	reg := &runRegistry{}
+	r1, err := reg.beginExclusive("s1", "")
+	if err != nil {
+		t.Fatalf("登记失败: %v", err)
+	}
+	r2, err := reg.beginExclusive("s2", "")
+	if err != nil {
+		t.Fatalf("登记失败: %v", err)
+	}
+	ms1, seq1, ok1 := parseRunID(r1.runID)
+	ms2, seq2, ok2 := parseRunID(r2.runID)
+	if !ok1 || !ok2 {
+		t.Fatalf("runID 格式应为 run_<毫秒>_<序号>，实际 %q / %q", r1.runID, r2.runID)
+	}
+	if ms2 < ms1 || (ms2 == ms1 && seq2 <= seq1) {
+		t.Fatalf("runID 必须严格递增（后登记的更大）：%q → %q", r1.runID, r2.runID)
+	}
+}
+
+// parseRunID 解析 run_<毫秒>_<序号>；解析失败时 ok=false。
+// 测试用；生产侧只有格式化没有解析（前端另有一份等价实现）。
+func parseRunID(id string) (ms int64, seq uint64, ok bool) {
+	n, err := fmt.Sscanf(id, "run_%d_%d", &ms, &seq)
+	if err != nil || n != 2 {
+		return 0, 0, false
+	}
+	return ms, seq, true
 }

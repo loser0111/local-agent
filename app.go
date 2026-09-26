@@ -3,11 +3,13 @@ package main
 import (
 	"context"
 	"fmt"
-	wailsRuntime "github.com/wailsapp/wails/v2/pkg/runtime"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
+
+	wailsRuntime "github.com/wailsapp/wails/v2/pkg/runtime"
+	"wails-tmp/memory"
 )
 
 // App struct
@@ -21,6 +23,7 @@ type App struct {
 	skillInstall *SkillInstaller
 	diffService  *DiffService
 	planStore    *PlanStore
+	memory       *memory.MemoryStore
 
 	// baseDir 本地数据目录（~/.local-agent）：权限配置的用户全局层也放在这里
 	baseDir string
@@ -35,6 +38,10 @@ type App struct {
 
 	// 文件改动归因：文件工具写入时记录 before/after（内存）
 	fileChanges *FileChangeLog
+
+	// attachments 附件存储（图片等二进制资产）：~/.local-agent/attachments/<会话ID>/
+	// 与会话消息分离落盘，见 attachments.go 顶部关于"为什么不内联 base64"的说明。
+	attachments *AttachmentStore
 
 	// 运行取消注册表：普通聊天与计划执行共用，支持软/硬两级取消
 	runs *runRegistry
@@ -52,6 +59,9 @@ type App struct {
 	// 与 contextPrefs 不同：那个是用户的意图，这个是**观测缓存**——由每次模型调用
 	// 回传的 usage 自动更新，用户不需要也不应该手改它。
 	tokenCalib *TokenCalibStore
+	// visionVerdicts 各模型的看图能力自检结论（~/.local-agent/vision-check.json）。
+	// 同样是观测缓存：由 /vision 写入，用于在用户贴图时提前说明"这个模型看不到图"。
+	visionVerdicts *VisionVerdictStore
 }
 
 // NewApp creates a new App application struct
@@ -73,6 +83,8 @@ func (a *App) startup(ctx context.Context) {
 	a.modelStore = NewModelStore(filepath.Join(baseDir, "models.json"))
 	// 初始化会话存储：~/.local-agent/sessions/*.json
 	a.sessionStore = NewSessionStore(filepath.Join(baseDir, "sessions"))
+	// 初始化附件存储：~/.local-agent/attachments/（图片字节，与会话 JSON 分离）
+	a.attachments = NewAttachmentStore(filepath.Join(baseDir, "attachments"))
 	// 初始化技能存储：~/.local-agent/skills/（文件夹 + SKILL.md）
 	a.skillStore = NewSkillStore(filepath.Join(baseDir, "skills"))
 	a.skillInstall = NewSkillInstaller(a.skillStore)
@@ -91,10 +103,18 @@ func (a *App) startup(ctx context.Context) {
 	a.subagents = newSubagentTracker()
 	a.ensurePermissionState()
 	a.fileChanges = NewFileChangeLog(500)
+	// 初始化长期记忆：~/.local-agent/memory/（失败不阻断启动）
+	if store, err := memory.NewMemoryStore(filepath.Join(baseDir, "memory"), memory.MemoryConfig{}); err != nil {
+		fmt.Printf("[App] 初始化记忆库失败: %v\n", err)
+	} else {
+		a.memory = store
+	}
 	// 初始化上下文压缩策略：~/.local-agent/context.json（不存在则全用内置默认值）
 	a.contextPrefs = NewContextPrefsStore(filepath.Join(baseDir, "context.json"))
 	// 估算校准系数：不存在 = 还没观测过，一律按 1.0（纯字符估算）
 	a.tokenCalib = NewTokenCalibStore(filepath.Join(baseDir, "token-calib.json"))
+	// 看图能力自检结论：不存在 = 还没测过（"没测过"与"测过且未通过"必须区分）
+	a.visionVerdicts = NewVisionVerdictStore(filepath.Join(baseDir, "vision-check.json"))
 }
 
 // dataDir 返回本地数据目录（不存在则创建）
@@ -253,6 +273,7 @@ func (a *App) DeleteSession(id string) error {
 		}
 		a.diffService.ForgetBaseline(child.ID)
 		a.reqLog.forget(child.ID)
+		_ = a.attachments.DeleteSession(child.ID)
 		if derr := a.sessionStore.DeleteSession(child.ID); derr != nil {
 			fmt.Printf("[App] 删除子代理会话 %s 失败: %v\n", child.ID, derr)
 		}
@@ -264,6 +285,11 @@ func (a *App) DeleteSession(id string) error {
 	}
 	a.diffService.ForgetBaseline(id)
 	a.reqLog.forget(id)
+	// 附件同样要级联清掉：它们不出现在会话列表里，会话删掉之后再没有入口能发现，
+	// 留着就是永久占地的孤儿文件（与上面 checkpoint ref 是同一类问题）。
+	if err := a.attachments.DeleteSession(id); err != nil {
+		fmt.Printf("[App] 删除会话附件失败: %v\n", err)
+	}
 	return a.sessionStore.DeleteSession(id)
 }
 
@@ -597,6 +623,44 @@ func (a *App) AppendConversation(sessionID string, conversation *Conversation) e
 	return a.sessionStore.AppendConversation(sessionID, conversation)
 }
 
+// ===== 附件（图片）=====
+// SaveAttachment 保存一张贴进对话的图片，返回可写进消息的附件引用。
+//
+// 前端流程是"先存附件、再带引用落消息"：消息落库时引用已经完整，
+// 因此不会出现"消息里挂着一张读不到的图"这种中间态。
+// payload 是 base64 字符串（也接受 data URL 形式，见 DecodeUpload）。
+func (a *App) SaveAttachment(sessionID, name, payload, source string) (*Attachment, error) {
+	if strings.TrimSpace(sessionID) == "" {
+		return nil, fmt.Errorf("会话 ID 不能为空")
+	}
+	data, err := DecodeUpload(payload)
+	if err != nil {
+		return nil, err
+	}
+	att, err := a.attachments.Save(sessionID, name, data, source)
+	if err != nil {
+		fmt.Printf("[附件] 保存失败 name=%q src=%s: %v\n", name, source, err)
+		return nil, err
+	}
+	// 打一行日志：出问题时"附件到底有没有落盘"是第一个要分辨的事——
+	// 前端拿到了图（预览出来了）不代表它进了消息，更不代表能读回来。
+	fmt.Printf("[附件] 已保存 name=%q id=%s %d×%d %.0fKB src=%s\n",
+		att.Name, att.ID, att.Width, att.Height, float64(att.Bytes)/1024, att.Source)
+	return att, nil
+}
+
+// GetAttachmentDataURL 把附件读成 data URL（界面展示历史消息里的图片）。
+//
+// 只按 (会话ID, 附件ID) 取，**不接受路径**：拼路径这件事一旦交给调用方，
+// 就等于把"读任意文件"的能力开给了前端。
+// 返回错误时界面应显示"图片已丢失"而不是一个破图占位——附件目录被清理过是真实存在的情况。
+func (a *App) GetAttachmentDataURL(sessionID, id string) (string, error) {
+	if strings.TrimSpace(sessionID) == "" {
+		return "", fmt.Errorf("会话 ID 不能为空")
+	}
+	return a.attachments.DataURL(sessionID, id)
+}
+
 // UpdateSession 更新会话元数据（模型、权限模式、标题、状态等）
 func (a *App) UpdateSession(id string, patch SessionPatch) (*Session, error) {
 	return a.sessionStore.UpdateSession(id, patch)
@@ -617,6 +681,14 @@ func (a *App) Chat(sessionID string, query string, useStream bool, usePlan bool)
 	// 放在最前面拦截——内置命令的优先级高于同名技能，技能不该能覆盖掉它。
 	if cmd, _, ok := ParseSkillCommand(query); ok && cmd == contextCompactCmd {
 		return a.handleCompactCommand(sessionID)
+	}
+	// /vision：用当前会话的模型实测一次"能不能看图"，结果落一条 assistant 消息。
+	// 它同样优先于同名技能（理由同上），并且走的是一次真实模型调用。
+	if cmd, _, ok := ParseSkillCommand(query); ok && cmd == visionTestCmd {
+		return a.handleVisionTestCommand(sessionID)
+	}
+	if cmd, rest, ok := ParseSkillCommand(query); ok && isMemoryCommand(cmd) {
+		return a.handleMemoryCommand(sessionID, cmd, rest)
 	}
 	var result *ChatResult
 	if usePlan {
@@ -651,7 +723,7 @@ func (a *App) contextStatForSession(sessionID string) *ContextStat {
 		return nil
 	}
 	model, _ := a.modelStore.GetModelForCall(session.Model)
-	messages := buildRunMessages(session, "", false)
+	messages := buildRunMessages(session, "", false, a.attachments.LoadImages)
 	return contextStatOf(session, messages, contextWindowOf(&model), nil, 0, a.calibFor(session.Model))
 }
 
@@ -660,7 +732,10 @@ func (a *App) contextStatForSession(sessionID string) *ContextStat {
 func (a *App) handleCompactCommand(sessionID string) (*ChatResult, error) {
 	// 与普通对话一样登记为可取消的运行：压缩要额外发一次 LLM 请求，
 	// 硬取消同样应该能把它断掉，而不是让用户白等。
-	run := a.runs.begin(sessionID, "")
+	run, berr := a.runs.beginExclusive(sessionID, "")
+	if berr != nil {
+		return nil, berr
+	}
 	defer a.runs.end(run)
 	out, err := a.compactSessionContext(run.Ctx(), sessionID)
 	if err != nil {
@@ -678,7 +753,7 @@ func (a *App) handleCompactCommand(sessionID string) (*ChatResult, error) {
 	if saved, serr := a.sessionStore.AppendMessage(sessionID, Message{Role: RoleAssistant, Content: reply}); serr == nil {
 		result.Messages = []Message{*saved}
 	}
-	a.emitChatEvent(ChatEvent{Type: "done", Reply: reply})
+	a.emitChatEvent(sessionID, run.runID, ChatEvent{Type: "done", Reply: reply})
 	result.Context = a.contextStatForSession(sessionID)
 	return result, nil
 }
@@ -699,7 +774,9 @@ func (a *App) handleContextStatCommand(sessionID string) (*ChatResult, error) {
 	if saved, serr := a.sessionStore.AppendMessage(sessionID, Message{Role: RoleAssistant, Content: reply}); serr == nil {
 		result.Messages = []Message{*saved}
 	}
-	a.emitChatEvent(ChatEvent{Type: "done", Reply: reply})
+	// 纯读操作，没有登记运行（不需要取消），因此事件不带 runId。
+	// 归属仍然必须有：前端靠它把这条 done 归到正确会话。
+	a.emitChatEvent(sessionID, "", ChatEvent{Type: "done", Reply: reply})
 	// 统计在落库之后重算：这条报告消息自己也占上下文，报出去的数字应包含它，
 	// 否则用户紧接着再查一次会发现两边对不上。
 	result.Context = a.contextStatForSession(sessionID)
@@ -831,6 +908,18 @@ func (a *App) StopChat(sessionID string, hard bool) (bool, error) {
 	}
 	hit, _ := a.runs.stopSession(sessionID, hard)
 	return hit, nil
+}
+
+// ListRunningSessions 返回当前有活跃运行的会话 ID 列表（可能同时有多条）。
+//
+// 为什么需要它：多会话并行下，"哪几条在跑"是**后端才知道**的事实。前端页面一旦重载
+// （wails dev 的热更新、手动刷新、日后可能的开新窗口），内存里的进行中状态就全丢了，
+// 而后端的运行还在跑。没有这个接口，界面会把它们显示成空闲——用户再点发送只会收到
+// 一句"该会话已有正在进行的任务"，却看不出为什么。
+//
+// 刻意只给 ID 列表、不给进度：进度只能靠事件流，这里能补的仅仅是"在跑"这个事实。
+func (a *App) ListRunningSessions() []string {
+	return a.runs.activeSessions()
 }
 
 // ===== 文件改动归因（供差异面板与工具卡片展示）=====

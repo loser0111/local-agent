@@ -26,6 +26,12 @@ type ToolCall struct {
 	// Files 本次调用改动的文件（相对工作区路径）。仅在文件工具产生写入时有值，
 	// 让差异可以归因到具体是哪次工具调用改的。
 	Files []string `json:"files,omitempty"`
+	// Images 本次调用产出的图片附件 ID（目前只有 read_image 会产出）。
+	//
+	// 只存 ID，不存完整 Attachment：字节与元数据的**唯一真源**是那条 tool 结果消息的
+	// Attachments（组装请求时读的是它）。这里放 ID 只是为了让工具卡片能画出缩略图——
+	// 工具结果消息在前端是被过滤掉不展示的（工具输出都归到卡片里）。
+	Images []string `json:"images,omitempty"`
 }
 
 // Message 会话中的一条聊天消息
@@ -36,6 +42,15 @@ type Message struct {
 	ToolCalls  []ToolCall `json:"toolCalls,omitempty"`
 	ToolCallID string     `json:"toolCallId,omitempty"` // role=tool 时对应的 tool_call_id
 	CreatedAt  int64      `json:"createdAt"`            // Unix 毫秒
+	// Attachments 本消息携带的附件（目前只有图片）。
+	//
+	// 用户贴的图挂在 user 消息上，工具读到的图挂在对应的 tool 结果消息上——
+	// 两种来源共用同一个字段，于是"怎么存"（AttachmentStore）与"怎么发给模型"
+	// （buildLLMMessages）各自只有一条实现，不需要为来源分叉。
+	//
+	// 这里存的是**引用**（ID/尺寸/媒体类型/相对路径），字节躺在附件目录里。
+	// 会话文件因此保持轻量——它是每次追加消息都要整体重写的那份数据。
+	Attachments []Attachment `json:"attachments,omitempty"`
 }
 
 // Conversation 单轮对话记录（用户提问 + AI 回答），借鉴 01agent
@@ -103,6 +118,13 @@ type Session struct {
 	ContextSummary     string `json:"contextSummary,omitempty"`     // 被摘要覆盖那部分的摘要正文
 	ContextCoveredUpTo int    `json:"contextCoveredUpTo,omitempty"` // 摘要覆盖到第几条消息（不含）
 	ContextSummaryAt   int64  `json:"contextSummaryAt,omitempty"`   // 摘要生成时间（Unix 毫秒）
+
+	// 长期记忆闭环（跨会话知识）。召回块只在构建请求时注入，不写进 Messages。
+	WorkingMemory        string   `json:"workingMemory,omitempty"`
+	WorkingMemoryUpTo    int      `json:"workingMemoryUpTo,omitempty"`
+	SurfacedMemoryIDs    []string `json:"surfacedMemoryIDs,omitempty"`
+	IgnoreMemory         bool     `json:"ignoreMemory,omitempty"`
+	LastExtractMessageID string   `json:"lastExtractMessageID,omitempty"`
 
 	// ParentID 非空表示这是子代理的会话（由某个主会话派生）。
 	// 它**不出现在会话列表里**——子代理是主会话的工作产物，不是用户的会话。
@@ -366,7 +388,7 @@ func (s *SessionStore) AppendMessage(id string, msg Message) (*Message, error) {
 
 	// 首条用户消息自动作为会话标题
 	if msg.Role == "user" && (session.Title == "" || session.Title == "新会话") {
-		session.Title = truncateTitle(msg.Content, 30)
+		session.Title = truncateTitle(titleSource(msg.Content, msg.Attachments), 30)
 	}
 
 	if err := s.saveSession(session); err != nil {
@@ -445,6 +467,60 @@ func (s *SessionStore) SetContextSummary(id, summary string, coveredUpTo int, at
 	session.ContextSummary = summary
 	session.ContextCoveredUpTo = coveredUpTo
 	session.ContextSummaryAt = at
+	// 压缩成功后旧召回已不在请求里，允许再召回（对标 Claude Code 扫附件：压缩后 naturally reset）。
+	if strings.TrimSpace(summary) != "" {
+		session.SurfacedMemoryIDs = nil
+	}
+	return s.saveSession(session)
+}
+
+// SetIgnoreMemory 本会话是否跳过记忆注入与提取。
+func (s *SessionStore) SetIgnoreMemory(id string, ignore bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	session, err := s.loadSession(id)
+	if err != nil {
+		return err
+	}
+	session.IgnoreMemory = ignore
+	return s.saveSession(session)
+}
+
+// AddSurfacedMemoryIDs 记下本会话已注入/读过正文的记忆，避免下一圈再灌一遍。
+func (s *SessionStore) AddSurfacedMemoryIDs(id string, ids []string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	session, err := s.loadSession(id)
+	if err != nil {
+		return err
+	}
+	seen := make(map[string]bool, len(session.SurfacedMemoryIDs)+len(ids))
+	for _, existing := range session.SurfacedMemoryIDs {
+		seen[existing] = true
+	}
+	for _, add := range ids {
+		add = strings.TrimSpace(add)
+		if add == "" || seen[add] {
+			continue
+		}
+		session.SurfacedMemoryIDs = append(session.SurfacedMemoryIDs, add)
+		seen[add] = true
+	}
+	return s.saveSession(session)
+}
+
+// ClearSurfacedMemoryIDs 清空已展示集合（测试与手动重置用）。
+func (s *SessionStore) ClearSurfacedMemoryIDs(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	session, err := s.loadSession(id)
+	if err != nil {
+		return err
+	}
+	session.SurfacedMemoryIDs = nil
 	return s.saveSession(session)
 }
 
@@ -548,6 +624,25 @@ func truncateTitle(s string, max int) string {
 		return s
 	}
 	return string(runes[:max]) + "..."
+}
+
+// titleSource 会话标题的来源文本：正文优先，没有正文时用第一张附件的名字。
+//
+// 纯图片消息（"这张报错图怎么回事"是常见开场，用户可能一个字都不打）若直接拿空正文
+// 当标题，会话列表里就会出现一行空白，用户根本认不出是哪个会话。
+func titleSource(content string, atts []Attachment) string {
+	if strings.TrimSpace(content) != "" {
+		return content
+	}
+	for _, a := range atts {
+		if strings.TrimSpace(a.Name) != "" {
+			return a.Name
+		}
+	}
+	if len(atts) > 0 {
+		return "（图片）"
+	}
+	return content
 }
 
 // CountSessionsByModel 返回引用指定模型名称的会话数量

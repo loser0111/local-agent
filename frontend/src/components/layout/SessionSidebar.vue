@@ -3,10 +3,31 @@ import { ref, computed, watch } from 'vue'
 import { ChevronDown, ChevronRight, FolderOpen } from 'lucide-vue-next'
 import { useSessionStore } from '@/stores/session'
 import { useUiStore } from '@/stores/ui'
+import { useChatStore } from '@/stores/chat'
+import { usePlanStore } from '@/stores/plan'
+import { useDiffStore } from '@/stores/diff'
+import { useSubagentStore } from '@/stores/subagent'
+import { usePermissionStore } from '@/stores/permissions'
+import { useAskStore } from '@/stores/asks'
 import { formatTime } from '@/utils/format'
 
 const sessionStore = useSessionStore()
 const ui = useUiStore()
+const chatStore = useChatStore()
+const planStore = usePlanStore()
+const diffStore = useDiffStore()
+const subagentStore = useSubagentStore()
+const permissionStore = usePermissionStore()
+const askStore = useAskStore()
+
+// 「正在跑」= 聊天运行中或计划执行中。两者都是会话级的，所以切走也不会消失。
+const runningIds = computed(() => [
+  ...new Set([...chatStore.runningSessionIds, ...planStore.executingSessionIds]),
+])
+// 「在等你」= 有挂起的授权或提问（后端在阻塞等待，不看用户当前在看哪条会话）
+const waitingIds = computed(() => [
+  ...new Set([...permissionStore.pendingSessionIds, ...askStore.pendingSessionIds]),
+])
 
 const emit = defineEmits(['new-session'])
 
@@ -147,6 +168,12 @@ async function handleDelete(e, id) {
   if (!ok) return
   try {
     await sessionStore.deleteSession(id)
+    // 顺带丢掉这条会话在各 store 里的桶：它们按会话分桶存放，
+    // 不清理就会一直留着（尤其是消息与附件缓存，量不小）。
+    chatStore.invalidate(id)
+    diffStore.clear(id)
+    planStore.reset(id)
+    subagentStore.clear(id)
   } catch (err) {
     alert(`删除失败：${err.message || err}`)
   }
@@ -203,9 +230,29 @@ async function handleDelete(e, id) {
             @click="handleSwitch(s.id)"
           >
             <span class="status-dot" :class="s.status" />
+            <!-- 多会话并行时的状态标记：运行中 / 等待应答。折叠态只留一个小圆点，
+                 展开态在 meta 行里给一行文字——否则用户不知道后台还有几条在跑。 -->
+            <span
+              v-if="runningIds.includes(s.id)"
+              class="run-dot"
+              :title="'正在运行（切到别的会话不会中断它）'"
+            />
+            <span
+              v-if="waitingIds.includes(s.id)"
+              class="wait-dot"
+              :title="'有一个授权或提问在等你的答复'"
+            />
             <div v-if="!collapsed" class="session-content">
               <div class="session-title">{{ s.title }}</div>
               <div class="session-meta">
+                <template v-if="runningIds.includes(s.id)">
+                  <span class="chip chip-run">运行中</span>
+                  <span>·</span>
+                </template>
+                <template v-else-if="waitingIds.includes(s.id)">
+                  <span class="chip chip-wait">待应答</span>
+                  <span>·</span>
+                </template>
                 <span>{{ s.status === 'active' ? '活跃' : s.status === 'completed' ? '已完成' : s.status === 'archived' ? '归档' : s.status }}</span>
                 <span>·</span>
                 <span>{{ formatTime(s.endAt || s.startAt) }}</span>
@@ -365,6 +412,54 @@ async function handleDelete(e, id) {
   display: flex;
   gap: $space-xs;
   margin-top: 2px;
+}
+
+// 「运行中」小圆点：与状态点并列，折叠态也看得到（折叠时靠它表达"后台还在跑"）
+.run-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: $color-primary;
+  flex-shrink: 0;
+  animation: run-pulse 1.4s ease-in-out infinite;
+}
+
+// 「等待应答」小圆点：用警告色，因为它需要用户动作，否则后端会等到超时
+.wait-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: $color-warning;
+  flex-shrink: 0;
+}
+
+@keyframes run-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.25;
+  }
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 4px;
+  border-radius: $radius-sm;
+  font-size: $font-size-xs;
+  line-height: 14px;
+}
+
+.chip-run {
+  color: $color-primary;
+  background: $color-primary-soft;
+}
+
+.chip-wait {
+  color: $color-warning;
+  background: $color-warning-soft;
 }
 
 .delete-btn {

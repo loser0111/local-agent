@@ -18,8 +18,13 @@ import {
   GetDiffTurns,
   ListSubagents,
   GetSubagentMessages,
+  ListRunningSessions,
+  SaveAttachment,
+  GetAttachmentDataURL,
+  FetchImageURL,
 } from '@/../wailsjs/go/main/App'
 import { EventsOn, EventsOff } from '@/../wailsjs/runtime/runtime'
+import { subscribeChat } from '@/api/eventbus'
 import { putMockPlan } from '@/api/plan'
 import { DEFAULT_VIEW_MODE } from '@/types'
 
@@ -146,6 +151,8 @@ export async function appendMessage(sessionId, message) {
     role: message.role,
     content: message.content || '',
     toolCalls: message.toolCalls || undefined,
+    // 附件引用要跟着消息一起落库：少了它，界面上那张图会在刷新后消失
+    attachments: message.attachments?.length ? message.attachments : undefined,
     createdAt: now,
   }
   session.messages.push(full)
@@ -220,43 +227,25 @@ export async function chat(
   } = {}
 ) {
   if (isWails()) {
-    // 监听工具调用中间状态、流式分片、计划状态与授权请求事件
-    const eventHandler = (eventData) => {
-      if (!eventData) return
-      switch (eventData.type) {
-        case 'reply_delta':
-          onReplyDelta?.(eventData.reply)
-          break
-        case 'tool_call_start':
-          onToolCallStart?.(eventData.toolCall)
-          break
-        case 'tool_call_end':
-          onToolCallEnd?.(eventData.toolCall)
-          break
-        case 'plan_update':
-          onPlanUpdate?.(eventData.plan)
-          break
-        // 自动摘要压缩刚生效：用量会立刻下降。这是设计内行为，但用户只看到数字掉了一半，
-// 不解释一句就会以为对话被截断了。
-        case 'context_compacted':
-          onContextCompacted?.(eventData)
-          break
-        // 被用户停止（软取消或硬取消）：立即通知调用方收尾流式气泡，
-        // 否则它会一直停在"正在输入"的状态
-        case 'cancelled':
-          onCancelled?.(eventData.error)
-          break
-        // 授权请求 / 模型提问走独立的 user:interaction 通道（由 App.vue 统一订阅），
-        // 不在这里分发 —— 否则计划执行等入口会漏（详见 api/interaction.js 的说明）
-      }
-    }
-    EventsOn('chat:event', eventHandler)
+    // 按会话订阅运行事件（工具调用中间状态、流式分片、计划状态、压缩提示、取消）。
+    //
+    // 这里**不再**自己 EventsOn / finally EventsOff：Wails 的 EventsOff 会摘掉该事件名下的
+    // 全部监听，A 会话跑完会把 B 会话那次的监听一起摘掉（多会话并行时必然发生）。
+    // 现在统一由 api/eventbus.js 做进程级单订阅 + 按 sessionId 路由，详见那里的说明。
+    const off = subscribeChat(sessionId, {
+      onReplyDelta,
+      onToolCallStart,
+      onToolCallEnd,
+      onPlanUpdate,
+      onContextCompacted,
+      onCancelled,
+    })
 
     try {
       const result = await Chat(sessionId, query, !!stream, !!plan)
       return result
     } finally {
-      EventsOff('chat:event')
+      off()
     }
   }
 
@@ -347,6 +336,88 @@ export async function chat(
   }
 }
 
+// ===== 附件（图片）=====
+
+// 浏览器开发模式的附件表：`${sessionId}:${id}` → data URL。
+// 真实环境里图是落盘的（~/.local-agent/attachments/<会话ID>/），这里只放内存够用。
+const mockAttachments = new Map()
+
+/**
+ * 保存一张图片附件，返回可写进消息的附件引用。
+ *
+ * 流程是"先存附件、再带引用落消息"：消息落库时引用已经完整，
+ * 因此不会出现"消息里挂着一张读不到的图"这种中间态。
+ *
+ * 后端会做入站规整（校验格式与大小、按最长边 1568px 等比缩小、必要时重编码），
+ * 所以返回的 bytes/width/height 可能与你传进来的不一致——界面应以后端返回的为准。
+ *
+ * @param {string} sessionId
+ * @param {string} name 原始文件名（只用于展示）
+ * @param {string} payload base64 字符串或 data URL
+ * @param {string} [source] user（用户贴的）/ tool（模型读的）
+ * @returns {Promise<import('@/types').Attachment>}
+ */
+export async function saveAttachment(sessionId, name, payload, source = 'user') {
+  if (isWails()) {
+    return await SaveAttachment(sessionId, name, payload, source)
+  }
+  const mediaType = /^data:([^;,]+)/.exec(payload)?.[1] || 'image/png'
+  const base64 = payload.includes(',') ? payload.slice(payload.indexOf(',') + 1) : payload
+  const id = `mock${Math.random().toString(16).slice(2, 10)}`
+  const dataUrl = payload.startsWith('data:') ? payload : `data:${mediaType};base64,${base64}`
+  mockAttachments.set(`${sessionId}:${id}`, dataUrl)
+  return {
+    id,
+    kind: 'image',
+    name,
+    mediaType,
+    bytes: Math.round((base64.length * 3) / 4),
+    source,
+    changed: false,
+    createdAt: Date.now(),
+  }
+}
+
+/**
+ * 取附件的数据 URL（历史消息里的图片展示用）。
+ *
+ * 取不到时返回空串而不是抛错：附件目录被清理过是真实存在的情况，
+ * 界面据此显示"图片已丢失"，比一个破图占位诚实得多。
+ *
+ * @param {string} sessionId
+ * @param {string} id 附件 ID（只能给 ID，后端不接受路径——那等于把读任意文件的能力开给前端）
+ * @returns {Promise<string>} 空串表示取不到
+ */
+export async function getAttachmentDataURL(sessionId, id) {
+  if (!sessionId || !id) return ''
+  if (!isWails()) {
+    return mockAttachments.get(`${sessionId}:${id}`) || ''
+  }
+  try {
+    return (await GetAttachmentDataURL(sessionId, id)) || ''
+  } catch {
+    return ''
+  }
+}
+
+/**
+ * 从图片链接抓取一张图，按与"用户贴图"完全相同的方式存成会话附件。
+ *
+ * 只应由**用户明确点按**触发（界面上的「链接」入口）：这会从本机发起一次出站请求。
+ * 后端限定 http/https、重定向最多 3 跳且逐跳校验、整体超时、响应体限长，
+ * 并要求内容真能嗅探成受支持的图片。模型无法触发它——它不是工具。
+ *
+ * @param {string} sessionId
+ * @param {string} url
+ * @returns {Promise<import('@/types').Attachment>}
+ */
+export async function fetchImageURL(sessionId, url) {
+  if (isWails()) {
+    return await FetchImageURL(sessionId, url)
+  }
+  throw new Error('浏览器开发模式不支持从链接抓取图片')
+}
+
 // ===== Diff 差异视图 =====
 
 // 浏览器开发模式 mock（非 Wails 环境）
@@ -422,7 +493,8 @@ export async function getDiffTurns(sessionId) {
 
 /**
  * 订阅 diff 实时更新事件
- * @param {Function} cb 回调，参数为 { diff, turn }
+ * @param {Function} cb 回调，参数为 { diff, turn, sessionId, runId }
+ *   —— sessionId 是归属：调用方必须把它写进对应会话的桶里，而不是"当前显示的那一份"。
  * @returns {Function} 取消订阅函数
  */
 export function onDiffUpdate(cb) {
@@ -444,6 +516,27 @@ export function onDiffUpdate(cb) {
 export async function stopChat(sessionId, hard = false) {
   if (isWails()) return await StopChat(sessionId, !!hard)
   return false // 浏览器 mock 模式没有真实运行可停
+}
+
+/**
+ * 列出当前有活跃运行的会话 ID（可能同时有多条）。
+ *
+ * 页面重载（wails dev 热更新 / 手动刷新）后，前端内存里的"哪条在跑"全丢了，
+ * 而后端的运行还在跑。用它把状态补回来——否则界面会把它们显示成空闲，
+ * 用户再点发送只会收到后端的互斥拒绝，看不出为什么。
+ *
+ * 只能补"在跑"这个事实，补不回已经流出去的那段文字（那只能靠事件流）。
+ *
+ * @returns {Promise<string[]>}
+ */
+export async function listRunningSessions() {
+  if (!isWails()) return []
+  try {
+    return (await ListRunningSessions()) || []
+  } catch (e) {
+    console.warn('查询运行中的会话失败:', e)
+    return []
+  }
 }
 
 /**

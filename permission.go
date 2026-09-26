@@ -874,6 +874,10 @@ var readOnlyTools = map[string]bool{
 	// ask_user 只与用户交互，不碰文件系统也不执行命令；它本身就是"问用户"，
 	// 再叠一层权限弹窗只会变成连续两个弹窗，且没有任何安全收益。
 	toolAskUser: true,
+	// 记忆工具只碰 ~/.local-agent/memory，不改工作区；弹窗没有安全收益。
+	toolMemorySearch: true,
+	toolMemorySave:   true,
+	toolMemoryForget: true,
 }
 
 // isReadOnlySubject 判定主体是否只读。

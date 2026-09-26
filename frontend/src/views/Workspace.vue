@@ -2,6 +2,7 @@
 import { ref, watch, onMounted } from 'vue'
 import { useSessionStore } from '@/stores/session'
 import { useChatStore } from '@/stores/chat'
+import { listRunningSessions } from '@/api/session'
 import TopBar from '@/components/layout/TopBar.vue'
 import SessionSidebar from '@/components/layout/SessionSidebar.vue'
 import PaneContainer from '@/components/layout/PaneContainer.vue'
@@ -27,6 +28,10 @@ function onSidebarDrag(dx) {
 onMounted(async () => {
   // 从后端加载历史会话列表
   await sessionStore.init()
+  // 会话列表就绪后，把"哪几条会话正在跑"也从后端补回来：
+  // 页面重载（wails dev 热更新 / 手动刷新）会清空前端内存态，而后端的运行还在跑，
+  // 不补的话界面会把它显示成空闲，用户点发送只会收到互斥拒绝、看不出原因。
+  chatStore.hydrateRunning(await listRunningSessions())
 })
 
 // 切换会话时加载该会话的历史消息
