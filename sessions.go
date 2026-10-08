@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"wails-tmp/internal/diff"
 )
 
 // ===== 数据结构（借鉴 01agent 的 SessionHistory/Conversation 设计） =====
@@ -93,7 +94,7 @@ func normalizeViewMode(mode string) string {
 //
 // DiffBaseline / DiffTouched 是会话级 diff 状态：基线 commit 与本会话触碰过的文件
 // （仓库相对路径）。落盘是为了重启后仍能算出「本会话改了哪些文件」，
-// 而不是把整个工作区的改动都算进来（详见 DiffService 的注释）。
+// 而不是把整个工作区的改动都算进来（详见 diff.DiffService 的注释）。
 type Session struct {
 	ID             string          `json:"id"`
 	Title          string          `json:"title"`
@@ -107,7 +108,7 @@ type Session struct {
 	EndAt          int64           `json:"endAt"`
 	Messages       []Message       `json:"messages"`
 	Conversations  []*Conversation `json:"conversations"`
-	Diffs          []DiffTurn      `json:"diffs,omitempty"` // 每轮对话产生的文件差异
+	Diffs          []diff.DiffTurn `json:"diffs,omitempty"` // 每轮对话产生的文件差异
 	DiffBaseline   string          `json:"diffBaseline,omitempty"`
 	DiffTouched    []string        `json:"diffTouched,omitempty"`
 	EnabledTools   []string        `json:"enabledTools,omitempty"`  // 本会话可用的工具 ID 白名单（空=全部已启用工具）
@@ -425,9 +426,9 @@ func (s *SessionStore) AppendConversation(id string, conv *Conversation) error {
 // 避免为了同步状态再写一遍整个会话文件。
 // nextDiffTurn 下一轮的轮次号。
 //
-// 这个规则必须只有一处：AppendDiff 用它给 DiffTurn 编号，chat.go 取 checkpoint 时
+// 这个规则必须只有一处：AppendDiff 用它给 diff.DiffTurn 编号，chat.go 取 checkpoint 时
 // 也用它——两处若各写一份 `len(Diffs)+1`，一旦有一边改了就会让 checkpoint 的 ref
-// 编号与 DiffTurn.Turn 错位，表现为"某几轮的回退按钮点了没反应"。
+// 编号与 diff.DiffTurn.Turn 错位，表现为"某几轮的回退按钮点了没反应"。
 func nextDiffTurn(session *Session) int {
 	if session == nil {
 		return 1
@@ -435,7 +436,7 @@ func nextDiffTurn(session *Session) int {
 	return len(session.Diffs) + 1
 }
 
-func (s *SessionStore) AppendDiff(id string, turn DiffTurn, baseline string, touched []string) (int, error) {
+func (s *SessionStore) AppendDiff(id string, turn diff.DiffTurn, baseline string, touched []string) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -565,7 +566,7 @@ func (s *SessionStore) ClearContextSummary(id string) error {
 }
 
 // MarkDiffUndone 标记某轮已被回退。
-// 保留 DiffTurn 记录本身而不是删掉：用户可能回退后重新执行，历史应当留痕。
+// 保留 diff.DiffTurn 记录本身而不是删掉：用户可能回退后重新执行，历史应当留痕。
 func (s *SessionStore) MarkDiffUndone(id string, turn int, undone bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

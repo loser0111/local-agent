@@ -1,4 +1,4 @@
-package main
+package diff
 
 import (
 	"fmt"
@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sort"
 	"testing"
+	"wails-tmp/internal/git"
 )
 
 // T1 基本解析：add/del/context 统计与行号
@@ -207,7 +208,7 @@ func newTestRepo(t *testing.T) string {
 	dir := t.TempDir()
 	run := func(args ...string) {
 		t.Helper()
-		if _, err := runGit(dir, args...); err != nil {
+		if _, err := git.Run(dir, args...); err != nil {
 			t.Skipf("git %v 不可用: %v", args, err)
 		}
 	}

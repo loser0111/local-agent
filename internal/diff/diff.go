@@ -1,4 +1,4 @@
-package main
+package diff
 
 import (
 	"bufio"
@@ -10,7 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"time"
+
+	"wails-tmp/internal/git"
 )
 
 // ===== Diff 数据契约（字段名与前端 DiffFile/DiffLine/DiffHunk/DiffTurn 对齐）=====
@@ -62,21 +63,10 @@ type DiffTurn struct {
 const (
 	maxDiffFileBytes = 1 << 20 // 单文件超过 1MB 跳过
 	maxDiffFiles     = 200     // 最多返回文件数
-	gitTimeout       = 15 * time.Second
 )
 
-// ===== git 执行封装 =====
-// 关键点：
-//
-//	-c core.quotepath=false  避免中文/非 ASCII 路径被转义成 \xxx，否则无法解析
-//	--no-pager               防止进入分页
-//	固定超时                 防止大仓库卡死对话
-// runGit 执行 git 命令。具体实现在 checkpoint.go 的 runGitEnv——它多一个
-// "附加环境变量"的能力（checkpoint 要传 GIT_INDEX_FILE 才能不污染真实索引），
-// 这里委托过去，全项目只保留一份 git 调用封装。
-func runGit(dir string, args ...string) (string, error) {
-	return runGitEnv(dir, nil, args...)
-}
+// git 调用统一走 internal/git：-c core.quotepath=false（避免中文等非 ASCII
+// 路径被转义成 \xxx）、--no-pager、固定超时都在那里封装。
 
 // ===== 会话级差异服务 =====
 //
@@ -119,7 +109,7 @@ func (s *DiffService) IsRepo(dir string) bool {
 	if dir == "" {
 		return false
 	}
-	out, err := runGit(dir, "rev-parse", "--is-inside-work-tree")
+	out, err := git.Run(dir, "rev-parse", "--is-inside-work-tree")
 	return err == nil && strings.TrimSpace(out) == "true"
 }
 
@@ -339,7 +329,7 @@ func (s *DiffService) DiffScoped(dir, baseline string, paths []string) ([]DiffFi
 
 	args := []string{"diff", "--no-color", "--unified=3", "--no-ext-diff", baseline, "--"}
 	args = append(args, paths...)
-	out, err := runGit(dir, args...)
+	out, err := git.Run(dir, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -347,7 +337,7 @@ func (s *DiffService) DiffScoped(dir, baseline string, paths []string) ([]DiffFi
 
 	// git diff 不含未跟踪文件，单独补齐；同样限定在触碰过的路径内
 	utArgs := append([]string{"ls-files", "--others", "--exclude-standard", "-z", "--"}, paths...)
-	if untracked, err := runGit(dir, utArgs...); err == nil {
+	if untracked, err := git.Run(dir, utArgs...); err == nil {
 		for _, rel := range strings.Split(untracked, "\x00") {
 			rel = strings.TrimSpace(rel)
 			if rel == "" {
@@ -375,7 +365,7 @@ func (s *DiffService) DiffScoped(dir, baseline string, paths []string) ([]DiffFi
 // node_modules）下会把每次扫描变成几万条，代价过大；目录折叠后目录自身的 mtime
 // 仍能反映「里面新增/删除了文件」。
 func scanWorkingTree(dir string) map[string]string {
-	out, err := runGit(dir, "status", "--porcelain", "-z", "--untracked-files=normal")
+	out, err := git.Run(dir, "status", "--porcelain", "-z", "--untracked-files=normal")
 	if err != nil {
 		return nil
 	}
@@ -438,12 +428,12 @@ func sortedKeys(set map[string]bool) []string {
 // Snapshot 生成工作区快照 commit，不修改工作区与暂存区。
 // 优先用 git stash create（有改动时返回悬空 commit）；无改动时回退 HEAD。
 func (s *DiffService) Snapshot(dir string) (string, error) {
-	if out, err := runGit(dir, "stash", "create"); err == nil {
+	if out, err := git.Run(dir, "stash", "create"); err == nil {
 		if sha := strings.TrimSpace(out); sha != "" {
 			return sha, nil
 		}
 	}
-	out, err := runGit(dir, "rev-parse", "HEAD")
+	out, err := git.Run(dir, "rev-parse", "HEAD")
 	if err != nil {
 		return "", err
 	}
@@ -614,7 +604,7 @@ func ParseUnifiedDiff(out string) []DiffFile {
 
 // ===== 统计工具 =====
 
-func sumAdd(files []DiffFile) int {
+func SumAdd(files []DiffFile) int {
 	n := 0
 	for _, f := range files {
 		n += f.Additions
@@ -622,7 +612,7 @@ func sumAdd(files []DiffFile) int {
 	return n
 }
 
-func sumDel(files []DiffFile) int {
+func SumDel(files []DiffFile) int {
 	n := 0
 	for _, f := range files {
 		n += f.Deletions

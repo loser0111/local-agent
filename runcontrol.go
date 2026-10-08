@@ -66,7 +66,7 @@ type runControl struct {
 	subagents int // 本次运行已派生的子代理数（上限见 subagentMaxTotal）
 	// excluded 本次运行期间"不该归因给某会话"的路径，按会话 ID 分组。
 	// 唯一的来源是子代理：它跑动期间改的文件会落在父会话的工具执行窗口里，
-	// 被 DiffService.NoteActivity 顺手记到父会话账上（见 noteExcludedPaths）。
+	// 被 diff.DiffService.NoteActivity 顺手记到父会话账上（见 noteExcludedPaths）。
 	excluded map[string][]string
 }
 
@@ -154,7 +154,7 @@ func (r *runControl) claimSubagent(limit int) bool {
 // noteExcludedPaths 记下"这些路径不该归因给该会话"。
 //
 // 用途只有一个：子代理改过的文件不能算父会话的改动。归因是按**时间窗口扫全工作区**
-// （DiffService.NoteActivity），子代理整个跑动都发生在父会话那次 spawn_agent 调用的
+// （diff.DiffService.NoteActivity），子代理整个跑动都发生在父会话那次 spawn_agent 调用的
 // 窗口之内，所以它的文件会被记到父会话账上——后果是父会话的 diff 面板里出现不是它改的
 // 文件，回退父会话那一轮时还会连带把这些文件也回退掉。
 //

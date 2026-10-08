@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"wails-tmp/internal/diff"
+	"wails-tmp/internal/procx"
 )
 
 // ===== 工作区文件工具 =====
@@ -155,14 +157,14 @@ type FileChange struct {
 
 // ToolFileChange 提供给界面的归因结果（带解析后的差异，复用差异面板的结构）
 type ToolFileChange struct {
-	Time    int64      `json:"time"`
-	Tool    string     `json:"tool"`
-	Path    string     `json:"path"`
-	Rel     string     `json:"rel"`
-	Action  string     `json:"action"`
-	Added   int        `json:"added"`
-	Removed int        `json:"removed"`
-	Files   []DiffFile `json:"files,omitempty"`
+	Time    int64           `json:"time"`
+	Tool    string          `json:"tool"`
+	Path    string          `json:"path"`
+	Rel     string          `json:"rel"`
+	Action  string          `json:"action"`
+	Added   int             `json:"added"`
+	Removed int             `json:"removed"`
+	Files   []diff.DiffFile `json:"files,omitempty"`
 }
 
 // FileChangeLog 会话级文件改动记录（内存；进程退出即失效）
@@ -311,7 +313,7 @@ func runGitDiff(dir string, args ...string) (string, error) {
 
 	full := append([]string{"-C", dir, "--no-pager"}, args...)
 	cmd := exec.CommandContext(ctx, "git", full...)
-	hideConsoleWindow(cmd) // Windows 上不弹控制台窗口（见该函数说明）
+	procx.HideConsoleWindow(cmd) // Windows 上不弹控制台窗口（见该函数说明）
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -323,15 +325,15 @@ func runGitDiff(dir string, args ...string) (string, error) {
 }
 
 // diffCounts 从统一 diff 文本里统计增删行数（解析失败时返回 0,0）
-func diffCounts(diff string) (int, int) {
-	if strings.TrimSpace(diff) == "" {
+func diffCounts(diffText string) (int, int) {
+	if strings.TrimSpace(diffText) == "" {
 		return 0, 0
 	}
-	files := ParseUnifiedDiff(diff)
+	files := diff.ParseUnifiedDiff(diffText)
 	if len(files) == 0 {
 		return 0, 0
 	}
-	return sumAdd(files), sumDel(files)
+	return diff.SumAdd(files), diff.SumDel(files)
 }
 
 // ===== 公共读取工具 =====

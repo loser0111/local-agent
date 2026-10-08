@@ -1,19 +1,23 @@
 package main
 
 import (
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"sort"
 	"strings"
 	"testing"
+
+	"wails-tmp/internal/procx"
 )
 
 // ===== 子进程的控制台窗口（Windows）=====
 //
 // 这类缺陷只在 Windows 上出现，而开发/自检常在 macOS 或 Linux 上做——所以这里不靠
-// 平台判断，而是**扫全包源码**把"每个 spawn 点都必须隐藏控制台窗口"这条约束固定下来。
+// 平台判断，而是**扫整个模块的源码**把"每个 spawn 点都必须隐藏控制台窗口"这条约束固定下来。
 
 // spawnBody 一个函数的名字与函数体
 type spawnBody struct {
@@ -85,51 +89,67 @@ func spawnScanBodies(src string) []spawnBody {
 	return out
 }
 
-// 每个拉起子进程的函数都必须调用 hideConsoleWindow。
+// 每个拉起子进程的函数都必须调用 procx.HideConsoleWindow。
 //
 // 守的是这个缺陷：Wails 在 Windows 上按 GUI 子系统构建，程序自身没有控制台，于是它启动的
 // 任何控制台程序（powershell / git / node / python）都会被 Windows **新建一个控制台窗口**，
 // 表现为每执行一次工具闪一个黑框。漏一处就要用户来报一次。
 //
 // 判定粒度是**函数体**而不是文件：文件级判断会让"一个函数写了、另一个漏了"蒙混过关。
+//
+// ⚠️ 扫描必须**递归整个模块**，不能只看当前目录：拆包之后 spawn 调用点分散在多个包里
+// （internal/git、internal/procx 等）。第一版只 os.ReadDir(".") 扫根包——拆包后会静默漏掉
+// 所有 internal/ 下的调用点，而"检查工具自己失效"比缺陷本身更难发现。因此这里改为递归
+// 枚举所有含 .go 的目录，并断言目录数（单目录即说明递归退化了）。
 func TestEverySpawnHidesConsoleWindow(t *testing.T) {
-	entries, err := os.ReadDir(".")
+	dirs, err := goPackageDirs(".")
 	if err != nil {
-		t.Fatalf("读取包目录失败: %v", err)
+		t.Fatalf("枚举包目录失败: %v", err)
+	}
+	if len(dirs) < 3 {
+		t.Fatalf("只扫到 %d 个包目录——递归扫描退化了（spawn 调用点分布在根包与 internal/ 下）", len(dirs))
 	}
 	spawnCall := regexp.MustCompile(`exec\.Command(Context)?\(`)
-	hides := regexp.MustCompile(`hideConsoleWindow\(`)
+	// 大小写都要认：拆包后助手是导出名 procx.HideConsoleWindow。
+	hides := regexp.MustCompile(`(?i)hideConsoleWindow\(`)
 
 	// 目前已知的 spawn 点数量。新增调用点时把它改大（顺便会看到这段注释），
 	// 变小时说明有调用点被删掉了——两种情况都值得停下来确认。
 	const knownSpawnSites = 6
 
 	sites, missing := 0, []string{}
-	for _, e := range entries {
-		name := e.Name()
-		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
-			continue
-		}
-		if name == "procexec_windows.go" {
-			continue // 助手自身的实现（非 Windows 还有 procexec_other.go），不含 spawn 调用
-		}
-		src, err := os.ReadFile(filepath.Join(".", name))
+	for _, dir := range dirs {
+		entries, err := os.ReadDir(dir)
 		if err != nil {
-			t.Fatalf("读取 %s 失败: %v", name, err)
+			t.Fatalf("读取包目录 %s 失败: %v", dir, err)
 		}
-		for _, fn := range spawnScanBodies(string(src)) {
-			if !spawnCall.MatchString(fn.body) {
+		for _, e := range entries {
+			name := e.Name()
+			if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
 				continue
 			}
-			sites++
-			if !hides.MatchString(fn.body) {
-				missing = append(missing, name+": "+fn.name)
+			if name == "procexec_windows.go" {
+				continue // 助手自身的实现（非 Windows 还有 procexec_other.go），不含 spawn 调用
+			}
+			path := filepath.Join(dir, name)
+			src, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("读取 %s 失败: %v", path, err)
+			}
+			for _, fn := range spawnScanBodies(string(src)) {
+				if !spawnCall.MatchString(fn.body) {
+					continue
+				}
+				sites++
+				if !hides.MatchString(fn.body) {
+					missing = append(missing, path+": "+fn.name)
+				}
 			}
 		}
 	}
 
 	if len(missing) > 0 {
-		t.Fatalf("这些函数拉起了子进程却没有隐藏控制台窗口，Windows 上会弹黑框（见 procexec_windows.go）:\n  %s",
+		t.Fatalf("这些函数拉起了子进程却没有隐藏控制台窗口，Windows 上会弹黑框（见 internal/procx）:\n  %s",
 			strings.Join(missing, "\n  "))
 	}
 	if sites < knownSpawnSites {
@@ -138,19 +158,55 @@ func TestEverySpawnHidesConsoleWindow(t *testing.T) {
 	}
 }
 
+// goPackageDirs 返回模块内所有含 .go 文件的目录（跳过生成物、第三方与隐藏目录）。
+func goPackageDirs(root string) ([]string, error) {
+	skip := map[string]bool{
+		"node_modules": true,
+		"frontend":     true,
+		"build":        true,
+		"cad":          true,
+	}
+	out := []string{}
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() {
+			return nil
+		}
+		base := d.Name()
+		if path != root && (skip[base] || strings.HasPrefix(base, ".")) {
+			return filepath.SkipDir
+		}
+		entries, err := os.ReadDir(path)
+		if err != nil {
+			return err
+		}
+		for _, e := range entries {
+			if !e.IsDir() && strings.HasSuffix(e.Name(), ".go") {
+				out = append(out, path)
+				break
+			}
+		}
+		return nil
+	})
+	sort.Strings(out)
+	return out, err
+}
+
 // 非 Windows 上必须是空操作：不能顺手去动 SysProcAttr 的其他字段。
 //
 // 这条不是凑数：将来若有人想"统一在这里设置进程组/超时"之类的属性，改动会落到
 // 每个平台，而这句话只是"隐藏控制台窗口"——让它保持单一职责，行为才可预期。
 func TestHideConsoleWindowIsNoopOffWindows(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		t.Skip("Windows 上的行为由 procexec_windows.go 的实现与构建验证，这里只守非 Windows")
+		t.Skip("Windows 上的行为由 internal/procx 的实现与构建验证，这里只守非 Windows")
 	}
 	cmd := exec.Command("echo", "hi")
-	hideConsoleWindow(cmd)
+	procx.HideConsoleWindow(cmd)
 	if cmd.SysProcAttr != nil {
 		t.Fatalf("非 Windows 上不该修改 SysProcAttr，实际 %+v", cmd.SysProcAttr)
 	}
 	// nil 也要安全
-	hideConsoleWindow(nil)
+	procx.HideConsoleWindow(nil)
 }

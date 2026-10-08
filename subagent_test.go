@@ -13,6 +13,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"wails-tmp/internal/diff"
 )
 
 // ===== P3 第 2 步：权限的"只判定不等待"入口 + 子代理网关 =====
@@ -308,7 +309,7 @@ func newSubagentTestEnv(t *testing.T, dir string, mode Mode, responses ...string
 		baseDir:      baseDir,
 		sessionStore: NewSessionStore(filepath.Join(baseDir, "sessions")),
 		toolStore:    NewToolStore(filepath.Join(baseDir, "tools.json")),
-		diffService:  NewDiffService(),
+		diffService:  diff.NewDiffService(),
 		fileChanges:  NewFileChangeLog(50),
 		reqLog:       &llmRequestLog{},
 		runs:         &runRegistry{},
@@ -542,7 +543,7 @@ func TestSubagentRunsIsolatedFromParentContext(t *testing.T) {
 		t.Fatalf("子代理改过、父会话没碰过的文件应登记为待剔除，实际 %v", excluded)
 	}
 
-	// 剔除落到 DiffService 上的效果：这两个集合都清掉之后，父会话的 diff 不再包含它
+	// 剔除落到 diff.DiffService 上的效果：这两个集合都清掉之后，父会话的 diff 不再包含它
 	env.app.diffService.DropTouched(env.parent.ID, excluded)
 	if got := env.app.diffService.TurnTouchedSnapshot(env.parent.ID); len(got) != 0 {
 		t.Errorf("剔除后父会话本轮归因应为空，实际 %v", got)

@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"wails-tmp/internal/procx"
 )
 
 // ===== 技能安装器 =====
@@ -27,10 +28,10 @@ import (
 //   - 冲突先拦：批量安装前先检查所有目标 ID，有任一冲突就整体拒绝，不做半截安装。
 //   - 路径不许逃逸：zip 条目、软链接、git 子目录都要落在允许范围内。
 const (
-	skillArchiveMaxEntries = 2000              // 单个压缩包最多条目数
-	skillArchiveMaxBytes   = 64 << 20          // 解压后总大小上限
-	skillCopyMaxFiles      = 2000              // 单个技能最多复制文件数
-	skillCopyMaxBytes      = 64 << 20          // 单个技能复制总大小上限
+	skillArchiveMaxEntries = 2000     // 单个压缩包最多条目数
+	skillArchiveMaxBytes   = 64 << 20 // 解压后总大小上限
+	skillCopyMaxFiles      = 2000     // 单个技能最多复制文件数
+	skillCopyMaxBytes      = 64 << 20 // 单个技能复制总大小上限
 	skillDefaultGitTimeout = 120 * time.Second
 )
 
@@ -39,7 +40,7 @@ type SkillInstallResult struct {
 	ID       string   `json:"id"`
 	Name     string   `json:"name"`
 	Dir      string   `json:"dir"`
-	Action   string   `json:"action"`             // installed | updated
+	Action   string   `json:"action"` // installed | updated
 	Warnings []string `json:"warnings,omitempty"`
 }
 
@@ -115,7 +116,7 @@ func (i *SkillInstaller) InstallFromGit(url, ref, subdir string) ([]*SkillInstal
 	ctx, cancel := context.WithTimeout(context.Background(), skillDefaultGitTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", args...)
-	hideConsoleWindow(cmd)                                  // Windows 上不弹控制台窗口（见该函数说明）
+	procx.HideConsoleWindow(cmd)                            // Windows 上不弹控制台窗口（见该函数说明）
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0") // 需要交互认证时直接失败，不要挂住界面
 	out, err := cmd.CombinedOutput()
 	if err != nil {

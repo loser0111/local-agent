@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+	"wails-tmp/internal/diff"
 
 	wailsRuntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
@@ -28,7 +29,7 @@ type SubagentInfo struct {
 	Task        string   `json:"task"`   // 派给它做的事（title 是它的截断版）
 	Status      string   `json:"status"` // running | completed | failed | cancelled | interrupted
 	Model       string   `json:"model,omitempty"`
-	Step        int      `json:"step"`        // 已执行的工具调用数
+	Step        int      `json:"step"` // 已执行的工具调用数
 	CurrentTool string   `json:"currentTool,omitempty"`
 	StartedAt   int64    `json:"startedAt"`
 	EndedAt     int64    `json:"endedAt,omitempty"`
@@ -176,7 +177,7 @@ func (r *subagentRecorder) Emit(ev ChatEvent) {
 
 // EmitDiff 不推：子代理的改动属于它自己的会话，面板展开时按需加载，
 // 推给主会话的 diff 面板等于把它算成了主会话的改动。
-func (r *subagentRecorder) EmitDiff([]DiffFile, int) {}
+func (r *subagentRecorder) EmitDiff([]diff.DiffFile, int) {}
 
 // FlushStream 子代理不流式，返回空实现即可
 func (r *subagentRecorder) FlushStream() (func(string), func()) {

@@ -1,7 +1,6 @@
 //go:build windows
 
-package main
-
+package procx
 import (
 	"os/exec"
 	"syscall"
@@ -11,7 +10,7 @@ import (
 // 没有用 syscall 里的同名常量——那里没有导出它，只能写字面量。
 const createNoWindow = 0x08000000
 
-// hideConsoleWindow 让子进程不要在 Windows 上弹出控制台窗口。
+// HideConsoleWindow 让子进程不要在 Windows 上弹出控制台窗口。
 //
 // 为什么需要：Wails 在 Windows 上默认用 **GUI 子系统**（-H windowsgui）构建，
 // 本项目自身**没有控制台**。这时它启动的任何控制台程序（powershell / git / node /
@@ -31,7 +30,7 @@ const createNoWindow = 0x08000000
 // ⚠️ 新增任何 exec.Command / exec.CommandContext 调用点都必须调用它：漏一处就在
 // Windows 上多闪一个黑框，而这种缺陷在 macOS/Linux 上开发时**完全看不见**。
 // procexec_test.go 里有一条结构性测试扫全包源码守着这件事。
-func hideConsoleWindow(cmd *exec.Cmd) {
+func HideConsoleWindow(cmd *exec.Cmd) {
 	if cmd == nil {
 		return
 	}

@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"wails-tmp/internal/diff"
 
 	wailsRuntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
@@ -123,7 +124,6 @@ func (m LLMMessage) MarshalJSON() ([]byte, error) {
 	}
 	return json.Marshal(out)
 }
-
 
 // LLMToolCall LLM 返回的工具调用
 type LLMToolCall struct {
@@ -286,12 +286,12 @@ type LLMChoice struct {
 
 // ChatResult 对话结果（返回给前端）
 type ChatResult struct {
-	Reply     string     `json:"reply"`               // AI 最终回复内容
-	ToolCalls []ToolCall `json:"toolCalls,omitempty"` // 工具调用记录
-	Messages  []Message  `json:"messages,omitempty"`  // 后端持久化的所有消息（assistant+tool_calls, tool结果, 最终回复）
-	Diff      []DiffFile `json:"diff,omitempty"`      // 本轮对话产生的工作区差异
-	Plan      *Plan      `json:"plan,omitempty"`      // 规划/执行流程返回时携带的计划
-	Error     string     `json:"error,omitempty"`     // 错误信息
+	Reply     string          `json:"reply"`               // AI 最终回复内容
+	ToolCalls []ToolCall      `json:"toolCalls,omitempty"` // 工具调用记录
+	Messages  []Message       `json:"messages,omitempty"`  // 后端持久化的所有消息（assistant+tool_calls, tool结果, 最终回复）
+	Diff      []diff.DiffFile `json:"diff,omitempty"`      // 本轮对话产生的工作区差异
+	Plan      *Plan           `json:"plan,omitempty"`      // 规划/执行流程返回时携带的计划
+	Error     string          `json:"error,omitempty"`     // 错误信息
 
 	// Cancelled 本轮是否被用户停止（区别于"失败"：取消不应触发自动重试，
 	// 前端文案也不同——超时可以说"重试一下"，取消不该）。
@@ -646,16 +646,16 @@ func (a *App) startDeltaFlusher(sessionID, runID string) (enqueue func(string), 
 // （外加运行期的 runRecorder 实现），三者的签名都**强制**要求传会话 ID——
 // 漏传是编译错误，而不是运行期的静默串台。
 type ChatEvent struct {
-	Type      string     `json:"type"` // tool_call_start / tool_call_end / reply_delta / done / error / diff_update / plan_update / permission_request / ask_user
-	SessionID string     `json:"sessionId,omitempty"`
-	RunID     string     `json:"runId,omitempty"`
-	ToolCall  *ToolCall  `json:"toolCall,omitempty"`
-	Reply     string     `json:"reply,omitempty"`
-	Error     string     `json:"error,omitempty"`
-	Diff      []DiffFile `json:"diff,omitempty"`      // diff_update 事件携带的差异文件
-	Turn      int        `json:"turn,omitempty"`      // diff 所属轮次
-	Plan      *Plan      `json:"plan,omitempty"`      // plan_update 事件全量携带最新计划
-	StepIndex int        `json:"stepIndex,omitempty"` // plan_update 触发步骤索引（计划级变更为 -1，omitempty 时不下发）
+	Type      string          `json:"type"` // tool_call_start / tool_call_end / reply_delta / done / error / diff_update / plan_update / permission_request / ask_user
+	SessionID string          `json:"sessionId,omitempty"`
+	RunID     string          `json:"runId,omitempty"`
+	ToolCall  *ToolCall       `json:"toolCall,omitempty"`
+	Reply     string          `json:"reply,omitempty"`
+	Error     string          `json:"error,omitempty"`
+	Diff      []diff.DiffFile `json:"diff,omitempty"`      // diff_update 事件携带的差异文件
+	Turn      int             `json:"turn,omitempty"`      // diff 所属轮次
+	Plan      *Plan           `json:"plan,omitempty"`      // plan_update 事件全量携带最新计划
+	StepIndex int             `json:"stepIndex,omitempty"` // plan_update 触发步骤索引（计划级变更为 -1，omitempty 时不下发）
 	// Permission 权限授权请求（type=permission_request）：前端应弹出授权弹窗，
 	// 并把结果经 ResolvePermission 回传。请求期间后端阻塞等待，超时/取消一律按拒绝处理。
 	Permission *PermissionAskRequest `json:"permission,omitempty"`
@@ -1483,16 +1483,16 @@ func runToolLoop(ar *agentRun) *ChatResult {
 		persistedMsgs = append(persistedMsgs, *savedFinal)
 
 		// ★ 计算本轮 diff：只统计本会话在本轮触碰过的路径（会话级隔离）
-		var diffFiles []DiffFile
+		var diffFiles []diff.DiffFile
 		if isRepo {
 			turnPaths := ar.Diff.TurnTouched(sessionID)
 			if files, err := ar.Diff.DiffScoped(dir, turnBase, turnPaths); err == nil && len(files) > 0 {
 				diffFiles = files
 				base, touched := ar.Diff.SnapshotState(sessionID)
-				turnNo, appendErr := ar.Store.AppendDiff(sessionID, DiffTurn{
+				turnNo, appendErr := ar.Store.AppendDiff(sessionID, diff.DiffTurn{
 					Files:     files,
-					Additions: sumAdd(files),
-					Deletions: sumDel(files),
+					Additions: diff.SumAdd(files),
+					Deletions: diff.SumDel(files),
 					CreatedAt: time.Now().UnixMilli(),
 					// 撤销所需的两项：本轮开始时的完整快照 + 本轮结束时各文件的内容状态
 					Base:     turnCheckpoint,

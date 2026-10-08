@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"wails-tmp/internal/procx"
 
 	"wails-tmp/memory"
 )
@@ -73,7 +74,7 @@ func (t *CLITool) Execute(ctx context.Context, args map[string]interface{}) (str
 	} else {
 		cmd = exec.CommandContext(ctx, "bash", "-c", cmdStr)
 	}
-	hideConsoleWindow(cmd) // Windows 上不弹控制台窗口（见该函数说明）
+	procx.HideConsoleWindow(cmd) // Windows 上不弹控制台窗口（见该函数说明）
 	if t.Dir != "" {
 		cmd.Dir = t.Dir
 	}

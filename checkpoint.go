@@ -1,15 +1,15 @@
 package main
 
 import (
-	"bytes"
-	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+
+	"wails-tmp/internal/diff"
+	"wails-tmp/internal/git"
 )
 
 // ===== 每轮 checkpoint：撤销用的完整快照 =====
@@ -29,10 +29,10 @@ import (
 // "今天能撤销、下周不能"这种间歇性故障。
 //
 // 已实机验证的四条（见 docs/p2-p3-impl-spec.md 第零节）：
-//   1. stash create 不含未跟踪文件
-//   2. GIT_INDEX_FILE 方案不污染真实索引
-//   3. 不打 ref 的悬空 commit 会被 gc 回收
-//   4. git restore --source 能恢复修改与删除
+//  1. stash create 不含未跟踪文件
+//  2. GIT_INDEX_FILE 方案不污染真实索引
+//  3. 不打 ref 的悬空 commit 会被 gc 回收
+//  4. git restore --source 能恢复修改与删除
 const (
 	checkpointRefPrefix = "refs/local-agent/checkpoints"
 	// checkpointKeepTurns 每会话最多保留的轮次快照数，更早的删 ref 让 git 自然回收
@@ -86,10 +86,10 @@ func Checkpoint(dir, sessionID string, turn int) (string, error) {
 	defer os.Remove(idxPath)
 
 	env := []string{"GIT_INDEX_FILE=" + idxPath}
-	if _, err := runGitEnv(dir, env, "add", "-A"); err != nil {
+	if _, err := git.RunEnv(dir, env, "add", "-A"); err != nil {
 		return "", fmt.Errorf("暂存工作区失败: %w", err)
 	}
-	tree, err := runGitEnv(dir, env, "write-tree")
+	tree, err := git.RunEnv(dir, env, "write-tree")
 	if err != nil {
 		return "", fmt.Errorf("写 tree 失败: %w", err)
 	}
@@ -98,10 +98,10 @@ func Checkpoint(dir, sessionID string, turn int) (string, error) {
 		return "", fmt.Errorf("写 tree 返回空值")
 	}
 
-	commit, err := runGit(dir, "commit-tree", tree, "-p", "HEAD", "-m", "checkpoint")
+	commit, err := git.Run(dir, "commit-tree", tree, "-p", "HEAD", "-m", "checkpoint")
 	if err != nil {
 		// 空仓库（没有 HEAD）没有父提交可用，去掉 -p 再来一次
-		commit, err = runGit(dir, "commit-tree", tree, "-m", "checkpoint")
+		commit, err = git.Run(dir, "commit-tree", tree, "-m", "checkpoint")
 		if err != nil {
 			return "", fmt.Errorf("建快照 commit 失败: %w", err)
 		}
@@ -111,7 +111,7 @@ func Checkpoint(dir, sessionID string, turn int) (string, error) {
 		return "", fmt.Errorf("建快照 commit 返回空值")
 	}
 
-	if _, err := runGit(dir, "update-ref", checkpointRef(sessionID, turn), commit); err != nil {
+	if _, err := git.Run(dir, "update-ref", checkpointRef(sessionID, turn), commit); err != nil {
 		return "", fmt.Errorf("钉住快照失败: %w", err)
 	}
 	return commit, nil
@@ -122,7 +122,7 @@ func ResolveCheckpoint(dir, sessionID string, turn int) (string, bool) {
 	if dir == "" || !validRefSegment(sessionID) || turn <= 0 {
 		return "", false
 	}
-	out, err := runGit(dir, "rev-parse", "--verify", "--quiet", checkpointRef(sessionID, turn)+"^{commit}")
+	out, err := git.Run(dir, "rev-parse", "--verify", "--quiet", checkpointRef(sessionID, turn)+"^{commit}")
 	if err != nil {
 		return "", false
 	}
@@ -136,7 +136,7 @@ func listSessionCheckpointTurns(dir, sessionID string) []int {
 		return nil
 	}
 	prefix := checkpointRefPrefix + "/" + sessionID + "/"
-	out, err := runGit(dir, "for-each-ref", "--format=%(refname)", prefix)
+	out, err := git.Run(dir, "for-each-ref", "--format=%(refname)", prefix)
 	if err != nil {
 		return nil
 	}
@@ -160,7 +160,7 @@ func DropCheckpoint(dir, sessionID string, turn int) error {
 	if dir == "" || !validRefSegment(sessionID) || turn <= 0 {
 		return nil
 	}
-	_, err := runGit(dir, "update-ref", "-d", checkpointRef(sessionID, turn))
+	_, err := git.Run(dir, "update-ref", "-d", checkpointRef(sessionID, turn))
 	return err
 }
 
@@ -201,7 +201,7 @@ func blobHashAt(dir, sha, rel string) string {
 	if strings.HasPrefix(rel, "-") || strings.HasPrefix(rel, ":") {
 		return ""
 	}
-	out, err := runGit(dir, "rev-parse", "--verify", "--quiet", sha+":"+rel)
+	out, err := git.Run(dir, "rev-parse", "--verify", "--quiet", sha+":"+rel)
 	if err != nil {
 		return ""
 	}
@@ -219,7 +219,7 @@ func hashWorktreeFile(dir, rel string) string {
 	if dir == "" || rel == "" || strings.HasPrefix(rel, "-") {
 		return ""
 	}
-	out, err := runGit(dir, "hash-object", "--", rel)
+	out, err := git.Run(dir, "hash-object", "--", rel)
 	if err != nil {
 		return ""
 	}
@@ -228,7 +228,7 @@ func hashWorktreeFile(dir, rel string) string {
 
 // endStateOf 记录一组路径在**当前**工作区的内容状态（用于回退前的冲突检查）。
 // 值语义：blob 哈希；空串表示"此时该文件不存在"（例如本轮把它删了）。
-func endStateOf(dir string, files []DiffFile) map[string]string {
+func endStateOf(dir string, files []diff.DiffFile) map[string]string {
 	if dir == "" || len(files) == 0 {
 		return nil
 	}
@@ -252,7 +252,7 @@ func restoreFromCheckpoint(dir, sha, rel string) error {
 	if dir == "" || sha == "" || rel == "" {
 		return fmt.Errorf("恢复参数不完整")
 	}
-	if _, err := runGit(dir, "restore", "--source="+sha, "--", rel); err != nil {
+	if _, err := git.Run(dir, "restore", "--source="+sha, "--", rel); err != nil {
 		return fmt.Errorf("恢复 %s 失败: %w", rel, err)
 	}
 	return nil
@@ -282,29 +282,4 @@ func removeWorktreeFile(dir, rel string) error {
 		cur = filepath.Dir(cur)
 	}
 	return nil
-}
-
-// runGitEnv 与 runGit 相同，但可附加环境变量（checkpoint 需要 GIT_INDEX_FILE）。
-// runGit 委托到它，全项目只有这一份 git 调用封装。
-//
-// 关于时间戳：checkpoint 自身不记时间——时间由 DiffTurn.CreatedAt 负责，
-// 这里不留冗余字段，免得两处时间不一致。
-func runGitEnv(dir string, extraEnv []string, args ...string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), gitTimeout)
-	defer cancel()
-
-	full := append([]string{"-C", dir, "-c", "core.quotepath=false", "--no-pager"}, args...)
-	cmd := exec.CommandContext(ctx, "git", full...)
-	hideConsoleWindow(cmd) // checkpoint 每轮都要起 git，Windows 上会连着闪黑框
-	if len(extraEnv) > 0 {
-		cmd.Env = append(os.Environ(), extraEnv...)
-	}
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("git %s 失败: %v: %s",
-			strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
-	}
-	return stdout.String(), nil
 }

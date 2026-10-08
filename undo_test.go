@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"wails-tmp/internal/diff"
 )
 
 // ===== P2 第 3 步：回退算法 =====
@@ -18,7 +19,7 @@ func newUndoTestApp(t *testing.T, projectDir string) (*App, *Session) {
 	t.Helper()
 	app := &App{
 		sessionStore: NewSessionStore(filepath.Join(t.TempDir(), "sessions")),
-		diffService:  NewDiffService(),
+		diffService:  diff.NewDiffService(),
 	}
 	sess, err := app.sessionStore.CreateSession(SessionConfig{
 		Title:   "t",
@@ -47,9 +48,9 @@ func beginTurn(t *testing.T, app *App, sess *Session, repo string) (int, string)
 }
 
 // endTurn 记录这一轮 —— **在改完文件之后调用**
-func endTurn(t *testing.T, app *App, sess *Session, repo string, wantTurn int, cp string, files []DiffFile) {
+func endTurn(t *testing.T, app *App, sess *Session, repo string, wantTurn int, cp string, files []diff.DiffFile) {
 	t.Helper()
-	got, err := app.sessionStore.AppendDiff(sess.ID, DiffTurn{
+	got, err := app.sessionStore.AppendDiff(sess.ID, diff.DiffTurn{
 		Files:    files,
 		Base:     cp,
 		EndState: endStateOf(repo, files),
@@ -57,7 +58,7 @@ func endTurn(t *testing.T, app *App, sess *Session, repo string, wantTurn int, c
 	if err != nil {
 		t.Fatal(err)
 	}
-	// 快照 ref 的编号与 DiffTurn.Turn 必须一致，否则回退会找不到快照
+	// 快照 ref 的编号与 diff.DiffTurn.Turn 必须一致，否则回退会找不到快照
 	if got != wantTurn {
 		t.Fatalf("轮次编号不一致：快照用 %d，记录用 %d（两处必须走同一个 nextDiffTurn）", wantTurn, got)
 	}
@@ -78,7 +79,7 @@ func TestUndoRestoresPreExistingUntrackedFile(t *testing.T) {
 	// 本轮 agent 改了这个未跟踪文件
 	writeTestFile(t, filepath.Join(repo, "user-note.txt"), "被 agent 改过\n")
 	// DiffScoped 会把它报成 added —— 这里手工构造同样的形状
-	files := []DiffFile{{Path: "user-note.txt", Status: "added"}}
+	files := []diff.DiffFile{{Path: "user-note.txt", Status: "added"}}
 	endTurn(t, app, sess, repo, turnNo, cp, files)
 
 	res, err := app.UndoDiffTurn(sess.ID, turnNo, false)
@@ -103,7 +104,7 @@ func TestUndoDeletesTrulyNewFile(t *testing.T) {
 
 	turnNo, cp := beginTurn(t, app, sess, repo)
 	writeTestFile(t, filepath.Join(repo, "fresh.txt"), "agent 新建\n")
-	files := []DiffFile{{Path: "fresh.txt", Status: "added"}}
+	files := []diff.DiffFile{{Path: "fresh.txt", Status: "added"}}
 	endTurn(t, app, sess, repo, turnNo, cp, files)
 
 	res, err := app.UndoDiffTurn(sess.ID, turnNo, false)
@@ -126,7 +127,7 @@ func TestUndoRestoresModifiedFile(t *testing.T) {
 
 	turnNo, cp := beginTurn(t, app, sess, repo)
 	writeTestFile(t, filepath.Join(repo, "a.txt"), "agent 改过\n")
-	files := []DiffFile{{Path: "a.txt", Status: "modified"}}
+	files := []diff.DiffFile{{Path: "a.txt", Status: "modified"}}
 	endTurn(t, app, sess, repo, turnNo, cp, files)
 
 	if _, err := app.UndoDiffTurn(sess.ID, turnNo, false); err != nil {
@@ -147,7 +148,7 @@ func TestUndoRestoresDeletedFile(t *testing.T) {
 	if err := os.Remove(filepath.Join(repo, "a.txt")); err != nil {
 		t.Fatal(err)
 	}
-	files := []DiffFile{{Path: "a.txt", Status: "deleted"}}
+	files := []diff.DiffFile{{Path: "a.txt", Status: "deleted"}}
 	endTurn(t, app, sess, repo, turnNo, cp, files)
 
 	if _, err := app.UndoDiffTurn(sess.ID, turnNo, false); err != nil {
@@ -166,7 +167,7 @@ func TestUndoDetectsConflict(t *testing.T) {
 
 	turnNo, cp := beginTurn(t, app, sess, repo)
 	writeTestFile(t, filepath.Join(repo, "a.txt"), "agent 在本轮改的\n")
-	files := []DiffFile{{Path: "a.txt", Status: "modified"}}
+	files := []diff.DiffFile{{Path: "a.txt", Status: "modified"}}
 	endTurn(t, app, sess, repo, turnNo, cp, files)
 
 	// 用户在本轮之后又手工改了一次
@@ -210,7 +211,7 @@ func TestUndoIsIdempotent(t *testing.T) {
 	turnNo, cp := beginTurn(t, app, sess, repo)
 	writeTestFile(t, filepath.Join(repo, "a.txt"), "agent 改过\n")
 	writeTestFile(t, filepath.Join(repo, "new.txt"), "agent 新建\n")
-	files := []DiffFile{
+	files := []diff.DiffFile{
 		{Path: "a.txt", Status: "modified"},
 		{Path: "new.txt", Status: "added"},
 	}
@@ -244,8 +245,8 @@ func TestUndoRejectsMissingSnapshot(t *testing.T) {
 	app, sess := newUndoTestApp(t, repo)
 
 	// Base 为空（老数据、或快照失败的轮次）
-	if _, err := app.sessionStore.AppendDiff(sess.ID, DiffTurn{
-		Files: []DiffFile{{Path: "a.txt", Status: "modified"}},
+	if _, err := app.sessionStore.AppendDiff(sess.ID, diff.DiffTurn{
+		Files: []diff.DiffFile{{Path: "a.txt", Status: "modified"}},
 	}, "", nil); err != nil {
 		t.Fatal(err)
 	}
@@ -268,7 +269,7 @@ func TestUndoRejectsMissingSnapshot(t *testing.T) {
 	// 快照 ref 被清理后
 	turnNo, cp := beginTurn(t, app, sess, repo)
 	writeTestFile(t, filepath.Join(repo, "a.txt"), "agent 改过\n")
-	endTurn(t, app, sess, repo, turnNo, cp, []DiffFile{{Path: "a.txt", Status: "modified"}})
+	endTurn(t, app, sess, repo, turnNo, cp, []diff.DiffFile{{Path: "a.txt", Status: "modified"}})
 	if err := DropCheckpoint(repo, sess.ID, turnNo); err != nil {
 		t.Fatal(err)
 	}

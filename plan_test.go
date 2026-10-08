@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"wails-tmp/internal/diff"
 )
 
 // T1 JSON 干净解析
@@ -210,7 +211,7 @@ func newPlanTestApp(t *testing.T, srvURL string) (*App, *Session) {
 	app.planStore = NewPlanStore(filepath.Join(base, "plans"))
 	app.toolStore = NewToolStore(filepath.Join(base, "tools.json"))
 	app.toolManager = NewToolManager(app.toolStore, nil)
-	app.diffService = NewDiffService()
+	app.diffService = diff.NewDiffService()
 	if err := app.modelStore.AddModel(Model{Name: "mock", URL: srvURL, APIKey: "k"}); err != nil {
 		t.Fatal(err)
 	}

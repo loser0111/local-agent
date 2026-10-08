@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"wails-tmp/internal/diff"
 
 	wailsRuntime "github.com/wailsapp/wails/v2/pkg/runtime"
 	"wails-tmp/memory"
@@ -21,7 +22,7 @@ type App struct {
 	toolManager  *ToolManager
 	skillStore   *SkillStore
 	skillInstall *SkillInstaller
-	diffService  *DiffService
+	diffService  *diff.DiffService
 	planStore    *PlanStore
 	memory       *memory.MemoryStore
 
@@ -102,7 +103,7 @@ func (a *App) startup(ctx context.Context) {
 	a.toolStore = NewToolStore(filepath.Join(baseDir, "tools.json"))
 	a.toolManager = NewToolManager(a.toolStore, a.skillStore)
 	// 初始化差异服务（基于 git 快照计算工作区 diff）
-	a.diffService = NewDiffService()
+	a.diffService = diff.NewDiffService()
 	// 初始化计划存储：~/.local-agent/plans/（重启时 running 计划自动置为失败）
 	a.planStore = NewPlanStore(filepath.Join(baseDir, "plans"))
 	// 初始化权限管理（授权存储 / 审计 / 授权询问回路）与文件改动归因
@@ -585,13 +586,13 @@ func (a *App) resolveProjectDir(sessionID string) (string, error) {
 }
 
 // GetDiff 返回会话工作区相对基线的累计差异
-func (a *App) GetDiff(sessionID string) ([]DiffFile, error) {
+func (a *App) GetDiff(sessionID string) ([]diff.DiffFile, error) {
 	dir, err := a.resolveProjectDir(sessionID)
 	if err != nil {
-		return []DiffFile{}, err
+		return []diff.DiffFile{}, err
 	}
 	if !a.diffService.IsRepo(dir) {
-		return []DiffFile{}, nil // 非 git 仓库不报错，返回空列表
+		return []diff.DiffFile{}, nil // 非 git 仓库不报错，返回空列表
 	}
 	// 恢复会话里持久化的 diff 状态（基线 + 已归因的路径），再只算这些路径的差异。
 	// 这样两个会话开在同一个项目里也不会互相看到对方的改动。
@@ -600,26 +601,26 @@ func (a *App) GetDiff(sessionID string) ([]DiffFile, error) {
 	}
 	files, err := a.diffService.DiffForSession(sessionID, dir)
 	if err != nil {
-		return []DiffFile{}, err
+		return []diff.DiffFile{}, err
 	}
 	return files, nil
 }
 
 // GetDiffTurns 返回按轮次分组的差异，索引 0 为“累计”
-func (a *App) GetDiffTurns(sessionID string) ([]DiffTurn, error) {
+func (a *App) GetDiffTurns(sessionID string) ([]diff.DiffTurn, error) {
 	s, err := a.sessionStore.GetSession(sessionID)
 	if err != nil {
 		return nil, err
 	}
-	turns := make([]DiffTurn, 0, len(s.Diffs)+1)
+	turns := make([]diff.DiffTurn, 0, len(s.Diffs)+1)
 	if dir, err := a.resolveProjectDir(sessionID); err == nil && a.diffService.IsRepo(dir) {
 		if files, err := a.GetDiff(sessionID); err == nil {
-			turns = append(turns, DiffTurn{
+			turns = append(turns, diff.DiffTurn{
 				Turn:      0,
 				Label:     "累计",
 				Files:     files,
-				Additions: sumAdd(files),
-				Deletions: sumDel(files),
+				Additions: diff.SumAdd(files),
+				Deletions: diff.SumDel(files),
 				CreatedAt: time.Now().UnixMilli(),
 			})
 		}
@@ -1010,7 +1011,7 @@ func (a *App) GetToolFileChanges(sessionID string) []ToolFileChange {
 	for _, c := range list {
 		// 差异文本里的文件名是临时的 before/after 占位，这里改回真实路径，
 		// 便于界面直接按路径展示
-		files := ParseUnifiedDiff(c.Diff)
+		files := diff.ParseUnifiedDiff(c.Diff)
 		for i := range files {
 			files[i].Path = c.Rel
 			files[i].OldPath = ""

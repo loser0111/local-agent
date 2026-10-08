@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"time"
+	"wails-tmp/internal/diff"
 
 	wailsRuntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
@@ -41,7 +42,7 @@ type agentRun struct {
 
 	// 依赖。全部来自 App，但循环只认这里的字段，不直接摸 App。
 	Store   *SessionStore
-	Diff    *DiffService
+	Diff    *diff.DiffService
 	Changes *FileChangeLog
 	ReqLog  *llmRequestLog
 	// Attachments 附件存储（会话里的图片）。循环用它把消息上的附件引用读成
@@ -127,7 +128,7 @@ type runRecorder interface {
 	Emit(ev ChatEvent)
 	// EmitDiff 推送差异更新。它与聊天事件走的是**不同通道**（diff:update），
 	// 所以不能与 Emit 合并成一个方法。
-	EmitDiff(files []DiffFile, turn int)
+	EmitDiff(files []diff.DiffFile, turn int)
 	// FlushStream 启动流式分片推送器；返回的 shutdown 保证可安全调用
 	FlushStream() (enqueue func(string), shutdown func())
 }
@@ -152,7 +153,7 @@ func (r *appRecorder) Emit(ev ChatEvent) {
 }
 
 // EmitDiff 推送差异更新
-func (r *appRecorder) EmitDiff(files []DiffFile, turn int) {
+func (r *appRecorder) EmitDiff(files []diff.DiffFile, turn int) {
 	if r == nil || r.app == nil || r.app.ctx == nil {
 		return
 	}

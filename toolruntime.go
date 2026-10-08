@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"wails-tmp/internal/procx"
 
 	mcp "github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -79,7 +80,7 @@ func (t *DynamicCLITool) Execute(ctx context.Context, args map[string]interface{
 	} else {
 		cmd = exec.CommandContext(cctx, "bash", "-c", cmdLine)
 	}
-	hideConsoleWindow(cmd) // Windows 上不弹控制台窗口（见该函数说明）
+	procx.HideConsoleWindow(cmd) // Windows 上不弹控制台窗口（见该函数说明）
 	if t.Dir != "" {
 		cmd.Dir = t.Dir
 	}
@@ -248,7 +249,7 @@ func buildTransport(cfg *MCPConfig) (mcp.Transport, error) {
 			return nil, fmt.Errorf("stdio 接入缺少 command")
 		}
 		cmd := exec.Command(cfg.Command, cfg.Args...)
-		hideConsoleWindow(cmd) // MCP 多为 node/python 进程，同样会闪控制台窗口
+		procx.HideConsoleWindow(cmd) // MCP 多为 node/python 进程，同样会闪控制台窗口
 		env := os.Environ()
 		for k, v := range cfg.Env {
 			env = append(env, k+"="+v)

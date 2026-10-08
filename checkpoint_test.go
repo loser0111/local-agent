@@ -5,11 +5,13 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"wails-tmp/internal/diff"
+	"wails-tmp/internal/git"
 )
 
 // ===== P2 第 1 步：checkpoint 层 =====
 //
-// 这些测试用**真实 git 仓库**跑（复用 diff_test.go 的 newTestRepo）。
+// 这些测试用**真实 git 仓库**跑（复用 testrepo_test.go 的 newTestRepo）。
 // 它们验证的是 git 机制本身对不对——不是替身、不是模拟。
 //
 // 回退算法（UndoDiffTurn）的测试在 app 层写完之后单独加，见 checkpoint 的第二批测试。
@@ -28,11 +30,11 @@ func cpReadFile(t *testing.T, dir, rel string) string {
 func newEmptyRepo(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
-	if _, err := runGit(dir, "init", "-q"); err != nil {
+	if _, err := git.Run(dir, "init", "-q"); err != nil {
 		t.Skipf("git 不可用: %v", err)
 	}
-	_, _ = runGit(dir, "config", "user.email", "test@example.com")
-	_, _ = runGit(dir, "config", "user.name", "test")
+	_, _ = git.Run(dir, "config", "user.email", "test@example.com")
+	_, _ = git.Run(dir, "config", "user.name", "test")
 	return dir
 }
 
@@ -40,9 +42,9 @@ func newEmptyRepo(t *testing.T) string {
 // 若这条不成立，"轮次前就存在但未跟踪的文件"在回退时会被误删。
 func TestCheckpointIncludesUntracked(t *testing.T) {
 	dir := newTestRepo(t)
-	writeTestFile(t, filepath.Join(dir, "a.txt"), "modified in turn\n")   // 已跟踪，被改
+	writeTestFile(t, filepath.Join(dir, "a.txt"), "modified in turn\n")     // 已跟踪，被改
 	writeTestFile(t, filepath.Join(dir, "untracked.txt"), "pre-existing\n") // 未跟踪，本轮改过
-	writeTestFile(t, filepath.Join(dir, "added.txt"), "brand new\n")       // 未跟踪，本轮新建
+	writeTestFile(t, filepath.Join(dir, "added.txt"), "brand new\n")        // 未跟踪，本轮新建
 
 	cp, err := Checkpoint(dir, "sess1", 1)
 	if err != nil {
@@ -58,7 +60,7 @@ func TestCheckpointIncludesUntracked(t *testing.T) {
 	}
 
 	// 对照：stash create 不含未跟踪文件（这正是本函数存在的理由）
-	if stash, err := runGit(dir, "stash", "create"); err == nil {
+	if stash, err := git.Run(dir, "stash", "create"); err == nil {
 		stash = strings.TrimSpace(stash)
 		if stash != "" && pathInCheckpoint(dir, stash, "untracked.txt") {
 			t.Fatal("stash create 竟然包含未跟踪文件？前提变了，checkpoint 的必要性需重新评估")
@@ -72,18 +74,18 @@ func TestCheckpointDoesNotTouchRealIndex(t *testing.T) {
 	writeTestFile(t, filepath.Join(dir, "a.txt"), "modified\n")
 	writeTestFile(t, filepath.Join(dir, "untracked.txt"), "u\n")
 	writeTestFile(t, filepath.Join(dir, "staged.txt"), "s\n")
-	if _, err := runGit(dir, "add", "staged.txt"); err != nil {
+	if _, err := git.Run(dir, "add", "staged.txt"); err != nil {
 		t.Fatal(err)
 	}
 
-	before, err := runGit(dir, "status", "--porcelain")
+	before, err := git.Run(dir, "status", "--porcelain")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := Checkpoint(dir, "sess1", 1); err != nil {
 		t.Fatal(err)
 	}
-	after, err := runGit(dir, "status", "--porcelain")
+	after, err := git.Run(dir, "status", "--porcelain")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,7 +106,7 @@ func TestCheckpointSurvivesGC(t *testing.T) {
 	}
 
 	// ref 必须指向它——"不会被回收"的机制保证在这里
-	out, err := runGit(dir, "rev-parse", checkpointRef("sess1", 1))
+	out, err := git.Run(dir, "rev-parse", checkpointRef("sess1", 1))
 	if err != nil {
 		t.Fatalf("ref 应存在: %v", err)
 	}
@@ -112,21 +114,21 @@ func TestCheckpointSurvivesGC(t *testing.T) {
 		t.Fatalf("ref 应指向快照: %q != %q", strings.TrimSpace(out), cp)
 	}
 
-	if _, err := runGit(dir, "gc", "--prune=now"); err != nil {
+	if _, err := git.Run(dir, "gc", "--prune=now"); err != nil {
 		t.Skipf("gc 不可用: %v", err)
 	}
-	if _, err := runGit(dir, "cat-file", "-e", cp); err != nil {
+	if _, err := git.Run(dir, "cat-file", "-e", cp); err != nil {
 		t.Fatalf("打了 ref 的快照必须扛住 gc，实际被回收: %v", err)
 	}
 
 	// 反向对照不做硬断言：悬空 commit 是否被回收与 git 版本/配置有关，
 	// 硬断言会让测试在别人的机器上 flaky。而"打 ref"是无条件正确的做法，
 	// 上面那条正向断言已经守住了它。
-	if dangling, err := runGit(dir, "stash", "create"); err == nil {
+	if dangling, err := git.Run(dir, "stash", "create"); err == nil {
 		dangling = strings.TrimSpace(dangling)
 		if dangling != "" {
-			_, _ = runGit(dir, "gc", "--prune=now")
-			if _, err := runGit(dir, "cat-file", "-e", dangling); err == nil {
+			_, _ = git.Run(dir, "gc", "--prune=now")
+			if _, err := git.Run(dir, "cat-file", "-e", dangling); err == nil {
 				t.Log("提示：本次环境未回收未打 ref 的悬空 commit（版本相关），不影响上面的结论")
 			}
 		}
@@ -347,7 +349,7 @@ func TestEndStateOf(t *testing.T) {
 	dir := t.TempDir()
 	writeTestFile(t, filepath.Join(dir, "exists.txt"), "here\n")
 
-	got := endStateOf(dir, []DiffFile{
+	got := endStateOf(dir, []diff.DiffFile{
 		{Path: "exists.txt"},
 		{Path: "absent.txt"}, // 该轮把它删了，或从未存在
 		{Path: ""},           // 脏数据不该 panic
@@ -364,7 +366,7 @@ func TestEndStateOf(t *testing.T) {
 	if endStateOf(dir, nil) != nil {
 		t.Fatal("空输入应返回 nil")
 	}
-	if endStateOf("", []DiffFile{{Path: "a.txt"}}) != nil {
+	if endStateOf("", []diff.DiffFile{{Path: "a.txt"}}) != nil {
 		t.Fatal("目录为空应返回 nil")
 	}
 }

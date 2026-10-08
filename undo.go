@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"strings"
+	"wails-tmp/internal/diff"
 )
 
 // ===== 撤销：按归因把某一轮改过的文件回退到该轮开始时的状态 =====
@@ -34,7 +35,7 @@ type CheckpointInfo struct {
 // UndoFileResult 逐文件结果
 type UndoFileResult struct {
 	Path   string `json:"path"`
-	Action string `json:"action"`        // restore | delete | skip
+	Action string `json:"action"` // restore | delete | skip
 	Err    string `json:"err,omitempty"`
 }
 
@@ -47,7 +48,7 @@ type UndoResult struct {
 }
 
 // diffFilePaths 取出 diff 里的路径（跳过空路径）
-func diffFilePaths(files []DiffFile) []string {
+func diffFilePaths(files []diff.DiffFile) []string {
 	out := make([]string, 0, len(files))
 	for _, f := range files {
 		if f.Path != "" {
@@ -59,9 +60,9 @@ func diffFilePaths(files []DiffFile) []string {
 
 // conflictsOfTurn 找出"本轮之后又被改过"的文件。
 //
-// 判据是记录在本轮结束时的内容哈希（DiffTurn.EndState）与当前工作区是否一致。
+// 判据是记录在本轮结束时的内容哈希（diff.DiffTurn.EndState）与当前工作区是否一致。
 // 老数据没有 EndState 时不做判断（那种数据 Base 也是空的，本来就不可回退）。
-func conflictsOfTurn(dir string, t *DiffTurn) []string {
+func conflictsOfTurn(dir string, t *diff.DiffTurn) []string {
 	if dir == "" || t == nil || t.EndState == nil {
 		return nil
 	}
@@ -127,7 +128,7 @@ func (a *App) UndoDiffTurn(sessionID string, turn int, force bool) (*UndoResult,
 		return nil, err
 	}
 
-	var target *DiffTurn
+	var target *diff.DiffTurn
 	for i := range s.Diffs {
 		if s.Diffs[i].Turn == turn {
 			target = &s.Diffs[i]
@@ -185,7 +186,7 @@ func (a *App) UndoDiffTurn(sessionID string, turn int, force bool) (*UndoResult,
 // 一个"轮次之前就存在、但一直未跟踪、本轮被改"的文件，DiffScoped 也会把它报成 added
 // （因为它的基线快照不含未跟踪文件）。所以必须用**含未跟踪文件**的 checkpoint 复核：
 // 快照里存在 → 恢复内容；不存在 → 才是本轮真正新建的，可以删。
-func undoOneFile(dir, cp string, f *DiffFile) UndoFileResult {
+func undoOneFile(dir, cp string, f *diff.DiffFile) UndoFileResult {
 	rec := UndoFileResult{}
 	if f == nil || f.Path == "" {
 		rec.Action = "skip"

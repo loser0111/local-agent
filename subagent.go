@@ -298,7 +298,7 @@ func (a *App) runSubagent(parentRun *runControl, parent *Session, dir string, mo
 		if files, err := a.diffService.DiffForSession(child.ID, dir); err == nil {
 			out.Files = diffFilePaths(files)
 			// 子代理的改动**不能算父会话的改动**：它整个跑动都落在父会话那次 spawn_agent
-			// 调用的窗口里，而归因是按时间窗口扫全工作区做的（DiffService.NoteActivity），
+			// 调用的窗口里，而归因是按时间窗口扫全工作区做的（diff.DiffService.NoteActivity），
 			// 不剔除的话父会话的 diff 面板会冒出不是它改的文件，回退父会话那一轮时还会
 			// 连带把这些文件一起回退。登记后由工具循环在归因扫描之后剔除（见 chat.go）。
 			parentRun.noteExcludedPaths(parent.ID, delegatedPaths(before, out.Files))
