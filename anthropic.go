@@ -70,18 +70,66 @@ func resolveEndpointURL(model *Model) string {
 //
 // ctx 是运行 ctx，必须一路传到 http.NewRequestWithContext —— 硬取消要能立刻断开
 // 在途请求，用 context.Background() 会让"点了停止还要等它跑完"（最长 120s 超时）。
+// callLLMForModel 按模型的协议形状分发一次非流式调用，并在失败时按策略重试。
+//
+// 重试放在这里而不是各协议内部：四条路径（两种协议 × 流式/非流式）共用同一套策略。
+// 写在 callLLM / callAnthropic 里就是两份，写在流式函数里就是四份——都会漂移。
 func callLLMForModel(ctx context.Context, model *Model, req *LLMReq) (*LLMResp, error) {
-	if isAnthropicEndpoint(model) {
-		return callAnthropic(ctx, resolveEndpointURL(model), model.APIKey, req)
-	}
-	return callLLM(ctx, resolveEndpointURL(model), model.APIKey, req)
+	return callLLMForModelWith(ctx, model, req, defaultRetryPolicy, nil)
 }
 
-func callLLMStreamForModel(ctx context.Context, model *Model, req *LLMReq, onContent func(string)) (*LLMResp, error) {
-	if isAnthropicEndpoint(model) {
-		return callAnthropicStream(ctx, resolveEndpointURL(model), model.APIKey, req, onContent)
+// callLLMForModelWith 同上，但允许调用方指定策略与「放弃」判据。
+//
+// 策略做成参数（而不是直接读包级常量）是为了测试能把它压到毫秒级：
+// 否则每验一次「重试了两次」都要真等一秒多的退避，那样的测试没人愿意跑。
+//
+// giveUp 目前只有规划器在用：把「用户已请求停止」也纳入放弃条件。
+// 用户点了停止之后还在后台重试，既不尊重用户意图，也让「停止」看起来没生效。
+func callLLMForModelWith(ctx context.Context, model *Model, req *LLMReq, policy retryPolicy, giveUp func() bool) (*LLMResp, error) {
+	url := resolveEndpointURL(model)
+	anthropic := isAnthropicEndpoint(model)
+	attempt := func() (*LLMResp, error) {
+		if anthropic {
+			return callAnthropic(ctx, url, model.APIKey, req)
+		}
+		return callLLM(ctx, url, model.APIKey, req)
 	}
-	return callLLMStream(ctx, resolveEndpointURL(model), model.APIKey, req, onContent)
+	return withRetry(ctx, policy, giveUp, attempt)
+}
+
+// callLLMStreamForModel 按模型的协议形状分发一次流式调用，并在**安全的前提下**重试。
+//
+// 流式重试的额外约束：一旦已经有分片推给了前端，就不能再试了。
+// 前端的流式气泡是**追加**渲染的（appendStreamContent），重试会把同一段话再说一遍，
+// 而用户看到的是一段重复的废话——比直接报错还糟。所以这里用 emitted 当安全阀，
+// 只在「一个字都还没吐出去」时才允许重试。
+func callLLMStreamForModel(ctx context.Context, model *Model, req *LLMReq, onContent func(string)) (*LLMResp, error) {
+	return callLLMStreamForModelWith(ctx, model, req, onContent, defaultRetryPolicy)
+}
+
+func callLLMStreamForModelWith(ctx context.Context, model *Model, req *LLMReq, onContent func(string), policy retryPolicy) (*LLMResp, error) {
+	url := resolveEndpointURL(model)
+	anthropic := isAnthropicEndpoint(model)
+
+	// emitted 记录本次调用是否已向前端吐出过内容。它跨尝试共享，
+	// 因为「吐过没有」问的是这次请求整体，不是某一次尝试。
+	emitted := false
+	wrapped := func(s string) {
+		if s != "" {
+			emitted = true
+		}
+		if onContent != nil {
+			onContent(s)
+		}
+	}
+
+	attempt := func() (*LLMResp, error) {
+		if anthropic {
+			return callAnthropicStream(ctx, url, model.APIKey, req, wrapped)
+		}
+		return callLLMStream(ctx, url, model.APIKey, req, wrapped)
+	}
+	return withRetry(ctx, policy, func() bool { return emitted }, attempt)
 }
 
 // ===== 请求结构 =====
@@ -143,6 +191,10 @@ type anthropicStreamDelta struct {
 // anthropicStreamError 流式帧里的错误对象
 type anthropicStreamError struct {
 	Message string `json:"message"`
+	// Type 错误类型名（overloaded_error / rate_limit_error / invalid_request_error …）。
+	// 重试要按它分类——只留 Message 的话，就只能靠正文措辞猜，
+	// 而"限流"和"模型名写错"这两种情况的正文措辞远不如类型名可靠。
+	Type string `json:"type"`
 }
 
 // anthropicStreamMessage 流式 message_start 帧里的 message 字段。
@@ -592,7 +644,7 @@ func callAnthropic(ctx context.Context, url, token string, req *LLMReq) (*LLMRes
 		return nil, fmt.Errorf("读取 LLM 响应失败: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("LLM 返回错误 (status=%d): %s", resp.StatusCode, string(body))
+		return nil, newLLMHTTPError(resp.StatusCode, body, resp.Header)
 	}
 
 	var ar anthropicResp
@@ -637,7 +689,7 @@ func callAnthropicStream(ctx context.Context, url, token string, req *LLMReq, on
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-		return nil, fmt.Errorf("LLM 返回错误 (status=%d): %s", resp.StatusCode, string(body))
+		return nil, newLLMHTTPError(resp.StatusCode, body, resp.Header)
 	}
 
 	var (
@@ -753,11 +805,13 @@ func callAnthropicStream(ctx context.Context, url, token string, req *LLMReq, on
 				mergeUsage(&usage, *ev.Usage)
 			}
 		case "error":
-			msg := "未知错误"
-			if ev.Error != nil && ev.Error.Message != "" {
-				msg = ev.Error.Message
+			// 流内错误事件同样要能被重试层识别：过载与限流在这里出现得很频繁，
+			// 而 HTTP 状态码此时已经是 200 了，靠状态码判断的那条路走不通。
+			msg, typ := "", ""
+			if ev.Error != nil {
+				msg, typ = ev.Error.Message, ev.Error.Type
 			}
-			return nil, fmt.Errorf("LLM 返回错误: %s", msg)
+			return nil, llmStreamError(typ, msg)
 		}
 	}
 	if err := scanner.Err(); err != nil {

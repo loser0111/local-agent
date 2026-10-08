@@ -355,7 +355,7 @@ func callLLM(ctx context.Context, url, token string, req *LLMReq) (*LLMResp, err
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("LLM 返回错误 (status=%d): %s", resp.StatusCode, string(body))
+		return nil, newLLMHTTPError(resp.StatusCode, body, resp.Header)
 	}
 
 	var llmResp LLMResp
@@ -393,6 +393,17 @@ type llmStreamChunk struct {
 	// Usage 部分网关只在最后一帧里带用量（OpenAI 需 stream_options.include_usage）。
 	// 不带也不影响正确性：估算会退回「上一锚点 + 增量」。
 	Usage *LLMUsage `json:"usage"`
+	// Error 错误帧。OpenAI 系把错误也放在 data: 里发（HTTP 状态码仍是 200），
+	// 所以只能靠显式识别这一帧来判断失败。
+	Error *openAIStreamError `json:"error"`
+}
+
+// openAIStreamError OpenAI 系流内错误帧的内容。
+// 三个字段都给出来是因为各家填哪个不一定：有的给 type、有的只给 code、有的只有 message。
+type openAIStreamError struct {
+	Message string `json:"message"`
+	Type    string `json:"type"`
+	Code    string `json:"code"`
 }
 
 // callLLMStream 以 SSE 方式调用 LLM。
@@ -432,7 +443,7 @@ func callLLMStream(ctx context.Context, url, token string, req *LLMReq, onConten
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-		return nil, fmt.Errorf("LLM 返回错误 (status=%d): %s", resp.StatusCode, string(body))
+		return nil, newLLMHTTPError(resp.StatusCode, body, resp.Header)
 	}
 
 	var (
@@ -471,6 +482,16 @@ func callLLMStream(ctx context.Context, url, token string, req *LLMReq, onConten
 			// 单个坏帧跳过，不中断整个流
 			fmt.Printf("[chat] 跳过无法解析的 SSE 帧: %v\n", err)
 			continue
+		}
+		// 错误帧必须显式拦下：它没有 choices，会被下面的处理当成"一帧什么都没说"
+		// 静默跳过，最后表现为「LLM 返回空响应」——把一次限流误报成空回复，
+		// 而且永远不会触发重试（这是重试层名副其实的漏网之鱼）。
+		if chunk.Error != nil {
+			typ := chunk.Error.Type
+			if typ == "" {
+				typ = chunk.Error.Code
+			}
+			return nil, llmStreamError(typ, chunk.Error.Message)
 		}
 		// 用量只在最后一帧出现，取到就覆盖（它是整次请求的累计值）
 		if chunk.Usage != nil && chunk.Usage.PromptTokens > 0 {
@@ -1551,26 +1572,24 @@ func (a *App) ChatPlan(sessionID, query string, useStream bool) *ChatResult {
 	}
 	defer a.runs.end(run)
 
-	// 2. 规划器调用：无工具、非流式、低温；失败重试一次
-	var resp *LLMResp
-	var lastErr error
-	for attempt := 0; attempt < 2; attempt++ {
-		if run.SoftRequested() {
-			return &ChatResult{Error: "执行已取消", Cancelled: true, CancelKind: run.Kind()}
-		}
-		req := &LLMReq{
-			Model:       modelID,
-			Temperature: 0.2,
-			Messages: []LLMMessage{
-				{Role: RoleSystem, Content: plannerSystemPrompt},
-				{Role: RoleUser, Content: buildPlannerUserPrompt(query, dir)},
-			},
-		}
-		resp, lastErr = callLLMForModel(run.Ctx(), &model, req)
-		if lastErr == nil {
-			break
-		}
+	// 2. 规划器调用：无工具、非流式、低温。
+	//
+	// 重试交给 callLLMForModelWith 里的统一重试层。原先这里是「固定试两次、
+	// 不区分错误类型」：一次 400（请求本身有问题）也要白白再打一次，
+	// 而真正该重试的 429 却只多试一次就放弃——正好把两种情况的处理弄反了。
+	// giveUp 传 run.SoftRequested：用户点了停止之后不该还在后台重试。
+	if run.SoftRequested() {
+		return &ChatResult{Error: "执行已取消", Cancelled: true, CancelKind: run.Kind()}
 	}
+	req := &LLMReq{
+		Model:       modelID,
+		Temperature: 0.2,
+		Messages: []LLMMessage{
+			{Role: RoleSystem, Content: plannerSystemPrompt},
+			{Role: RoleUser, Content: buildPlannerUserPrompt(query, dir)},
+		},
+	}
+	resp, lastErr := callLLMForModelWith(run.Ctx(), &model, req, defaultRetryPolicy, run.SoftRequested)
 	if lastErr != nil {
 		return &ChatResult{Error: fmt.Sprintf("规划失败: %v", lastErr)}
 	}
