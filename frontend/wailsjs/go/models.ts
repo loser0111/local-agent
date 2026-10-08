@@ -217,6 +217,34 @@ export namespace main {
 	        this.timeout = source["timeout"];
 	    }
 	}
+	export class CacheView {
+	    state: string;
+	    enabled: boolean;
+	    ttl: string;
+	    writeRate: number;
+	    hitRate: number;
+	    totalHitRate: number;
+	    costMultiple: number;
+	    zeroStreak: number;
+	    note: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new CacheView(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.state = source["state"];
+	        this.enabled = source["enabled"];
+	        this.ttl = source["ttl"];
+	        this.writeRate = source["writeRate"];
+	        this.hitRate = source["hitRate"];
+	        this.totalHitRate = source["totalHitRate"];
+	        this.costMultiple = source["costMultiple"];
+	        this.zeroStreak = source["zeroStreak"];
+	        this.note = source["note"];
+	    }
+	}
 	export class ContextStat {
 	    sessionId: string;
 	    usedTokens: number;
@@ -1076,8 +1104,54 @@ export namespace main {
 	}
 	
 	
+	export class PromptCachePrefs {
+	    enabled: boolean;
+	    ttl: string;
+	    rolling: boolean;
+	    rollingGuardBlocks: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new PromptCachePrefs(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.enabled = source["enabled"];
+	        this.ttl = source["ttl"];
+	        this.rolling = source["rolling"];
+	        this.rollingGuardBlocks = source["rollingGuardBlocks"];
+	    }
+	}
 	
 	
+	export class UsageTotals {
+	    turns: number;
+	    inputUncached: number;
+	    cacheRead: number;
+	    cacheWrite: number;
+	    output: number;
+	    outputReasoning?: number;
+	    firstAt?: number;
+	    lastAt?: number;
+	    cacheZeroStreak?: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new UsageTotals(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.turns = source["turns"];
+	        this.inputUncached = source["inputUncached"];
+	        this.cacheRead = source["cacheRead"];
+	        this.cacheWrite = source["cacheWrite"];
+	        this.output = source["output"];
+	        this.outputReasoning = source["outputReasoning"];
+	        this.firstAt = source["firstAt"];
+	        this.lastAt = source["lastAt"];
+	        this.cacheZeroStreak = source["cacheZeroStreak"];
+	    }
+	}
 	export class SubagentInfo {
 	    runId: string;
 	    parentId: string;
@@ -1144,6 +1218,7 @@ export namespace main {
 	    lastExtractMessageID?: string;
 	    parentId?: string;
 	    subagent?: SubagentInfo;
+	    usageTotals?: UsageTotals;
 	
 	    static createFrom(source: any = {}) {
 	        return new Session(source);
@@ -1178,6 +1253,7 @@ export namespace main {
 	        this.lastExtractMessageID = source["lastExtractMessageID"];
 	        this.parentId = source["parentId"];
 	        this.subagent = this.convertValues(source["subagent"], SubagentInfo);
+	        this.usageTotals = this.convertValues(source["usageTotals"], UsageTotals);
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -1496,6 +1572,34 @@ export namespace main {
 	}
 	
 	
+	export class TokenUsage {
+	    inputUncached: number;
+	    cacheRead: number;
+	    cacheWrite: number;
+	    cacheWrite5m?: number;
+	    cacheWrite1h?: number;
+	    output: number;
+	    outputReasoning?: number;
+	    serverToolUseWebSearch?: number;
+	    serviceTier?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new TokenUsage(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.inputUncached = source["inputUncached"];
+	        this.cacheRead = source["cacheRead"];
+	        this.cacheWrite = source["cacheWrite"];
+	        this.cacheWrite5m = source["cacheWrite5m"];
+	        this.cacheWrite1h = source["cacheWrite1h"];
+	        this.output = source["output"];
+	        this.outputReasoning = source["outputReasoning"];
+	        this.serverToolUseWebSearch = source["serverToolUseWebSearch"];
+	        this.serviceTier = source["serviceTier"];
+	    }
+	}
 	
 	export class ToolFileChange {
 	    time: number;
@@ -1725,6 +1829,50 @@ export namespace main {
 	        this.files = this.convertValues(source["files"], UndoFileResult);
 	        this.failed = source["failed"];
 	        this.skipped = source["skipped"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class UsageDetail {
+	    sessionId: string;
+	    hasData: boolean;
+	    last: TokenUsage;
+	    totals: UsageTotals;
+	    cache: CacheView;
+	    context?: ContextStat;
+	    request?: LLMRequestSnapshot;
+	    rawUsage?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new UsageDetail(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.sessionId = source["sessionId"];
+	        this.hasData = source["hasData"];
+	        this.last = this.convertValues(source["last"], TokenUsage);
+	        this.totals = this.convertValues(source["totals"], UsageTotals);
+	        this.cache = this.convertValues(source["cache"], CacheView);
+	        this.context = this.convertValues(source["context"], ContextStat);
+	        this.request = this.convertValues(source["request"], LLMRequestSnapshot);
+	        this.rawUsage = source["rawUsage"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {

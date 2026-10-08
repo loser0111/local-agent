@@ -12,6 +12,9 @@ import {
   GetContextPrefs,
   SetContextKeepRecentMsgs,
   GetLastLLMRequest,
+  GetUsageDetail,
+  GetPromptCachePrefs,
+  SetPromptCachePrefs,
   ListCheckpoints,
   UndoDiffTurn,
   GetDiff,
@@ -224,6 +227,7 @@ export async function chat(
     onPlanUpdate,
     onCancelled,
     onContextCompacted,
+    onUsage,
   } = {}
 ) {
   if (isWails()) {
@@ -238,6 +242,7 @@ export async function chat(
       onToolCallEnd,
       onPlanUpdate,
       onContextCompacted,
+      onUsage,
       onCancelled,
     })
 
@@ -602,6 +607,51 @@ export async function getLastLLMRequest(sessionId) {
   } catch {
     return null
   }
+}
+
+/**
+ * 查询「用量明细」弹窗需要的全部数据。
+ *
+ * 与 getContextStat 分开：后者是切会话就拉的高频轻量接口，
+ * 这里要额外取请求快照与原始 usage，只在用户打开弹窗时拉一次。
+ *
+ * @param {string} sessionId
+ * @returns {Promise<import('@/types').UsageDetail|null>} 会话不存在时返回 null
+ */
+export async function getUsageDetail(sessionId) {
+  if (!isWails()) return null
+  try {
+    return await GetUsageDetail(sessionId)
+  } catch {
+    return null // 只是展示用，取不到就显示空态，不打扰用户
+  }
+}
+
+/**
+ * 读取提示缓存偏好（开关 / TTL / 滚动断点）。
+ * @returns {Promise<object|null>}
+ */
+export async function getPromptCachePrefs() {
+  if (!isWails()) return null
+  try {
+    return await GetPromptCachePrefs()
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 写入提示缓存偏好，返回**归一化后**实际生效的值。
+ *
+ * 一定要用返回值刷新本地状态，而不是直接用入参：越界的 TTL / 阈值会被后端归一，
+ * 用入参显示会让界面显示一个并未生效的值。
+ *
+ * @param {object} prefs
+ * @returns {Promise<object|null>}
+ */
+export async function setPromptCachePrefs(prefs) {
+  if (!isWails()) return null
+  return await SetPromptCachePrefs(prefs)
 }
 
 /**

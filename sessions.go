@@ -135,6 +135,12 @@ type Session struct {
 	// 也必须靠这个会话（diff 轮次与 checkpoint ref 都按会话 ID 键控）。
 	// 主会话的会话里它恒为 nil。
 	Subagent *SubagentInfo `json:"subagent,omitempty"`
+
+	// UsageTotals 会话累计 token 用量（跨轮累加，只增不减）。
+	//
+	// 用**指针**而不是值：统计上线前的会话文件里没有这个字段，nil 表示"这个会话没有统计数据"，
+	// 界面据此显示空态而不是一排 0——值类型无法区分"没数据"与"数据恰好为 0"。
+	UsageTotals *UsageTotals `json:"usageTotals,omitempty"`
 }
 
 // SessionConfig 创建会话时的配置
@@ -510,6 +516,34 @@ func (s *SessionStore) AddSurfacedMemoryIDs(id string, ids []string) error {
 		seen[add] = true
 	}
 	return s.saveSession(session)
+}
+
+// AddUsage 累加一轮 token 用量并落盘，返回累加后的总计。
+//
+// withCache 表示本轮请求**是否真的带了缓存断点**（即缓存功能已启用）。
+// 它只影响"连续零命中"计数的推进，见 UsageTotals.Add 的说明。
+//
+// 与 AddSurfacedMemoryIDs 同为"读—改—写整个会话文件"的模式：会话是单一真源，
+// 把用量拆到单独的文件会制造第二个真源（删除会话时容易漏删，且两处可能对不上）。
+func (s *SessionStore) AddUsage(id string, u TokenUsage, now int64, withCache bool) (*UsageTotals, error) {
+	if s == nil || id == "" {
+		return nil, fmt.Errorf("会话 ID 不能为空")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	session, err := s.loadSession(id)
+	if err != nil {
+		return nil, err
+	}
+	if session.UsageTotals == nil {
+		session.UsageTotals = &UsageTotals{}
+	}
+	session.UsageTotals.Add(u, now, withCache)
+	if err := s.saveSession(session); err != nil {
+		return nil, err
+	}
+	out := *session.UsageTotals
+	return &out, nil
 }
 
 // ClearSurfacedMemoryIDs 清空已展示集合（测试与手动重置用）。
