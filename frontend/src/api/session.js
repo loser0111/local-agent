@@ -25,7 +25,7 @@ import {
   SaveAttachment,
   GetAttachmentDataURL,
   FetchImageURL,
-} from '@/../wailsjs/go/main/App'
+} from '@/../wailsjs/go/app/App'
 import { EventsOn, EventsOff } from '@/../wailsjs/runtime/runtime'
 import { subscribeChat } from '@/api/eventbus'
 import { putMockPlan } from '@/api/plan'

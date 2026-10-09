@@ -1,5 +1,5 @@
 import { EventsOn } from '@/../wailsjs/runtime/runtime'
-import { GetPendingInteraction } from '@/../wailsjs/go/main/App'
+import { GetPendingInteraction } from '@/../wailsjs/go/app/App'
 
 /**
  * 用户交互事件通道（授权请求 / 模型提问）

@@ -1,4 +1,4 @@
-import { ResolveAskUser, CancelAskUser, GetPendingAsk } from '@/../wailsjs/go/main/App'
+import { ResolveAskUser, CancelAskUser, GetPendingAsk } from '@/../wailsjs/go/app/App'
 
 /**
  * 判断是否运行在 Wails 桌面环境

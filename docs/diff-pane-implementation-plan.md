@@ -702,7 +702,7 @@ cd E:\learn\local-agent
 wails generate module      # 或直接 wails dev 一次
 ```
 
-生成后确认 `frontend/wailsjs/go/main/App.js` 与 `App.d.ts` 中出现：
+生成后确认 `frontend/wailsjs/go/app/App.js` 与 `App.d.ts` 中出现：
 
 ```js
 export function GetDiff(arg1) { ... }
@@ -716,7 +716,7 @@ export function GetDiffTurns(arg1) { ... }
 ### 6.1 `api/session.js`
 
 ```js
-import { GetDiff, GetDiffTurns } from "@/../wailsjs/go/main/App"
+import { GetDiff, GetDiffTurns } from "@/../wailsjs/go/app/App"
 
 // 浏览器开发模式（非 Wails）下的 mock，便于脱离桌面环境调试 UI
 const MOCK_DIFF = [
@@ -1162,7 +1162,7 @@ git -C E:\learn\local-agent --no-pager -c core.quotepath=false diff HEAD --unifi
 | Go | `app.go` | 新增 `diffService` 字段、`resolveProjectDir`、`GetDiff`、`GetDiffTurns` |
 | Go | `internal/store/sessions.go` | `Session` 增 `Diffs`；新增 `AppendDiff`；`ListSessions` 清空 `Diffs` |
 | Go | `chat.go` | `ChatEvent` / `ChatResult` 增字段；`executeChat` 两处插入 |
-| 自动 | `frontend/wailsjs/go/main/App.js`、`App.d.ts` | 重新生成绑定 |
+| 自动 | `frontend/wailsjs/go/app/App.js`、`App.d.ts` | 重新生成绑定 |
 | JS | `frontend/src/api/session.js` | 增 `getDiff` / `getDiffTurns` / `onDiffUpdate` + mock |
 | JS | `frontend/src/stores/diff.js` | **新增** |
 | JS | `frontend/src/stores/chat.js` | 增 `pendingPrompt` 通道 |

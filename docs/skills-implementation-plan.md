@@ -889,7 +889,7 @@ cd E:\learn\local-agent
 wails generate module      # 或直接 wails dev 一次
 ```
 
-确认 `frontend/wailsjs/go/main/App.js` 与 `App.d.ts` 中出现 `ListSkills` / `GetSkill` / `SaveSkill` / `DeleteSkill` / `ToggleSkill` / `SetSkillAlwaysInject` / `RefreshSkills` / `SkillsDir`。
+确认 `frontend/wailsjs/go/app/App.js` 与 `App.d.ts` 中出现 `ListSkills` / `GetSkill` / `SaveSkill` / `DeleteSkill` / `ToggleSkill` / `SetSkillAlwaysInject` / `RefreshSkills` / `SkillsDir`。
 
 ---
 
@@ -909,7 +909,7 @@ import {
   SetSkillAlwaysInject,
   RefreshSkills,
   SkillsDir,
-} from '@/../wailsjs/go/main/App'
+} from '@/../wailsjs/go/app/App'
 
 function isWails() {
   return typeof window !== 'undefined' && window.go && window.go.main && window.go.main.App
@@ -1278,7 +1278,7 @@ mkdir %USERPROFILE%\.local-agent\skills\pdf-report
 | Go | `chat.go` | `buildLLMMessages` 增参数；`executeChat` 注入 L1 / 强制注入 |
 | Go | `internal/store/sessions.go` | `Session` / `SessionConfig` 增 `EnabledSkills`；`CreateSession` 透传 |
 | Go | `app.go` | 新增 `skillStore`、`startup` 初始化、8 个 bound 方法、`enabledSkillsForSession` |
-| 自动 | `frontend/wailsjs/go/main/App.js`、`App.d.ts` | 重新生成绑定 |
+| 自动 | `frontend/wailsjs/go/app/App.js`、`App.d.ts` | 重新生成绑定 |
 | JS | `frontend/src/api/skill.js` | **新增** |
 | JS | `frontend/src/stores/skills.js` | **新增** |
 | Vue | `frontend/src/components/business/SkillSettings.vue` | **新增** |

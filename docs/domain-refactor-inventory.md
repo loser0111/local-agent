@@ -173,16 +173,39 @@ local-agent/
 
 - **重扫根目录**：仍为 45 个 `.go`（23 源码 + 22 测试），**无新增/改名/冲突**；逐个判定后
   确认全部属 **App 层**（Wails 绑定 + 装配 + 宿主适配），**无遗留的域引擎源码平铺在根目录**。
-- **F.3 评估结论：app.go / chat.go 不拆分**（用户已确认）。依据：
+- **F.3 初判（不拆分）的依据**：
   1. 二者直接使用 `wailsRuntime.EventsEmit` 等 wails runtime，而 `internal/*` 有
      「**不 import wails runtime**」的不变式 —— 迁入 `internal/*` 会破坏该不变式；
   2. `agentrun.go` 头注释已记载上一轮的设计决策：「循环没有搬到新文件，而是留在 chat.go、
      只把依赖来源换掉……**分层是按依赖边界达成的，不是按文件位置**」——内部循环已通过
      `agentRun`（依赖 store/skill/tool/permission/diff/snapshot/agent/llm/media，不认识 `*App`）
-     完成解耦，文件位置不是分层依据。强行「按文件搬迁」反而违背既有设计。
-- **最终状态**：根目录仅保留 **项目级入口/配置/说明 + App 层源码**；后端域引擎全部位于
-  `internal/<domain>/`（14 个：agent diff git llm media **memstore** memory permission procx
-  skill snapshot store task tool）+ 顶层 `plugin/`（插件域）。`memory/` 顶层目录已清空。
+     完成解耦，文件位置不是分层依据。
+- **决策反转（用户拍板）**：用户要求「根目录只剩 `main.go`」，遂执行 **H 节**的方案 B ——
+  把整个 App 层下沉到新建的 `internal/app/`。
 - **调试残留**：`_probe.py` / `_probe.log` / `lt.log` 按用户决定已删除（未跟踪文件，不入库）。
-- 结论：**平铺后端文件的按域整理到此完成**，无剩余待迁移项。
+
+## H. 追加：App 层下沉 `internal/app`（方案 B，用户选定）
+
+目标：根目录只保留 `main.go`（Wails 入口 + `//go:embed` + `Bind`）。
+
+- **搬迁**：`git mv` 44 个根 `.go`（除 `main.go`）→ `internal/app/`，`package main` → `package app`。
+  共 23 源码 + 21 测试；根目录 Go 文件由 45 降为 **1（仅 `main.go`）**。
+- **符号导出**（跨包调用所需）：
+  - `App.startup` → `App.Startup`（`main.go` 的 `OnStartup` 调用）；
+  - `startDesktopPlugin` → `StartDesktopPlugin`（`main.go` + 4 处测试调用）。
+  其余 `currentDesktopPlugin` / `stopDesktopPlugin` 保持未导出（仅包内/测试使用）。
+- **`main.go`**：改为 `import "wails-tmp/internal/app"`；`a := app.NewApp()`；
+  `OnStartup` 调 `a.Startup(ctx)` + `app.StartDesktopPlugin(a)`；`Bind: []interface{}{a}`。
+  `//go:embed all:frontend/dist` 与 `assets` 仍留在根 `main.go`。
+- **Wails 绑定重生成**：`wails generate module` 把 `frontend/wailsjs/go/main/App.{js,d.ts}`
+  迁为 `frontend/wailsjs/go/app/App.{js,d.ts}`，`models.ts` 的 `namespace main` 变为 `namespace app`。
+  前端 **10 处** `@/../wailsjs/go/main/App` 导入同步改为 `go/app/App`；**10 份文档**中的同一路径同步更新。
+- **不变式影响**：`internal/app` 是全仓**唯一** import `wailsRuntime` 的 `internal/*` 包 ——
+  它即 App/桥接层；原先「internal 不碰 wails runtime」的约束只针对引擎包，未被破坏。
+- **验证**：`go build ./...` / `go vet ./...` 全绿；`go test ./...` 仍仅 **3 个既有失败包**
+  （`internal/app` 的 `TestImportMCPServersSkipsWithReasons`、`internal/snapshot`、`internal/tool`），
+  与基线 `bbc9964` 一致，无新增失败。
+- **未处理**：约 20 份历史设计文档中以**裸文件名 + 行号**引用 App 层文件（如 `chat.go:497`、
+  `app.go:192`、`taskhost.go`）——属历史记录，行号对应搬迁前的文件，**未改写**以免制造失真的行号引用。
+- 结论：**根目录平铺后端文件的整理（含 App 层下沉）到此完成**，根目录仅剩 `main.go` 一个 `.go`。
 

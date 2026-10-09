@@ -118,7 +118,7 @@ Git 安装用 `git clone --depth 1`（可指定 `--branch` 与仓库内子目录
 
 其余静态检查（括号配平、未使用 import、跨文件重复声明、包内函数调用可解析）全过；其中 58 处「调用未找到定义」经逐条确认均为局部函数变量（`flush`、`cancel`、`markExposure` 等），非遗漏。
 
-前端做了更实的验证：5 个改动过的 `.vue` 文件用 `@vue/compiler-sfc` 跑通了 parse、`compileScript`、`compileTemplate`，并用项目自带的 `sass` 编译了各自的 `<style lang="scss">`；`api/skill.js`、`stores/skills.js`、`types/index.js`、`wailsjs/go/main/App.js` 经 `node --check`（ESM）通过；`wailsjs/go/models.ts` 去除 TS 外壳后语法通过。
+前端做了更实的验证：5 个改动过的 `.vue` 文件用 `@vue/compiler-sfc` 跑通了 parse、`compileScript`、`compileTemplate`，并用项目自带的 `sass` 编译了各自的 `<style lang="scss">`；`api/skill.js`、`stores/skills.js`、`types/index.js`、`wailsjs/go/app/App.js` 经 `node --check`（ESM）通过；`wailsjs/go/models.ts` 去除 TS 外壳后语法通过。
 
 需要在本地补跑：
 

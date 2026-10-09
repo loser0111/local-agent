@@ -787,7 +787,7 @@ ChatStore.sendMessage()
 
 ### 7.4 前后端通信
 
-通过 Wails 自动生成的绑定（`frontend/wailsjs/go/main/App.js`）调用 Go 方法：
+通过 Wails 自动生成的绑定（`frontend/wailsjs/go/app/App.js`）调用 Go 方法：
 
 | Go 方法 | 前端调用 | 说明 |
 |---------|---------|------|

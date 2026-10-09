@@ -657,7 +657,7 @@ cd E:\learn\local-agent
 wails generate module
 ```
 
-确认 `frontend/wailsjs/go/main/App.js` 出现 `GetSessionPlan / SavePlan / ExecutePlan / CancelPlan / ListPlans`，且 `Chat` 变为四参。
+确认 `frontend/wailsjs/go/app/App.js` 出现 `GetSessionPlan / SavePlan / ExecutePlan / CancelPlan / ListPlans`，且 `Chat` 变为四参。
 
 ---
 
@@ -797,7 +797,7 @@ export const usePlanStore = defineStore('plan', () => {
 | Go | `plan_test.go` | **新增**：T1-T10 |
 | Go | `chat.go` | `ChatResult` 增 `Plan`；`ChatEvent` 增 `Plan/StepIndex`；`executeChat` 抽出 `runToolRun`；新增 `ChatPlan`/`ExecutePlan`/`emitPlanUpdate`/`buildBasePrompt` |
 | Go | `app.go` | `planStore` 初始化、`planCancels` 注册表、`Chat` 四参、新增 5 个绑定 |
-| 自动 | `frontend/wailsjs/go/main/App.js`、`App.d.ts` | 重新生成绑定 |
+| 自动 | `frontend/wailsjs/go/app/App.js`、`App.d.ts` | 重新生成绑定 |
 | JS | `frontend/src/api/plan.js` | **新增** |
 | JS | `frontend/src/stores/plan.js` | **新增** |
 | JS | `frontend/src/api/session.js` | `chat()` 四参透传 + `plan_update` 分发 + mock |

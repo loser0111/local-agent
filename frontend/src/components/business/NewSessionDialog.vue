@@ -7,7 +7,7 @@ import { fetchModelNames } from '@/api/model'
 import { useToolsStore } from '@/stores/tools'
 import { useSkillsStore } from '@/stores/skills'
 import ToolIcon from './ToolIcon.vue'
-import { PickDirectory } from '@/../wailsjs/go/main/App'
+import { PickDirectory } from '@/../wailsjs/go/app/App'
 import { useUiStore } from '@/stores/ui'
 
 const ui = useUiStore()

@@ -761,7 +761,7 @@ system + tools 合计需达到最小 token 数(约 1024,部分模型 2048)才真
 - `UsageDialog.vue`：五个分区（本轮 / 缓存 / 会话累计 / 上下文构成 / 估算可信度）+ 原始 usage 折叠区。打开时向后端拉完整明细，运行期间由 `live` 事件按**轮次**（不是时间戳——前后端时钟不同源）增量刷新。
 - `ChatPane.vue`：指示器点击改为打开明细；压缩挪成独立的「压缩」按钮；新增**缓存状态点**（未启用时不渲染——显示灰点会让人误以为「开了但没命中」）。
 - `eventbus` / `chat()` / `chatStore` 三处打通 `onUsage`；`format.js` 新增 `formatTokens` / `formatPercent`。
-- `wailsjs/go/main/App.js` 与 `App.d.ts` **手工同步**（生成器在本环境跑不了）。
+- `wailsjs/go/app/App.js` 与 `App.d.ts` **手工同步**（生成器在本环境跑不了）。
 
 ### 尚未做
 

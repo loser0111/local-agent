@@ -7,7 +7,7 @@ import {
   RemovePermissionRule,
   ClearPermissionGrants,
   SetSessionPermissionMode,
-} from '@/../wailsjs/go/main/App'
+} from '@/../wailsjs/go/app/App'
 import { DEFAULT_PERMISSION_MODE } from '@/types'
 
 /**

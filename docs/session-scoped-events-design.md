@@ -175,7 +175,7 @@ runToolLoop ──► ar.Recorder (appRecorder / subagentRecorder)
 | `panes/ChatPane.vue` | `sendMessage` 全程用捕获的 `sid`；`isGenerating` → `isGeneratingIn(sid)`；`markPendingToolCard` 用请求自带的 sessionId；停止按钮按会话 |
 | `panes/DiffPane.vue` / `PlanPane.vue` | 跟随 store 的 computed（改动很小） |
 | `components/layout/SessionSidebar.vue` | 会话项上显示「运行中 / 等待应答」标记 |
-| `wailsjs/go/main/*` | 手工同步 `ListRunningSessions` 绑定 |
+| `wailsjs/go/app/*` | 手工同步 `ListRunningSessions` 绑定 |
 
 ---
 

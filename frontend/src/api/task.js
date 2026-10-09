@@ -16,7 +16,7 @@ import {
   UpdateTaskSettings,
   PauseAllTasks,
   TaskCounts,
-} from '@/../wailsjs/go/main/App'
+} from '@/../wailsjs/go/app/App'
 import { EventsOn, EventsOff } from '@/../wailsjs/runtime/runtime'
 
 /**

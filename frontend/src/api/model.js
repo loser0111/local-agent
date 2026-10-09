@@ -7,7 +7,7 @@ import {
   GetModelFull,
   UpdateModel,
   TestModelConnection,
-} from '@/../wailsjs/go/main/App'
+} from '@/../wailsjs/go/app/App'
 
 /**
  * 判断是否运行在 Wails 桌面环境（window.go 存在）

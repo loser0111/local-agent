@@ -359,7 +359,7 @@ type Host interface {
 | `task:missed` | 高亮「已错过」 |
 | `task:notify:fallback` | 展示应用内提醒 + 原因 |
 
-**通道 3：前端 → 插件（调用）**——沿用现有绑定机制（`App` 导出方法 → `frontend/wailsjs/go/main/App`），**无需手写任何 HTTP 客户端**。
+**通道 3：前端 → 插件（调用）**——沿用现有绑定机制（`App` 导出方法 → `frontend/wailsjs/go/app/App`），**无需手写任何 HTTP 客户端**。
 
 ### 4.3 架构与分层
 
