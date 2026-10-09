@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	"wails-tmp/internal/memstore"
 	"wails-tmp/internal/tool"
-	memstore "wails-tmp/memory"
 )
 
 // 记忆三件套的引擎用例。

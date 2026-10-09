@@ -9,9 +9,9 @@ import (
 	"wails-tmp/internal/agent"
 	"wails-tmp/internal/media"
 	"wails-tmp/internal/memory"
+	"wails-tmp/internal/memstore"
 	"wails-tmp/internal/skill"
 	"wails-tmp/internal/tool"
-	memstore "wails-tmp/memory"
 )
 
 // ===== 工具管理器（配置驱动装配）=====

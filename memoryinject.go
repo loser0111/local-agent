@@ -3,13 +3,13 @@ package main
 import (
 	"strings"
 
+	"wails-tmp/internal/memstore"
 	"wails-tmp/internal/store"
-	"wails-tmp/memory"
 )
 
 // memoryProjectSlug 会话工作区 → 记忆项目键。
 func memoryProjectSlug(project string) string {
-	return memory.ProjectSlug(project)
+	return memstore.ProjectSlug(project)
 }
 
 func (a *App) memoryEnabled() bool {

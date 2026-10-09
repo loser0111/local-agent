@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strings"
 
+	"wails-tmp/internal/memstore"
 	"wails-tmp/internal/store"
-	"wails-tmp/memory"
 )
 
 const (
@@ -40,9 +40,9 @@ func (a *App) handleMemoryCommand(sessionID, cmd, rest string) (*ChatResult, err
 			reply = "用法：/remember 要记住的内容"
 			break
 		}
-		got, err := a.memory.AddMemory(memory.MemoryMeta{
-			Scope:   memory.ScopeUser,
-			Type:    memory.TypeUser,
+		got, err := a.memory.AddMemory(memstore.MemoryMeta{
+			Scope:   memstore.ScopeUser,
+			Type:    memstore.TypeUser,
 			Project: memoryProjectSlug(session.Project),
 			Source:  session.ID,
 		}, rest)
@@ -112,8 +112,8 @@ func (a *App) forgetMemory(session *store.Session, target string) string {
 
 func (a *App) listMemoriesForSession(session *store.Session) string {
 	slug := memoryProjectSlug(session.Project)
-	user, _ := a.memory.ListMemories(memory.ScopeUser, "")
-	proj, _ := a.memory.ListMemories(memory.ScopeProject, slug)
+	user, _ := a.memory.ListMemories(memstore.ScopeUser, "")
+	proj, _ := a.memory.ListMemories(memstore.ScopeProject, slug)
 	if len(user) == 0 && len(proj) == 0 {
 		return "还没有长期记忆。用 /remember 写下一条，或让我在对话里 memory_save。"
 	}
@@ -127,7 +127,7 @@ func (a *App) listMemoriesForSession(session *store.Session) string {
 	return strings.TrimSpace(sb.String())
 }
 
-func writeMemoryList(sb *strings.Builder, heading string, entries []*memory.MemoryEntry) {
+func writeMemoryList(sb *strings.Builder, heading string, entries []*memstore.MemoryEntry) {
 	if len(entries) == 0 {
 		return
 	}

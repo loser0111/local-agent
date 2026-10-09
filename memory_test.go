@@ -6,9 +6,9 @@ import (
 	"strings"
 	"testing"
 
+	"wails-tmp/internal/memstore"
 	"wails-tmp/internal/store"
 	"wails-tmp/internal/tool"
-	"wails-tmp/memory"
 )
 
 func newMemoryTestApp(t *testing.T) (*App, *store.Session) {
@@ -19,7 +19,7 @@ func newMemoryTestApp(t *testing.T) (*App, *store.Session) {
 	app.modelStore = store.NewModelStore(filepath.Join(base, "models.json"))
 	app.toolStore = tool.NewToolStore(filepath.Join(base, "tools.json"))
 	app.toolManager = NewToolManager(app.toolStore, nil)
-	memStore, err := memory.NewMemoryStore(filepath.Join(base, "memory"), memory.MemoryConfig{StalenessCaveat: true})
+	memStore, err := memstore.NewMemoryStore(filepath.Join(base, "memory"), memstore.MemoryConfig{StalenessCaveat: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,7 +63,7 @@ func TestRememberForgetAndListCommands(t *testing.T) {
 	}
 
 	// 取出 id 再删除
-	entries, _ := app.memory.ListMemories(memory.ScopeUser, "")
+	entries, _ := app.memory.ListMemories(memstore.ScopeUser, "")
 	if len(entries) == 0 {
 		t.Fatal("应有一条用户记忆")
 	}
@@ -115,9 +115,9 @@ func TestIgnoreMemorySkipsIndexAndRecall(t *testing.T) {
 
 func TestRecallSurfacedThenClearedOnCompact(t *testing.T) {
 	app, sess := newMemoryTestApp(t)
-	got, err := app.memory.AddMemory(memory.MemoryMeta{
-		Title: "ginkgo 约定", Description: "本项目用 ginkgo", Type: memory.TypeProject,
-		Scope: memory.ScopeProject, Project: memoryProjectSlug(sess.Project), Tags: []string{"ginkgo"},
+	got, err := app.memory.AddMemory(memstore.MemoryMeta{
+		Title: "ginkgo 约定", Description: "本项目用 ginkgo", Type: memstore.TypeProject,
+		Scope: memstore.ScopeProject, Project: memoryProjectSlug(sess.Project), Tags: []string{"ginkgo"},
 	}, "测试框架用 ginkgo。")
 	if err != nil {
 		t.Fatal(err)
@@ -201,7 +201,7 @@ func TestMemoryToolsDirectAndAutoAllow(t *testing.T) {
 
 func TestMemorySearchRespectsIgnore(t *testing.T) {
 	app, _ := newMemoryTestApp(t)
-	_, _ = app.memory.AddMemory(memory.MemoryMeta{Title: "x", Scope: memory.ScopeUser, Type: memory.TypeUser}, "secret-fact")
+	_, _ = app.memory.AddMemory(memstore.MemoryMeta{Title: "x", Scope: memstore.ScopeUser, Type: memstore.TypeUser}, "secret-fact")
 	view := app.toolManager.BuildView(context.Background(), BuildOptions{
 		Enforcer:     tool.AllowAllEnforcer{},
 		Memory:       app.memory,

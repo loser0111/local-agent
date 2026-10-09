@@ -13,12 +13,12 @@ import (
 	wailsRuntime "github.com/wailsapp/wails/v2/pkg/runtime"
 	"wails-tmp/internal/llm"
 	"wails-tmp/internal/media"
+	"wails-tmp/internal/memstore"
 	"wails-tmp/internal/permission"
 	"wails-tmp/internal/skill"
 	"wails-tmp/internal/snapshot"
 	"wails-tmp/internal/store"
 	"wails-tmp/internal/tool"
-	"wails-tmp/memory"
 )
 
 // App struct
@@ -32,7 +32,7 @@ type App struct {
 	skillInstall *skill.SkillInstaller
 	diffService  *diff.DiffService
 	planStore    *store.PlanStore
-	memory       *memory.MemoryStore
+	memory       *memstore.MemoryStore
 
 	// baseDir 本地数据目录（~/.local-agent）：权限配置的用户全局层也放在这里
 	baseDir string
@@ -122,7 +122,7 @@ func (a *App) startup(ctx context.Context) {
 	a.ensurePermissionState()
 	a.fileChanges = tool.NewFileChangeLog(500)
 	// 初始化长期记忆：~/.local-agent/memory/（失败不阻断启动）
-	if store, err := memory.NewMemoryStore(filepath.Join(baseDir, "memory"), memory.MemoryConfig{}); err != nil {
+	if store, err := memstore.NewMemoryStore(filepath.Join(baseDir, "memory"), memstore.MemoryConfig{}); err != nil {
 		fmt.Printf("[App] 初始化记忆库失败: %v\n", err)
 	} else {
 		a.memory = store

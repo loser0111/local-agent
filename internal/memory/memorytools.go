@@ -5,8 +5,8 @@
 //     buildContext；入参收窄成 ToolContext（记忆库句柄 + 三个会话级标量 + 一个回调）。
 //   - 根包只剩一行 case：`memory.NewSearchTool(bc.memory)` 等（见根 tools.go 的 newBuiltinTool）。
 //
-// 注意本包与顶层 `wails-tmp/memory`（记忆库本体）同名：本文件把它显式别名成 memstore，
-// 免得"package memory 里的 memory.X 指的是别人"这种事发生。
+// 记忆库本体已归位 internal/memstore（原顶层 wails-tmp/memory），本包以包名 memstore 直接引用；
+// 二者不再同名，原先的 memstore 别名随之取消。
 package memory
 
 import (
@@ -14,8 +14,8 @@ import (
 	"fmt"
 	"strings"
 
+	"wails-tmp/internal/memstore"
 	"wails-tmp/internal/tool"
-	memstore "wails-tmp/memory"
 )
 
 // ToolContext 三个记忆工具的共享上下文。
