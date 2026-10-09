@@ -17,7 +17,7 @@ import { DEFAULT_PERMISSION_MODE } from '@/types'
  */
 
 function isWails() {
-  return typeof window !== 'undefined' && window.go && window.go.main && window.go.main.App
+  return typeof window !== 'undefined' && window.go && window.go.app && window.go.app.App
 }
 
 const MOCK_MODE_KEY = 'local-agent:permission-mode'

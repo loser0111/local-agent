@@ -89,7 +89,7 @@ const form = reactive({
  * Wails 环境调用系统目录选择对话框；浏览器 mock 模式降级为手动输入框
  */
 async function browseProject() {
-  if (window.go && window.go.main && window.go.main.App) {
+  if (window.go && window.go.app && window.go.app.App) {
     try {
       const dir = await PickDirectory()
       if (dir) form.project = dir

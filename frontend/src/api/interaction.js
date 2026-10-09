@@ -12,7 +12,7 @@ import { GetPendingInteraction } from '@/../wailsjs/go/app/App'
 export const USER_INTERACTION_EVENT = 'user:interaction'
 
 function isWails() {
-  return typeof window !== 'undefined' && window.go && window.go.main && window.go.main.App
+  return typeof window !== 'undefined' && window.go && window.go.app && window.go.app.App
 }
 
 /**

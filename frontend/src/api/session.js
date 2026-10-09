@@ -35,7 +35,7 @@ import { DEFAULT_VIEW_MODE } from '@/types'
  * 判断是否运行在 Wails 桌面环境
  */
 function isWails() {
-  return typeof window !== 'undefined' && window.go && window.go.main && window.go.main.App
+  return typeof window !== 'undefined' && window.go && window.go.app && window.go.app.App
 }
 
 // ===== 浏览器开发模式 mock（localStorage 模拟后端会话文件存储） =====
