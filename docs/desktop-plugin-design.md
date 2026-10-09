@@ -523,7 +523,7 @@ plugin/
 |---|---|
 | `main.go` | `options` 增加 `SingleInstanceLock`、`HideWindowOnClose`、`StartHidden`（按配置）、`OnBeforeClose`（退出确认）；启动托盘 |
 | `app.go` | 装配插件；实现 `Host` 中属主程序的部分；新增少量导出方法 |
-| `chat.go` / `runcontrol.go` | 暴露稳定的「运行生命周期事件」与「按 runID 取消」（F10.4） |
+| `chat.go` / `internal/agent/runcontrol.go` | 暴露稳定的「运行生命周期事件」与「按 runID 取消」（F10.4） |
 | `frontend/src/views/Settings.vue` | `tabs` 增加「定时任务」 |
 | `frontend/src/panes/TasksPane.vue` | 由静态假数据改为真实列表/编辑/历史 |
 | `frontend/src/types/index.js` | 补 `PANE_TITLES` 等 |

@@ -1,7 +1,7 @@
 # local-agent 记忆系统优化方案
 
 > - 状态：**P0 已实施**（分支 `feature/memory-optimization`）；P1 / P2 待做
-> - 对标：Claude Code `memdir/` + Session Memory + `CLAUDE.md`；本地分析见仓库根目录 `claude-code-memory-analysis.md`
+> - 对标：Claude Code `memdir/` + Session Memory + `CLAUDE.md`；本地分析见 `docs/claude-code-memory-analysis.md`
 > - 原则：保留 `memory.MemoryStore` 的工程能力，把 Claude Code 的**对话闭环**接进来；不换协议、不绑 1P API
 
 ---
@@ -10,7 +10,7 @@
 
 ### 1.1 要解决什么
 
-`memory/memorystore.go` 已经是一套可测的长期记忆库：四分类、user/project 作用域、PII 拦截、过期、相似合并、容量淘汰、词检索、相对龄与漂移提示。但它**没有调用方**——`App.startup` 不创建 store，`buildBasePrompt` / `runToolLoop` / `compactSession` 都不碰它。
+`internal/memstore/memorystore.go` 已经是一套可测的长期记忆库：四分类、user/project 作用域、PII 拦截、过期、相似合并、容量淘汰、词检索、相对龄与漂移提示。但它**没有调用方**——`App.startup` 不创建 store，`buildBasePrompt` / `runToolLoop` / `compactSession` 都不碰它。
 
 结果是：跨会话知识进不了模型；模型也没有合法的写入入口；`/compact` 每次都从对话重新摘要，没有可复用的会话工作记忆。
 
@@ -84,7 +84,7 @@ Claude Code 的优势不在「有 index」，而在记忆**活在对话里**：�
        └─ 否则 P1 提取 → AddMemory（仍走 store，PII 照拦）
 ```
 
-压缩路径（接到已有 `contextmgmt.go`，不另起炉灶）：
+压缩路径（接到已有 `internal/agent/contextmgmt.go`，不另起炉灶）：
 
 ```
 将满
@@ -99,15 +99,15 @@ Claude Code 的优势不在「有 index」，而在记忆**活在对话里**：�
 
 | 能力 | 现状 | 文件 |
 | --- | --- | --- |
-| 记忆库 | 完整、有测试、无调用方 | `memory/memorystore.go`、`memory/memorystore_test.go` |
+| 记忆库 | 完整、有测试、无调用方 | `internal/memstore/memorystore.go`、`internal/memstore/memorystore_test.go` |
 | 注入 | 只拼 title+description，默认 800 字，正文不进 prompt | `FormatInjection` |
 | 检索 | tag/标题/描述加权 + recency + importance | `Retrieve` |
 | 对话组装 | 人设 + 工作区 + 技能 L1，无记忆段 | `chat.go` `buildBasePrompt` |
-| 请求构建 | system +（可选 ContextSummary）+ 历史 | `contextmgmt.go` `buildRunMessages` |
-| 压缩 | 阈值自动 + `/compact`，可逆 | `contextmgmt.go` `compactSession` |
+| 请求构建 | system +（可选 ContextSummary）+ 历史 | `internal/agent/contextmgmt.go` `buildRunMessages` |
+| 压缩 | 阈值自动 + `/compact`，可逆 | `internal/agent/contextmgmt.go` `compactSession` |
 | 命令拦截 | `/compact`、`/context-stat` 已在 `Chat` 最前 | `app.go` |
-| 工具直出 | `directToolOrder`；提示词点名的必须在列 | `filetools.go` |
-| 会话字段 | `Project`、`ContextSummary*` 已有 | `sessions.go` |
+| 工具直出 | `directToolOrder`；提示词点名的必须在列 | `internal/tool/filetools.go` |
+| 会话字段 | `Project`、`ContextSummary*` 已有 | `internal/store/sessions.go` |
 | App 装配 | `startup` 不创建 MemoryStore | `app.go` |
 
 ---
@@ -141,7 +141,7 @@ Claude Code 的优势不在「有 index」，而在记忆**活在对话里**：�
 只加记忆闭环需要的，压缩三字段不动。
 
 ```go
-// Session 增补（sessions.go）
+// Session 增补（internal/store/sessions.go）
 WorkingMemory        string   `json:"workingMemory,omitempty"`        // 本会话滚动工作记忆（markdown）
 WorkingMemoryUpTo    int      `json:"workingMemoryUpTo,omitempty"`    // 已吸收到 Messages 的下标（不含）
 SurfacedMemoryIDs    []string `json:"surfacedMemoryIDs,omitempty"`    // 本会话已注入正文的记忆 id
@@ -335,11 +335,11 @@ else:
 
 ## 九、文件与职责
 
-不把提取、工具、注入塞回 `memorystore.go`。store 继续只做持久化与检索。
+不把提取、工具、注入塞回 `internal/memstore/memorystore.go`。store 继续只做持久化与检索。
 
 ```
-memory/memorystore.go      已有；小改：FormatRecall、IndexForPrompt、config 新字段
-memory/memorystore_test.go 已有；补 L1/L2 预算与 alreadySurfaced 过滤
+internal/memstore/memorystore.go      已有；小改：FormatRecall、IndexForPrompt、config 新字段
+internal/memstore/memorystore_test.go 已有；补 L1/L2 预算与 alreadySurfaced 过滤
 
 memoryapp.go               App 装配、命令、IgnoreMemory、对外 List/Delete API
 memorytools.go             三个工具 + 注册进 BuildView / directToolOrder
@@ -348,10 +348,10 @@ memoryinject.go            L1 拼进 prompt、L2 召回块、surfaced 更新
 sessionmemory.go           WorkingMemory 更新与 compact 短路（P1）
 
 chat.go                    buildBasePrompt 接 L1；runToolLoop 结束调提取
-contextmgmt.go             compact 开头尝试 WorkingMemory
+internal/agent/contextmgmt.go             compact 开头尝试 WorkingMemory
 app.go                     startup 创建 MemoryStore；Chat 拦截新命令
-filetools.go               directToolOrder 追加三条
-sessions.go                Session 新字段
+internal/tool/filetools.go               directToolOrder 追加三条
+internal/store/sessions.go                Session 新字段
 frontend/                  P2：记忆列表与开关
 ```
 

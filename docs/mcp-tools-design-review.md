@@ -17,7 +17,7 @@
 
 ### 2.1 数据结构：一条配置承载四种东西
 
-`toolstore.go`：
+`internal/tool/toolstore.go`：
 
 ```go
 type ToolConfig struct {
@@ -37,7 +37,7 @@ type ToolConfig struct {
 
 ### 2.2 装配与暴露
 
-`tools.go` 的 `BuildView` 按 `Type` 分支装配：内置 → `newBuiltinTool`，CLI/API → 模板类工具，MCP → 连接服务器后**为每个子工具生成一个工具**，命名 `mcp__<server>__<tool>`（`toolruntime.go:365`）。
+`tools.go` 的 `BuildView` 按 `Type` 分支装配：内置 → `newBuiltinTool`，CLI/API → 模板类工具，MCP → 连接服务器后**为每个子工具生成一个工具**，命名 `mcp__<server>__<tool>`（`internal/tool/toolruntime.go:365`）。
 
 暴露分两种：内置文件工具与 `ask_user` 走 `directToolOrder` 直出给模型；**MCP 子工具、CLI、API 只能经 `tool_router` 发现**。这是合理的（避免 prompt 膨胀），但它意味着"MCP 工具"和"内置工具"对模型呈现方式根本不同，而这一点在数据结构上没有任何体现。
 
@@ -58,14 +58,14 @@ UI 上的对应现象：`NewSessionDialog.vue:183` 的白名单选择器列的�
 | 位置 | 名字形态 | 依据 |
 |---|---|---|
 | 设置页子工具列表 | 服务器上的原始名（如 `get_config_raw`） | `TestToolConnection` 回填 `MCPToolMeta{Name: t.Name}`（`app.go`），`ToolSettings.vue:137` 展示 |
-| 模型看到的工具名 | `mcp__<server>__<tool>` | `mcpToolName()`（`toolruntime.go:365`） |
-| 权限规则里要写的名字 | `mcp__<server>__<tool>`（必须带前缀） | 规则按工具名匹配（`permission.go` 的 `Rule.matchesUnit`） |
+| 模型看到的工具名 | `mcp__<server>__<tool>` | `mcpToolName()`（`internal/tool/toolruntime.go:365`） |
+| 权限规则里要写的名字 | `mcp__<server>__<tool>`（必须带前缀） | 规则按工具名匹配（`internal/permission/permission.go` 的 `Rule.matchesUnit`） |
 
 用户在对的地方（设置页）看到的名字，和写规则要用的名字不是同一个。
 
 ### 2.5 权限：MCP 子工具没有 specifier 语义
 
-`MCPTool` 没有实现 `SubjectProvider`，于是判定主体退化为 `newToolSubject`：`Units` 只有一段，内容是 `compactArgs` 的键值摘要（`permission.go:151`，形如 `appid=100049128 env=prod`，键名排序后拼接、截断 400 字符）。
+`MCPTool` 没有实现 `SubjectProvider`，于是判定主体退化为 `newToolSubject`：`Units` 只有一段，内容是 `compactArgs` 的键值摘要（`internal/permission/permission.go:151`，形如 `appid=100049128 env=prod`，键名排序后拼接、截断 400 字符）。
 
 后果：`read_file`/`exec_shell` 那套"工具 + 路径/命令段"的判定语义，MCP 工具完全没有；写 `mcp__qconfig__changeqconfig(appid=100049128)` 这种规则**看起来能命中**（前缀匹配恰好对上了排序后的第一段），但它依赖键名排序和字符串拼接格式，属于意外可用而非设计可用。
 
@@ -85,11 +85,11 @@ MCP 官方与各家客户端（Claude Desktop、Cline）通用格式：
 
 差异点：外层是数组而非 `mcpServers` 字典、`type` 的取值体系不同（`streamable-http` vs `http`）、传输字段名不同（`type` vs `config.transport`）。
 
-**这个代价今天已经付过**：会话 `20260917_162303` 里，模型为了让 QConfig 接进来，自己在会话中完成了这层翻译，并写下"本系统传输字段为 transport，取值 http，等价于官方片段的 type: streamable-http"作为说明；`20260917_170140` 里它还专门去读了 `toolstore.go` 确认字段名。也就是说，**格式翻译的成本被转嫁给了每次接入的用户/模型**。
+**这个代价今天已经付过**：会话 `20260917_162303` 里，模型为了让 QConfig 接进来，自己在会话中完成了这层翻译，并写下"本系统传输字段为 transport，取值 http，等价于官方片段的 type: streamable-http"作为说明；`20260917_170140` 里它还专门去读了 `internal/tool/toolstore.go` 确认字段名。也就是说，**格式翻译的成本被转嫁给了每次接入的用户/模型**。
 
 ### 2.7 MCP 参数 schema 被压平（功能损失）
 
-`paramsFromJSONSchema`（`toolruntime.go`）只取 schema 第一层的 `type` 与 `description`：
+`paramsFromJSONSchema`（`internal/tool/toolruntime.go`）只取 schema 第一层的 `type` 与 `description`：
 
 ```go
 argType := "string"
@@ -220,7 +220,7 @@ P0/P1 是低风险高收益（不动存储结构即可做，P1 只加一个导�
 ### 9.2 涉及面（预估）
 
 新增：`toolsource.go`（来源模型与解析）、`toolschema.go`（schema 直通与两条协议的转换）、`mcpimport.go`（官方格式导入导出）。
-修改：`toolstore.go`（存储与迁移）、`tools.go`（装配：来源 → 工具）、`toolruntime.go`（MCP 装配与子工具命名）、`permission.go`（MCP 主体结构化）、`app.go`（bound 方法与校验）、前端 `ToolSettings.vue` / `ToolEditDialog.vue` / `NewSessionDialog.vue` / 会话白名单语义。
+修改：`internal/tool/toolstore.go`（存储与迁移）、`tools.go`（装配：来源 → 工具）、`internal/tool/toolruntime.go`（MCP 装配与子工具命名）、`internal/permission/permission.go`（MCP 主体结构化）、`app.go`（bound 方法与校验）、前端 `ToolSettings.vue` / `ToolEditDialog.vue` / `NewSessionDialog.vue` / 会话白名单语义。
 
 ### 9.3 本次评审建议的默认路径
 
@@ -235,7 +235,7 @@ P0/P1 是低风险高收益（不动存储结构即可做，P1 只加一个导�
 **P0 参数 schema 直通**
 
 - `LLMToolDef.Parameters` 从 `*LLMToolParams`（只有 type/description 的结构体）改为 `json.RawMessage`：**完整 JSON Schema 原样直通**，两条协议都不再裁剪。
-- 新增 `SchemaProvider` 接口（`tools.go`）；`MCPTool` 实现它，保存服务器给的原始 `inputSchema`（`toolruntime.go` 的 `normalizeInputSchema`：确保是对象、确保有 `type`，其余原样保留；非对象或超过 16KB 时返回 nil 并降级为简化表，同时打日志）。
+- 新增 `SchemaProvider` 接口（`tools.go`）；`MCPTool` 实现它，保存服务器给的原始 `inputSchema`（`internal/tool/toolruntime.go` 的 `normalizeInputSchema`：确保是对象、确保有 `type`，其余原样保留；非对象或超过 16KB 时返回 nil 并降级为简化表，同时打日志）。
 - `tool_router` 的 `describe` 也优先回传完整 schema —— MCP 子工具只能经路由器发现，`describe` 是模型了解其参数结构的唯一入口，这里压平等于让模型猜。
 - Anthropic 侧改为 `inputSchemaFor`：直接吃标准 JSON Schema（Anthropic 与 OpenAI 形状一致），只兜底「必须是对象、必须有 type」。
 - 内置/CLI/API 工具仍由简化参数表合成 schema（`buildJSONSchema`），`required` 不再丢失，无必填时不再输出 `"required": null`。
@@ -256,15 +256,15 @@ P0/P1 是低风险高收益（不动存储结构即可做，P1 只加一个导�
 
 ### 验收要点
 
-- 参数形状：用带嵌套/枚举参数的 MCP 工具（如 `changeqconfig`）实测，模型应一次给出正确形状；`schema_test.go` 断言 enum/items/嵌套/required 均不被裁剪。
+- 参数形状：用带嵌套/枚举参数的 MCP 工具（如 `changeqconfig`）实测，模型应一次给出正确形状；`internal/tool/schema_test.go` 断言 enum/items/嵌套/required 均不被裁剪。
 - 格式互操作：把官方片段粘进设置页即可连通；`export → import` 往返一致（`mcpimport_test.go`）。
-- 待本地执行：`go build ./... && go test ./...`（新增 `schema_test.go`、`mcpimport_test.go`，以及两处既有测试从 `Parameters.Required` 改为解析 raw schema）。
+- 待本地执行：`go build ./... && go test ./...`（新增 `internal/tool/schema_test.go`、`mcpimport_test.go`，以及两处既有测试从 `Parameters.Required` 改为解析 raw schema）。
 
 ---
 
 ## 十一、P2 / P3 实施状态（2026-09-17，接第十节）
 
-### 落盘升级到 v2（新增 `toolmodel.go`）
+### 落盘升级到 v2（新增 `internal/tool/toolmodel.go`）
 
 - 类型换成 **`ToolSource`（来源）**：`kind`（builtin/cli/http/mcp）替代原 `type`（原 `api` 迁移为 `http`）；**类型化配置字段** `cli` / `http` / `mcp` 取代弱类型 `config json.RawMessage`，编译期即可约束「kind=mcp 就必须有 mcp 配置」。
 - **MCP 配置改成官方形状**（`type: streamable-http|sse|stdio` + url/headers/command/args/env），与 Claude Desktop / Cline / MCP 文档一致 —— 导入导出因此几乎不需翻译（`mcpimport.go` 只剩搬字段与校验）。
@@ -316,4 +316,4 @@ P0/P1 是低风险高收益（不动存储结构即可做，P1 只加一个导�
 
 - 前端：30 个 SFC 全部编译通过、27 个 JS 文件语法通过（沙箱内可执行）。
 - Go：**沙箱无 Go 工具链，未编译、未跑测试**。已做的是静态核对（括号平衡用项目既有 `/tmp/go_lex_check.py`、未使用 import、重复声明、字段/方法解析、`ToolSource`/`MCPConfig` 成员访问按变量名核对）。**必须本地 `go build ./... && go test ./...` 验收**。
-- 新增/更新的测试：`mcpimport_test.go`（导入三形态、跳过原因、幂等、导出往返、v1→v2 迁移含备份校验、子工具开关与暴露策略）、`schema_test.go`（schema 直通）、`tool_runtime_test.go`（来源模型下的装配与白名单）。
+- 新增/更新的测试：`mcpimport_test.go`（导入三形态、跳过原因、幂等、导出往返、v1→v2 迁移含备份校验、子工具开关与暴露策略）、`internal/tool/schema_test.go`（schema 直通）、`tool_runtime_test.go`（来源模型下的装配与白名单）。

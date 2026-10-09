@@ -28,5 +28,5 @@ To build a redistributable, production mode package, use `wails build`.
 最明显。macOS / Linux 上没有这个现象，所以这种缺陷在开发机上完全看不见。
 
 **约定：所有拉起子进程的地方，构造完 `cmd` 后必须调用 `hideConsoleWindow(cmd)`**
-（实现在 `procexec_windows.go`，非 Windows 是空操作；新增调用点照抄一行即可）。
+（实现在 `internal/procx/procexec_windows.go`，非 Windows 是空操作；新增调用点照抄一行即可）。
 `procexec_test.go` 里有一条结构性测试扫全包源码守着这条约定，在任意平台上都会跑。

@@ -91,7 +91,7 @@
 | **B. 本地 OCR 出文本再喂** | 对"截图里的报错"最省 token | 需要引入 OCR 依赖（本项目沙箱无法拉新模块，离线 OCR 质量参差）；OCR 会丢掉布局/颜色/图标信息，"这个按钮为什么是灰的"就答不了 |
 | **C. 入站即规整：解码 → 缩放 → 重编码** ✅ | 按上限压到 1568px，省 token 也省带宽；尺寸一确定，上下文用量就能**在发送前**算准；请求路径零转换（热路径上没有失败面） | 需要在入站做一次编解码；格式选择要讲清楚（见下） |
 
-**选型：C。** 规整规则（`imageproc.go`）：
+**选型：C。** 规整规则（`internal/media/imageproc.go`）：
 
 | 情形 | 处理 |
 | --- | --- |
@@ -220,18 +220,18 @@ read_image.Execute ──► imageCollector ──► 工具结果消息的 Atta
 
 | 文件 | 职责 |
 | --- | --- |
-| `imageproc.go`（新） | 纯计算：嗅探媒体类型、解码取宽高、面积平均缩放、重编码。**无 IO** |
-| `attachments.go`（新） | `Attachment`（引用）、`AttachmentStore`（落盘/读回/data URL/级联删除/路径校验）、`imageCollector`（工具产图通道）、`DecodeUpload`（base64/data URL 解析） |
+| `internal/media/imageproc.go`（新） | 纯计算：嗅探媒体类型、解码取宽高、面积平均缩放、重编码。**无 IO** |
+| `internal/media/attachments.go`（新） | `Attachment`（引用）、`AttachmentStore`（落盘/读回/data URL/级联删除/路径校验）、`imageCollector`（工具产图通道）、`DecodeUpload`（base64/data URL 解析） |
 | `chat.go` | `LLMImage`、`LLMMessage.MarshalJSON`（有图时才变块数组）、`buildLLMMessages`（附件→图片的唯一转换点）、`appendToolResultMessages`（工具结果形状的唯一产出点） |
-| `anthropic.go` | `anthropicImageSource`、`image` 块转换、`tool_result` 与图片的回合合并 |
-| `sessions.go` | `Message.Attachments`、`ToolCall.Images`（只存 ID 的展示镜像）、纯图片消息的标题兜底 |
-| `contextmgmt.go` | `imageTokens`（按像素估）、`storedMessageTokens`/`messageTokens` 计入图片、摘要素材标注图片 |
+| `internal/llm/anthropic.go` | `anthropicImageSource`、`image` 块转换、`tool_result` 与图片的回合合并 |
+| `internal/store/sessions.go` | `Message.Attachments`、`ToolCall.Images`（只存 ID 的展示镜像）、纯图片消息的标题兜底 |
+| `internal/agent/contextmgmt.go` | `imageTokens`（按像素估）、`storedMessageTokens`/`messageTokens` 计入图片、摘要素材标注图片 |
 | `requestlog.go` | `redactMessages`：请求快照里把图片字节换成一行说明 |
 | `app.go` | `SaveAttachment` / `GetAttachmentDataURL` 两个绑定接口、附件存储初始化、删会话级联 |
-| `filetools.go` | `read_image` 工具；`fileToolContext` 增加附件存储与产图通道 |
+| `internal/tool/filetools.go` | `read_image` 工具；`fileToolContext` 增加附件存储与产图通道 |
 | `imagefetch.go`（新） | 从图片链接抓取（`FetchImageURL`）：只由用户点按触发，见 §4.9 |
 | `tools.go` | `BuildOptions.Attachments`、`SessionView.images` + `TakeImages()`、`read_image` 条件注册 |
-| `toolstore.go` | `read_image` 内置来源（`ensureBuiltins` 会给老配置自动补齐） |
+| `internal/tool/toolstore.go` | `read_image` 内置来源（`ensureBuiltins` 会给老配置自动补齐） |
 | 前端 | `api/session.js`（上传/取回 + mock）、`stores/chat.js`（data URL 缓存）、`ChatPane.vue`（三入口 + 预览条）、`MessageBubble.vue`（展示 + 点击放大）、`ToolCallCard.vue`（工具产图缩略图）、`RequestPreviewDialog.vue`（块数组渲染） |
 
 ### 3.3 六条不变式
@@ -260,7 +260,7 @@ read_image.Execute ──► imageCollector ──► 工具结果消息的 Atta
 
 ## 4. 接线点（逐文件）
 
-### 4.1 会话消息（`sessions.go`）
+### 4.1 会话消息（`internal/store/sessions.go`）
 
 ```go
 type Message struct {
@@ -307,12 +307,12 @@ type LLMImage struct {
 - `imageLoader func([]Attachment) ([]LLMImage, []string)`：**第二返回值是失败说明**。
   走依赖注入而不是直接调 `AttachmentStore`，是为了让"图片读取失败"这类场景可被精确构造与断言。
 
-### 4.3 Anthropic 适配（`anthropic.go`）
+### 4.3 Anthropic 适配（`internal/llm/anthropic.go`）
 
 `toAnthropicRequest` 的 user 分支：文本块在前、图片块在后（与 Claude Code 的实际行为一致）；
 判空条件从"内容为空"改成"正文与图片皆空"，否则**纯图片消息会被整条丢掉**。
 
-### 4.4 上下文（`contextmgmt.go`）
+### 4.4 上下文（`internal/agent/contextmgmt.go`）
 
 - `imageTokens(w, h)`，计入 `messageTokens` / `storedMessageTokens`。
   不这么做的话，一张图能被"压缩省下 0 token"，而它实际占了三千多。
@@ -335,7 +335,7 @@ type LLMImage struct {
 渲染前折叠成"文本 + `[图片] 图片已省略：…`"，避免出现 `[object Object]`；
 并对 `data:` 开头的 URL 再做一层兜底截断。
 
-### 4.6 附件存储（`attachments.go`）
+### 4.6 附件存储（`internal/media/attachments.go`）
 
 ```go
 func NewAttachmentStore(root string) *AttachmentStore
@@ -619,7 +619,7 @@ content 数组里**只有图片块**。
 **这一轮最后做的事：不让模型继续误导人。** 既然结论可测，就把它落盘
 （`~/.local-agent/vision-check.json`）并在下一个请求里用上：
 
-- `visionverdict.go`：`VisionVerdictStore` 按模型名记住"测过且未通过"。
+- `internal/store/visionverdict.go`：`VisionVerdictStore` 按模型名记住"测过且未通过"。
   **"没测过"与"测过且未通过"必须区分**——前者不该影响任何行为。
   结论还**与端点绑定**（同时记下当时的 ModelID 与 URL）：用户很可能换了端点却沿用同一个
   配置名（把 `glm-5.2-discount` 的 URL 改指向一个视觉模型），那时旧结论必须自动失效——

@@ -141,3 +141,31 @@ local-agent/
 ## F.4 无法归类 / 待确认
 
 - 无。全部平铺文件均已给出目标或明确「留根」；`cad/`（Python）、`plugin/`（顶层 Go 包）判为有意保留。
+
+---
+
+# G. 执行进展
+
+## G.1 步骤 5（迁移）
+
+- `memory/memorystore.go(+_test.go)` → `internal/memstore/`（git mv，`package memory`→`memstore`）。
+- 引用改写：app.go / memoryapp.go / memoryinject.go / memory_test.go / tools.go /
+  internal/memory/{memorytools.go,memorytools_internal_test.go}。
+- `claude-code-memory-analysis.md` → `docs/`。
+- 提交 `c09954c`；build/vet/域测试全绿。
+
+## G.2 步骤 6（修正全局引用与配置）
+
+- **代码/配置/脚本/测试**：全局搜索 `wails-tmp/<domain>`，仅剩 `internal/*` 与 `plugin`，
+  `.gitignore` / `wails.json` / `run-app.ps1` 无域路径引用 → **无残留、无需修改**。
+- **文档**（按用户决定「全部更新到新路径」）：对 18 份 `.md` 中的**已搬迁项目文件**引用做了
+  字节安全替换（UTF-8 精确往返，保留行尾）。范围仅限「确实存在于本仓、只是换了目录」的文件：
+  搬入 `internal/*` 的引擎文件（sessions.go / diff.go / filetools.go / toolruntime.go / skills.go …）、
+  记忆库本体（memory/memorystore.go → internal/memstore/memorystore.go）、以及
+  `claude-code-memory-analysis.md` 的位置（→ `docs/`，并去掉「仓库根目录」措辞）。
+- **有意未改**（非本次搬迁的旧路径，改了反而错）：
+  - 本文件（`domain-refactor-inventory.md`）中的迁移对照表 —— 迁移记录本身；
+  - `plugin/*.go` 的裸文件名引用 —— 该包从未搬迁（部分还是设计稿里未创建的文件名）；
+  - wails 库内部路径（`pkg/options/options.go`、`v0.46.0/windows/dll_windows.go` 等）；
+  - `docs/image-input-design.md` 中逐字引用的编译器报错 `./imageproc.go:170:11` —— 属引用原文。
+

@@ -32,7 +32,7 @@
 **需要修正的部分**（如果按"全都要改成会话级"去理解，会把工作量估大、也会改坏已有设计）：
 
 3. **后端早就是按会话键控的**：`runRegistry` 以 runID 为主键、另有 `sessionID → runID` 索引
-   （`runcontrol.go`）；`permissionBroker` / `askBroker` 的 pending 表按 sessionID 分组；
+   （`internal/agent/runcontrol.go`）；`permissionBroker` / `askBroker` 的 pending 表按 sessionID 分组；
    `DiffService` 的基线、归因、checkpoint、文件改动日志、子代理会话全部按 sessionID 键控。
    所以后端**并不存在"全局当前会话"**，多会话并行在它这一侧本来就成立。
 4. **前端也有一部分已经是会话级的**：`stores/pane.js`（面板布局按 sessionId 存）、
@@ -154,9 +154,9 @@ runToolLoop ──► ar.Recorder (appRecorder / subagentRecorder)
 | --- | --- |
 | `chat.go` | `ChatEvent` 增 `sessionId` / `runId`；`emitChatEvent(sessionID, runID, ev)` 与 `emitInteraction(sessionID, ev)` **改签名**（强制每个调用点显式给归属）；`startDeltaFlusher(sessionID, runID)`；`emitPlanUpdate` 从 `plan.SessionID` 取；`executeChat` / `ChatPlan` / `runToolLoop` 入口改用 `beginExclusive`，冲突时返回可读错误 |
 | `agentrun.go` | `appRecorder` 增 `sessionID` / `runID`，`Emit` / `EmitDiff` / `FlushStream` 三处盖章（**这是运行期事件的唯一出口**，运行内的十几处 `Recorder.Emit` 全部自动获得归属） |
-| `runcontrol.go` | 新增 `beginExclusive`（同会话已有运行 → 返回错误，不覆盖索引）；新增 `activeSessions()` |
+| `internal/agent/runcontrol.go` | 新增 `beginExclusive`（同会话已有运行 → 返回错误，不覆盖索引）；新增 `activeSessions()` |
 | `app.go` | `handleCompactCommand` / `handleContextStatCommand` 的 `done` 事件补归属；新增 `ListRunningSessions`（前端刷新后仍能标出"哪几条在跑"） |
-| `permission_app.go` / `ask.go` | `emitPermissionRequest` / `AskUser` 的交互事件补归属（载荷里本来就有 sessionID，只是没写进事件） |
+| `permission_app.go` / `internal/agent/ask.go` | `emitPermissionRequest` / `AskUser` 的交互事件补归属（载荷里本来就有 sessionID，只是没写进事件） |
 | `visiontest.go` | `/vision` 的 `done` 事件补归属；运行改用 `beginExclusive` |
 | `docs/` | 本文 |
 
