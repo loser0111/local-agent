@@ -47,7 +47,7 @@ const hasSecondary = computed(() => secondaryPanes.value.length > 0)
 //
 // 不能直接拿 activePane：它可能是 'chat'（DiffPane 的「Review code」会把焦点切回聊天），
 // 那样右侧会再渲染一个 ChatPane——同一个聊天面板并排出现两次（改前就是这样）。
-// 落在右侧面板集合之外时回落到第一个。
+// 落在右侧面板集合之外时回落到第一个；一个面板都没打开时为空串（渲染空态，见模板）。
 const secondaryActivePane = computed(() => {
   const list = secondaryPanes.value
   if (!list.length) return ''
@@ -99,6 +99,9 @@ const chatWidth = ref(CHAT_DEFAULT)
 
 // 收起右侧时聊天区自己铺满：chatWidth（百分比或像素）此时已经没有意义，
 // 继续用 `0 0 X%` 会在右边留下一条空白。
+//
+// 注意这里只有"收起"一种铺满情形：右侧栏是常驻的（见模板），没打开面板时它占位并显示空态，
+// 所以未收起时聊天区仍按 chatWidth 分栏。
 const chatStyle = computed(() =>
   collapsed.value ? { flex: '1 1 auto' } : { flex: '0 0 ' + chatWidth.value }
 )
@@ -134,58 +137,70 @@ const paneComponents = {
       <component :is="paneComponents.chat" />
     </div>
 
-    <template v-if="hasSecondary">
-      <!-- 拖拽分隔条：收起时不需要（拖拽本身也会被隐藏掉） -->
-      <ResizeDivider v-if="!collapsed" @drag="onChatDrag" />
+    <!-- 拖拽分隔条：收起时不需要（拖拽本身也会被隐藏掉） -->
+    <ResizeDivider v-if="!collapsed" @drag="onChatDrag" />
 
-      <!-- 收起态：窄条 + 图标。点图标 = 展开并切到该面板 -->
-      <div v-if="collapsed" class="pane-strip">
-        <button
-          class="strip-btn strip-expand"
-          title="展开右侧面板（也可以点下面的图标直达某个面板）"
-          @click="toggleCollapse"
-        >
-          <ChevronsLeft :size="15" />
-        </button>
-        <button
+    <!-- 收起态：窄条 + 图标。点图标 = 展开并切到该面板 -->
+    <div v-if="collapsed" class="pane-strip">
+      <button
+        class="strip-btn strip-expand"
+        title="展开右侧面板（也可以点下面的图标直达某个面板）"
+        @click="toggleCollapse"
+      >
+        <ChevronsLeft :size="15" />
+      </button>
+      <button
+        v-for="p in secondaryPanes"
+        :key="p"
+        class="strip-btn"
+        :class="{ active: secondaryActivePane === p }"
+        :title="`展开并切到「${PANE_TITLES[p] || p}」`"
+        @click="expandTo(p)"
+      >
+        <component :is="paneIcon(p)" :size="16" />
+      </button>
+    </div>
+
+    <!-- 展开态：Tab 切换 + 内容。
+         这一栏**常驻**、不再用 `v-if="hasSecondary"` 包住：以前一个面板都没打开时右侧整块
+         不渲染，于是启动看到的是"聊天区只占 60% + 右边一片纯空白"，像根坏掉的第三栏；
+         而折叠按钮长在这条标题栏里，没有标题栏就没法把右侧收起来。现在常驻，空态有提示，
+         折叠按钮任何时候都在。 -->
+    <div v-else class="pane secondary-pane">
+      <div class="pane-tabs">
+        <div
           v-for="p in secondaryPanes"
           :key="p"
-          class="strip-btn"
+          class="pane-tab"
           :class="{ active: secondaryActivePane === p }"
-          :title="`展开并切到「${PANE_TITLES[p] || p}」`"
-          @click="expandTo(p)"
+          @click="setActive(p)"
         >
-          <component :is="paneIcon(p)" :size="16" />
-        </button>
-      </div>
-
-      <!-- 展开态：Tab 切换 + 内容 -->
-      <div v-else class="pane secondary-pane">
-        <div class="pane-tabs">
-          <div
-            v-for="p in secondaryPanes"
-            :key="p"
-            class="pane-tab"
-            :class="{ active: secondaryActivePane === p }"
-            @click="setActive(p)"
-          >
-            <span>{{ PANE_TITLES[p] }}</span>
-            <button class="tab-close" @click.stop="closePane(p)">
-              <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
-                <path d="M1 1L9 9M9 1L1 9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
-              </svg>
-            </button>
-          </div>
-          <!-- 收起：只收起右侧这块，不关闭任何面板（面板入口变成窄条上的图标） -->
-          <button class="tab-collapse" title="收起右侧面板（面板不会被关闭）" @click="toggleCollapse">
-            <ChevronsRight :size="14" />
+          <span>{{ PANE_TITLES[p] }}</span>
+          <button class="tab-close" @click.stop="closePane(p)">
+            <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
+              <path d="M1 1L9 9M9 1L1 9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
+            </svg>
           </button>
         </div>
-        <div class="secondary-content">
-          <component :is="paneComponents[secondaryActivePane]" />
+        <!-- 一个面板都没打开时，标题栏上留一句话：否则它是一条"什么都没有"的空条 -->
+        <span v-if="!hasSecondary" class="tabs-empty">未打开面板</span>
+        <!-- 收起：只收起右侧这块，不关闭任何面板（面板入口变成窄条上的图标） -->
+        <button class="tab-collapse" title="收起右侧面板（面板不会被关闭）" @click="toggleCollapse">
+          <ChevronsRight :size="14" />
+        </button>
+      </div>
+      <div class="secondary-content">
+        <component v-if="secondaryActivePane" :is="paneComponents[secondaryActivePane]" />
+        <!-- 右侧栏常驻带来的空态：说清"这里为什么是空的、怎么让它有东西" -->
+        <div v-else class="secondary-empty">
+          <PanelRight :size="26" />
+          <p class="secondary-empty-title">右侧还没有面板</p>
+          <p class="secondary-empty-hint">
+            点聊天工具栏里的「Diff」「计划」，或模型改动文件、派生子代理时会自动出现在这里
+          </p>
         </div>
       </div>
-    </template>
+    </div>
   </div>
 </template>
 
@@ -266,6 +281,14 @@ const paneComponents = {
   }
 }
 
+// 没有打开面板时标题栏上的占位文案
+.tabs-empty {
+  align-self: center;
+  margin-left: $space-sm;
+  font-size: $font-size-xs;
+  color: $color-text-muted;
+}
+
 // 收起按钮：靠右。margin-left:auto 让它在 tab 少的时候贴右边缘、tab 多的时候也不被挤掉
 .tab-collapse {
   display: flex;
@@ -336,5 +359,32 @@ const paneComponents = {
   flex: 1;
   min-height: 0;
   overflow: hidden;
+}
+
+// 右侧栏常驻时的空态（一个面板都没打开）
+.secondary-empty {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: $space-xs;
+  padding: $space-lg;
+  text-align: center;
+  color: $color-text-muted;
+}
+
+.secondary-empty-title {
+  margin: 0;
+  font-size: $font-size-sm;
+  color: $color-text-secondary;
+}
+
+.secondary-empty-hint {
+  margin: 0;
+  max-width: 320px;
+  font-size: $font-size-xs;
+  line-height: $line-height-sm;
+  color: $color-text-muted;
 }
 </style>
