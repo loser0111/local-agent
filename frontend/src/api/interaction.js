@@ -1,5 +1,5 @@
 import { EventsOn } from '@/../wailsjs/runtime/runtime'
-import { GetPendingInteraction } from '@/../wailsjs/go/main/App'
+import { GetPendingInteraction } from '@/../wailsjs/go/app/App'
 
 /**
  * 用户交互事件通道（授权请求 / 模型提问）
@@ -12,7 +12,7 @@ import { GetPendingInteraction } from '@/../wailsjs/go/main/App'
 export const USER_INTERACTION_EVENT = 'user:interaction'
 
 function isWails() {
-  return typeof window !== 'undefined' && window.go && window.go.main && window.go.main.App
+  return typeof window !== 'undefined' && window.go && window.go.app && window.go.app.App
 }
 
 /**

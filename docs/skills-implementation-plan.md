@@ -47,9 +47,9 @@ Claude Code 的 Skills 正是这种机制：一个技能 = 一个文件夹（`SK
 | --- | --- | --- | --- |
 | 后端 | `chat.go` | `SystemPrompt` 为**硬编码常量**（第 114 行）；`buildLLMMessages()` 组装 `[system, ...history, user]` | **注入 L1 技能清单的唯一入口** |
 | 后端 | `tools.go` | `ToolInterface` / `BaseTool` / `CLITool` / `MetaTool`（`tool_router`）；`ToolManager.BuildView()` 按会话白名单组装 `SessionView` | 技能可复用「注册工具」范式 |
-| 后端 | `toolruntime.go` | `DynamicCLITool` / `DynamicAPITool` / MCP 工具 | 技能的执行层可复用 CLI 通道 |
-| 后端 | `toolstore.go` | `ToolConfig` + JSON 持久化（`~/.local-agent/tools.json`） | 技能存储可照抄此范式 |
-| 后端 | `sessions.go` | `Session.EnabledTools []string` 白名单已存在 | **`EnabledSkills` 直接对齐** |
+| 后端 | `internal/tool/toolruntime.go` | `DynamicCLITool` / `DynamicAPITool` / MCP 工具 | 技能的执行层可复用 CLI 通道 |
+| 后端 | `internal/tool/toolstore.go` | `ToolConfig` + JSON 持久化（`~/.local-agent/tools.json`） | 技能存储可照抄此范式 |
+| 后端 | `internal/store/sessions.go` | `Session.EnabledTools []string` 白名单已存在 | **`EnabledSkills` 直接对齐** |
 | 后端 | `app.go` | `App` 聚合 store，向 Wails 暴露 bound 方法 | 技能 CRUD 照此暴露 |
 | 前端 | `views/Settings.vue` | `tabs=[general,model,tool,permission,about]` + `activeTab` 切换 | **新增一个 `skill` tab 即可** |
 | 前端 | `components/business/ToolSettings.vue` | 工具列表卡片 / 搜索 / 开关 / 编辑弹窗 | **SkillSettings.vue 的模板** |
@@ -199,7 +199,7 @@ description: 从 CSV 生成 PDF 报告。当用户需要把表格数据导出成
 ]
 ```
 
-### 5.2 Go 侧结构体（`skills.go`）
+### 5.2 Go 侧结构体（`internal/skill/skills.go`）
 
 ```go
 // SkillMeta 技能元数据（L1，会进入 system prompt）
@@ -260,7 +260,7 @@ type SkillDetail struct {
 
 ## 六、后端实现
 
-### 6.1 新增文件 `skills.go`
+### 6.1 新增文件 `internal/skill/skills.go`
 
 > 零外部依赖；frontmatter 采用手写子集解析（只识别 `name` / `description`），避免引入 YAML 库。
 
@@ -785,7 +785,7 @@ func (a *App) enabledSkillsForSession(session *Session) []*SkillMeta {
 
 > `SystemPrompt` 常量本身不改，保持基础人设；技能信息运行时拼接。
 
-### 6.4 `sessions.go`：会话级技能白名单
+### 6.4 `internal/store/sessions.go`：会话级技能白名单
 
 ```go
 // Session 新增字段
@@ -889,7 +889,7 @@ cd E:\learn\local-agent
 wails generate module      # 或直接 wails dev 一次
 ```
 
-确认 `frontend/wailsjs/go/main/App.js` 与 `App.d.ts` 中出现 `ListSkills` / `GetSkill` / `SaveSkill` / `DeleteSkill` / `ToggleSkill` / `SetSkillAlwaysInject` / `RefreshSkills` / `SkillsDir`。
+确认 `frontend/wailsjs/go/app/App.js` 与 `App.d.ts` 中出现 `ListSkills` / `GetSkill` / `SaveSkill` / `DeleteSkill` / `ToggleSkill` / `SetSkillAlwaysInject` / `RefreshSkills` / `SkillsDir`。
 
 ---
 
@@ -909,7 +909,7 @@ import {
   SetSkillAlwaysInject,
   RefreshSkills,
   SkillsDir,
-} from '@/../wailsjs/go/main/App'
+} from '@/../wailsjs/go/app/App'
 
 function isWails() {
   return typeof window !== 'undefined' && window.go && window.go.main && window.go.main.App
@@ -1218,7 +1218,7 @@ function confirm() {
 
 | 阶段 | 内容 | 预估 | 验收标准 |
 | --- | --- | --- | --- |
-| **P0** | `skills.go` + `SkillStore` 扫描 + `read_skill` 工具 + `chat.go` 注入 L1 | 2–3h | 在 `~/.local-agent/skills/` 放一个技能，对话时模型能调 `read_skill` 拿到正文 |
+| **P0** | `internal/skill/skills.go` + `SkillStore` 扫描 + `read_skill` 工具 + `chat.go` 注入 L1 | 2–3h | 在 `~/.local-agent/skills/` 放一个技能，对话时模型能调 `read_skill` 拿到正文 |
 | **P1** | `app.go` bound 方法 + `api/skill.js` + `stores/skills.js` + `SkillSettings.vue` | 2–3h | 设置页能新建 / 编辑 / 删除 / 启停技能，重扫后列表更新 |
 | **P2** | `EnabledSkills` 会话白名单 + `NewSessionDialog` 技能选择 | 1h | 新会话可选技能，未选中的技能不出现在 L1 清单 |
 | **P3（可选）** | `alwaysInject` 强制注入 + 脚本类示例技能（L3 跑通） | 1h | 标记 `alwaysInject` 的技能正文直接进 system prompt；技能脚本能经 `exec_shell` 执行 |
@@ -1272,13 +1272,13 @@ mkdir %USERPROFILE%\.local-agent\skills\pdf-report
 
 | 层 | 文件 | 动作 |
 | --- | --- | --- |
-| Go | `skills.go` | **新增**：SkillMeta/Detail + SkillStore + frontmatter + read_skill |
+| Go | `internal/skill/skills.go` | **新增**：SkillMeta/Detail + SkillStore + frontmatter + read_skill |
 | Go | `skills_test.go` | **新增**：解析 / 校验 / 生成单测 |
 | Go | `tools.go` | `ToolManager` 增 `skills` 字段；`BuildView` 注册 `read_skill` |
 | Go | `chat.go` | `buildLLMMessages` 增参数；`executeChat` 注入 L1 / 强制注入 |
-| Go | `sessions.go` | `Session` / `SessionConfig` 增 `EnabledSkills`；`CreateSession` 透传 |
+| Go | `internal/store/sessions.go` | `Session` / `SessionConfig` 增 `EnabledSkills`；`CreateSession` 透传 |
 | Go | `app.go` | 新增 `skillStore`、`startup` 初始化、8 个 bound 方法、`enabledSkillsForSession` |
-| 自动 | `frontend/wailsjs/go/main/App.js`、`App.d.ts` | 重新生成绑定 |
+| 自动 | `frontend/wailsjs/go/app/App.js`、`App.d.ts` | 重新生成绑定 |
 | JS | `frontend/src/api/skill.js` | **新增** |
 | JS | `frontend/src/stores/skills.js` | **新增** |
 | Vue | `frontend/src/components/business/SkillSettings.vue` | **新增** |

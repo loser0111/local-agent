@@ -10,11 +10,11 @@
 
 | 结论 | 验证方式 | 对方案的影响 |
 | --- | --- | --- |
-| `git stash create` **不含未跟踪文件** | 造未跟踪文件后 `stash create`，`git cat-file -e <sha>:<file>` 全部失败 | 撤销**不能复用** `TurnSnapshot`（`diff.go:275`），必须另造含未跟踪文件的快照 |
+| `git stash create` **不含未跟踪文件** | 造未跟踪文件后 `stash create`，`git cat-file -e <sha>:<file>` 全部失败 | 撤销**不能复用** `TurnSnapshot`（`internal/diff/diff.go:275`），必须另造含未跟踪文件的快照 |
 | plumbing 快照可行且**不污染真实索引** | `GIT_INDEX_FILE=<临时索引> git add -A` + `write-tree` + `commit-tree`，之后 `git status` 仍原样显示 ` M` 与 `??` | 快照实现确定用这条路径 |
 | **不打 ref 的悬空 commit 会被回收** | `git gc --prune=now` 后 `git cat-file -e <sha>` 失败（第一次测时 `stash create` 返回空串、测试无效，重测才确认） | `update-ref` 钉住是**必需步骤**，不是加固 |
 | 回退动作成立 | `git restore --source=<快照> -- <path>` 能恢复修改与删除；删除新增文件符合预期 | 算法可用 |
-| 附加发现：**只有未跟踪改动时 `stash create` 返回空串** | 只新建未跟踪文件、不改已跟踪文件时，`git stash create` 无输出 | `Snapshot`（`diff.go:408`）此时会回落到 `rev-parse HEAD`——"该轮基线"的含义与预想不同，方案里要显式处理 |
+| 附加发现：**只有未跟踪改动时 `stash create` 返回空串** | 只新建未跟踪文件、不改已跟踪文件时，`git stash create` 无输出 | `Snapshot`（`internal/diff/diff.go:408`）此时会回落到 `rev-parse HEAD`——"该轮基线"的含义与预想不同，方案里要显式处理 |
 
 **一个直接结论**：设计文档里"回退时按 `DiffFile.Status` 分派"的说法**不够**。因为 `Status` 是 `DiffScoped` 用 `turnBase`（不含未跟踪文件）算出来的，一个"轮次之前就存在、但一直未跟踪、本轮被改"的文件会被报成 `added`——只看 Status 就会把它删掉，而它恰恰是用户手写的文件。**必须用含未跟踪文件的 checkpoint 复核**，这正是 checkpoint 存在的理由。下面 1.5 的算法以此为准。
 
@@ -24,19 +24,19 @@
 
 | 文件 | 改动 | 规模 |
 | --- | --- | --- |
-| `checkpoint.go` | **新增**：含未跟踪文件的快照、ref 钉住、回退原语 | ~220 行 |
-| `diff.go` | `DiffTurn` 加 `Base` 与 `EndState`；`DiffService` 加 turn 级 checkpoint 的取用 | ~30 行 |
+| `internal/snapshot/checkpoint.go` | **新增**：含未跟踪文件的快照、ref 钉住、回退原语 | ~220 行 |
+| `internal/diff/diff.go` | `DiffTurn` 加 `Base` 与 `EndState`；`DiffService` 加 turn 级 checkpoint 的取用 | ~30 行 |
 | `chat.go` | 轮次开头取 checkpoint；轮末记录 `Base` 与 `EndState` | ~20 行 |
 | `app.go` | 新增 `ListCheckpoints` / `UndoDiffTurn` 两个 bound 方法 | ~90 行 |
-| `sessions.go` | `AppendDiff` 签名扩参 | ~10 行 |
-| `checkpoint_test.go` | **新增**测试（沙箱内可真跑） | ~300 行 |
+| `internal/store/sessions.go` | `AppendDiff` 签名扩参 | ~10 行 |
+| `internal/snapshot/checkpoint_test.go` | **新增**测试（沙箱内可真跑） | ~300 行 |
 | `frontend/src/panes/DiffPane.vue` | 轮次选择器旁加回退按钮与冲突确认 | ~60 行 |
 | `frontend/src/stores/diff.js`、`api/session.js` | 调用新接口 | ~30 行 |
 | `frontend/wailsjs/go/*` | 手工同步两个绑定 + models.ts 加类 | ~40 行 |
 
 ### 1.2 数据模型
 
-`DiffTurn`（`diff.go:45`）加两个字段。**不新增存储文件**——会话 JSON 已经在存 `Diffs`，复用它的生命周期（会话删了，checkpoint 也该清理）：
+`DiffTurn`（`internal/diff/diff.go:45`）加两个字段。**不新增存储文件**——会话 JSON 已经在存 `Diffs`，复用它的生命周期（会话删了，checkpoint 也该清理）：
 
 ```go
 type DiffTurn struct {
@@ -82,7 +82,7 @@ type UndoResult struct {
 }
 ```
 
-### 1.3 checkpoint 层（新文件 `checkpoint.go`）
+### 1.3 checkpoint 层（新文件 `internal/snapshot/checkpoint.go`）
 
 ```go
 // checkpointRef 每轮一个 ref，钉住悬空 commit 不被 gc 回收（实测必需）
@@ -133,7 +133,7 @@ runGit(dir, "update-ref", checkpointRef(sessionID, turn), commit)
 3. 仓库为空（没有 HEAD）时 `commit-tree -p HEAD` 会失败。**降级**：不带 `-p` 造一个无父 commit。
 4. 这个函数的失败**不能阻断对话**——调用方只记日志、该轮 `Base` 留空、UI 显示"本轮不可回退"。
 
-**为什么不在现有 `Snapshot` 上改**：`Snapshot`（`diff.go:408`）的形状被 `DiffScoped` 依赖（它另外单独处理未跟踪文件，`diff.go:318`）。若把 `Snapshot` 换成含未跟踪的完整快照，未跟踪文件会在两条路径上被**重复计算**，diff 面板立刻出问题。**两种快照各司其职、在同一时刻各取一份**，这是本方案的一条硬约束。
+**为什么不在现有 `Snapshot` 上改**：`Snapshot`（`internal/diff/diff.go:408`）的形状被 `DiffScoped` 依赖（它另外单独处理未跟踪文件，`internal/diff/diff.go:318`）。若把 `Snapshot` 换成含未跟踪的完整快照，未跟踪文件会在两条路径上被**重复计算**，diff 面板立刻出问题。**两种快照各司其职、在同一时刻各取一份**，这是本方案的一条硬约束。
 
 ### 1.4 取快照的时机（`chat.go` 改动点）
 
@@ -177,7 +177,7 @@ runGit(dir, "update-ref", checkpointRef(sessionID, turn), commit)
 
 `endStateOf` 是新增的小helper：遍历 `files` 的 `Path` 调 `hashWorktreeFile`。注意 `deleted` 的文件会得到 `""`，这正是我们要的语义。
 
-**`turnNo` 的计算依赖 `len(session.Diffs)+1`，与 `AppendDiff` 内部的编号规则一致**（`sessions.go` 里 `turn.Turn = len(session.Diffs) + 1`）。两处必须用同一规则，否则 checkpoint ref 的编号会和 `DiffTurn.Turn` 错位——建议把编号计算抽成一个函数，两处共用。
+**`turnNo` 的计算依赖 `len(session.Diffs)+1`，与 `AppendDiff` 内部的编号规则一致**（`internal/store/sessions.go` 里 `turn.Turn = len(session.Diffs) + 1`）。两处必须用同一规则，否则 checkpoint ref 的编号会和 `DiffTurn.Turn` 错位——建议把编号计算抽成一个函数，两处共用。
 
 ### 1.5 回退算法
 
@@ -219,7 +219,7 @@ UI 落在 `frontend/src/panes/DiffPane.vue`：轮次选择器（第 79-84 行那
 
 ### 1.7 改动顺序（四步，每步都能单独编译与验证）
 
-1. **`checkpoint.go` + 它的测试。** 只加新文件，零改动既有代码。沙箱里就能真跑测试（见 1.9），这一步做完就已经有把握。
+1. **`internal/snapshot/checkpoint.go` + 它的测试。** 只加新文件，零改动既有代码。沙箱里就能真跑测试（见 1.9），这一步做完就已经有把握。
 2. **数据模型与记录。** `DiffTurn` 加 `Base`/`EndState`；`AppendDiff` 扩参；`chat.go` 取快照并写入。此步之后功能不可见，但会话 JSON 里开始有 `base` 字段——**可以先用它验证快照确实被写下且 ref 可解析**。
 3. **回退算法 + bound 方法。** `app.go` 的两个接口 + `DropTouched`。此时用 curl/前端控制台调 `UndoDiffTurn` 即可端到端验证，不必等 UI。
 4. **前端 UI。** DiffPane 按钮 + store + wailsjs 同步。
@@ -228,14 +228,14 @@ UI 落在 `frontend/src/panes/DiffPane.vue`：轮次选择器（第 79-84 行那
 
 第 1 步删文件即可。第 2 步只加字段，旧会话 JSON 反序列化后 `Base` 为空 → 自然走"不可回退"分支，无需数据迁移。第 3、4 步都是新增接口/入口，删掉即回到上一步行为。**没有任何一步会破坏既有 diff 功能**——这是把 checkpoint 与 `Snapshot` 分开的直接好处。
 
-### 1.9 测试清单（`checkpoint_test.go`）
+### 1.9 测试清单（`internal/snapshot/checkpoint_test.go`）
 
 **先说清一件事：沙箱里没有 Go 工具链，所以这批 Go 测试跑不了。**
 方案初稿里我写成"P2 能在沙箱真跑测试、因为它依赖 git 而不是 Go 工具链"——那句话是错的，Go 测试当然需要 Go。
 真正成立的是**另一件事**：P2 依赖的外部行为（git 的几条机制）可以在沙箱里用 shell 独立验证，
 所以**实现的风险面比 P1/P3 小得多**——逻辑层仍然要靠本地 `go test` 验收。
 
-用一个 `t.TempDir()` 里 `git init` 的真实仓库（复用 `diff_test.go` 已有的 `newTestRepo`）：
+用一个 `t.TempDir()` 里 `git init` 的真实仓库（复用 `internal/diff/diff_test.go` 已有的 `newTestRepo`）：
 
 1. `TestCheckpointIncludesUntracked` —— 造"已跟踪改动 + 未跟踪新文件"，断言两者都在快照里（数据丢失场景的正向验证）。
 2. `TestCheckpointDoesNotTouchRealIndex` —— 取快照后 `git status --porcelain` 与之前**逐字节一致**。
@@ -271,7 +271,7 @@ UI 落在 `frontend/src/panes/DiffPane.vue`：轮次选择器（第 79-84 行那
 | `chat.go` | `runToolLoop` 变成薄封装：组装 `agentRun` 后交给新循环 | 净减 ~350 行 |
 | `subagent.go` | **新增**：`spawn_agent` 工具、子代理注册表、上限与并发控制、结果契约 | ~300 行 |
 | `permission_app.go` | 判定与等待分离（`Decide` / `AuditDecision`）+ `subagentEnforcer` 包装 | ~120 行 |
-| `permission.go` | 新增 `StageSubagentDeclined` 常量（加在 937 行起那组） | ~1 行 |
+| `internal/permission/permission.go` | 新增 `StageSubagentDeclined` 常量（加在 937 行起那组） | ~1 行 |
 | `subagent_test.go` | **新增**测试 | ~350 行 |
 | `frontend/src/panes/SubagentPane.vue` | 从空壳改成真实面板 | ~200 行 |
 | `frontend/src/panes/TasksPane.vue` | **不动**（它是主会话待办清单的位置，属于另一件事） | 0 |
@@ -419,7 +419,7 @@ func (e *subagentEnforcer) Enforce(ctx context.Context, tool ToolInterface, args
 
 把询问降级成"带理由的拒绝"是这里的关键：既保住不阻塞，又不让子代理的活动变成黑箱——用户最终能看到它想做什么、被什么挡住了。
 
-**审计里必须能区分"用户拒绝"与"子代理被挡下"**（新增 `StageSubagentDeclined = "subagent-declined"`，加在 `permission.go:937` 起那组 Stage 常量里，与现有 15 个同一写法），否则审计日志会与用户的真实决策记录混在一起。这与 P1-A 里"硬取消不写审计的拒绝记录"是同一条原则：**不要把系统的自动行为记成用户的决定**。
+**审计里必须能区分"用户拒绝"与"子代理被挡下"**（新增 `StageSubagentDeclined = "subagent-declined"`，加在 `internal/permission/permission.go:937` 起那组 Stage 常量里，与现有 15 个同一写法），否则审计日志会与用户的真实决策记录混在一起。这与 P1-A 里"硬取消不写审计的拒绝记录"是同一条原则：**不要把系统的自动行为记成用户的决定**。
 
 ### 2.6 并发与写冲突
 
@@ -429,7 +429,7 @@ func (e *subagentEnforcer) Enforce(ctx context.Context, tool ToolInterface, args
 
 ### 2.7 取消级联
 
-子代理的 ctx 是父运行 ctx 的子节点（`context.WithCancel`），父硬取消 → 子代理自动一起取消；软取消 → 子代理循环在下一轮观察到信号。`runRegistry`（`runcontrol.go:130`）要支持记录父子关系，`activeCount` 之外再加一个按父 runID 查询子运行的能力，用于级联与上限统计。
+子代理的 ctx 是父运行 ctx 的子节点（`context.WithCancel`），父硬取消 → 子代理自动一起取消；软取消 → 子代理循环在下一轮观察到信号。`runRegistry`（`internal/agent/runcontrol.go:130`）要支持记录父子关系，`activeCount` 之外再加一个按父 runID 查询子运行的能力，用于级联与上限统计。
 
 ### 2.8 存储与 UI
 
@@ -467,13 +467,13 @@ func (e *subagentEnforcer) Enforce(ctx context.Context, tool ToolInterface, args
 
 ## 三、附：P2 实施记录（2026-09-17）
 
-P2 已按本文档 1.7 的四步全部实现，新增 `checkpoint.go`／`checkpoint_test.go`／`undo.go`／`undo_test.go`（共 1281 行）加前端。落地时有七处与方案不同，都是往更简单或更正确的一边偏：
+P2 已按本文档 1.7 的四步全部实现，新增 `internal/snapshot/checkpoint.go`／`internal/snapshot/checkpoint_test.go`／`undo.go`／`undo_test.go`（共 1281 行）加前端。落地时有七处与方案不同，都是往更简单或更正确的一边偏：
 
 **一、回退算法放在新文件 `undo.go`，不在 `app.go`。** 方案里写的是 app.go（约 90 行），实际单开一个文件更内聚，`app.go` 也不再继续膨胀。
 
 **二、`AppendDiff` 的签名压根不用改。** 方案说"签名扩参（~10 行）"，但 `Base` 与 `EndState` 本来就是 `DiffTurn` 的字段，跟着结构体走即可——省掉了一次涉及三处调用点的签名变更。真正新增的是 `SessionStore.MarkDiffUndone`。
 
-**三、`runGit` 被抽成 `runGitEnv`，`diff.go` 因此掉了两个 import。** checkpoint 需要传 `GIT_INDEX_FILE`，所以把 git 调用封装改成"可附加环境变量"的版本、让 `runGit` 委托过去（全项目只留一份）。连带后果：`diff.go` 里的 `context` 与 `os/exec` 只有原 `runGit` 用到，委托之后立刻变成**未使用 import**——这两行必须同时删掉，否则编译失败。
+**三、`runGit` 被抽成 `runGitEnv`，`internal/diff/diff.go` 因此掉了两个 import。** checkpoint 需要传 `GIT_INDEX_FILE`，所以把 git 调用封装改成"可附加环境变量"的版本、让 `runGit` 委托过去（全项目只留一份）。连带后果：`internal/diff/diff.go` 里的 `context` 与 `os/exec` 只有原 `runGit` 用到，委托之后立刻变成**未使用 import**——这两行必须同时删掉，否则编译失败。
 
 **四、回退后不推 `diff:update` 事件。** 前端的 `applyUpdate` 有一句 `if (!diff || !diff.length) return`，会**丢弃空 diff**；而回退后这一轮的 diff 恰好经常变成空，靠事件刷新会留下过期数据。改为由前端在回退成功后重新 `load`（`stores/diff.js` 的 `undo` 就这么做的）。
 
@@ -512,7 +512,7 @@ P2 已按本文档 1.7 的四步全部实现，新增 `checkpoint.go`／`checkpo
 
 ## 五、附：P3 第 2 步实施记录（2026-09-17）
 
-已按 2.5 完成"权限的只判定不等待入口 + 不可交互网关"。这一步**同样不改主会话行为**，是给第 3 步的子代理铺路：新增 `subagent.go`（88 行）与 `subagent_test.go`（181 行，7 个测试），改动 `permission_app.go`（+27/−4）与 `permission.go`（+4）。
+已按 2.5 完成"权限的只判定不等待入口 + 不可交互网关"。这一步**同样不改主会话行为**，是给第 3 步的子代理铺路：新增 `subagent.go`（88 行）与 `subagent_test.go`（181 行，7 个测试），改动 `permission_app.go`（+27/−4）与 `internal/permission/permission.go`（+4）。
 
 **一、`Enforce` 拆成 `Decide` + 审计 + 分派。** `Decide(tool, args) (Subject, Verdict, error)` 只判定、不等待；`Enforce` 变成"`Decide` → 审计 → 按结论分派"。关键细节：**审计放在 `Decide` 之外、由调用方决定**——子代理需要把"被挡下"记成另一种 stage，不能与用户的真实拒绝混在一起。
 
@@ -524,9 +524,9 @@ P2 已按本文档 1.7 的四步全部实现，新增 `checkpoint.go`／`checkpo
 
 **三、测试里一个值得记的手法：把"阻塞等待"变成确定性失败。** 构造测试用的 enforcer 时把权限 broker 的超时压到 **80ms**。这样如果实现错误地走了父的 `Enforce`（ask 分支会等用户），测试会在毫秒级拿到"等待用户授权超时"，而不是把整个测试挂满默认的 5 分钟——而且**错误信息本身就区分得开**：`需要用户授权` = 实现正确、`超时` = 实现错误。这类"间歇性卡住"的错误最难查，所以在测试层面把它变确定。
 
-**四、一个顺带验证到的格式规律**：`permission.go` 里新增 `StageSubagentDeclined` **没有引起常量块重新对齐**。原因是它前面有整行注释，而**整行注释会打断 gofmt 的对齐分组**——所以它自成一组、不需要 padding，前面 15 行保持原样。最终 `permission.go` 只需 +4 行。（对照：如果直接插进那 15 行里，整块的列宽都要重算。）这也是"新增常量时带一行注释"比裸插更省事的原因。
+**四、一个顺带验证到的格式规律**：`internal/permission/permission.go` 里新增 `StageSubagentDeclined` **没有引起常量块重新对齐**。原因是它前面有整行注释，而**整行注释会打断 gofmt 的对齐分组**——所以它自成一组、不需要 padding，前面 15 行保持原样。最终 `internal/permission/permission.go` 只需 +4 行。（对照：如果直接插进那 15 行里，整块的列宽都要重算。）这也是"新增常量时带一行注释"比裸插更省事的原因。
 
-**仍未验证**：沙箱无 Go 工具链，这 269 行新代码 + 31 行改动**未编译、未跑测试**。静态检查（括号配平、未使用 import、跨文件重名、结构体字面量字段名、未使用局部变量、BOM、列对齐）全过；`AuditEntry.Stage/Decision` 的字段类型、`RuleSet` 的字段名、`Subject.Summary()`、`permissionAudit.List()` 逐一核对过。`permission.go` 与 `permission_app.go` 里各有一处**既有**列错位（HEAD 对比确认，与本次改动无关）。
+**仍未验证**：沙箱无 Go 工具链，这 269 行新代码 + 31 行改动**未编译、未跑测试**。静态检查（括号配平、未使用 import、跨文件重名、结构体字面量字段名、未使用局部变量、BOM、列对齐）全过；`AuditEntry.Stage/Decision` 的字段类型、`RuleSet` 的字段名、`Subject.Summary()`、`permissionAudit.List()` 逐一核对过。`internal/permission/permission.go` 与 `permission_app.go` 里各有一处**既有**列错位（HEAD 对比确认，与本次改动无关）。
 
 **第 2 步的验收标准**：既有权限测试全绿（`permission_test.go` 那批），外加 `subagent_test.go` 通过。两者都靠本地 `go test`。
 
@@ -535,8 +535,8 @@ P2 已按本文档 1.7 的四步全部实现，新增 `checkpoint.go`／`checkpo
 ## 六、附：P3 第 3–5 步实施记录（2026-09-18）
 
 第 3–5 步已全部实现，至此 P3 子代理可用：模型能派生、能跑、用户能看见、能回退。
-新增 `subagentregistry.go`（注册表 + 查询接口 + 事件通道）；`subagent.go` 从 88 行长到约 430 行；
-`sessions.go` / `app.go` / `runcontrol.go` / `diff.go` / `chat.go` / `filetools.go` / `toolstore.go`
+新增 `internal/agent/subagentregistry.go`（注册表 + 查询接口 + 事件通道）；`subagent.go` 从 88 行长到约 430 行；
+`internal/store/sessions.go` / `app.go` / `internal/agent/runcontrol.go` / `internal/diff/diff.go` / `chat.go` / `internal/tool/filetools.go` / `internal/tool/toolstore.go`
 各有小改动；前端重写 `SubagentPane.vue` 并新增 `stores/subagent.js`；`subagent_test.go` 补到 836 行。
 
 ### 6.1 落地时发现的一个**阻断性缺陷**（第 3 步的半成品跑不起来）
@@ -632,7 +632,7 @@ P2 已按本文档 1.7 的四步全部实现，新增 `checkpoint.go`／`checkpo
 - **并发写冲突仍只做事后检测**（沿用 2.6）：两个子代理改同一文件仍可能后写覆盖先写。
 - 子代理会话文件会累积；跟着父会话一起删除，不会单独清理。
 
-**仍未验证**：沙箱无 Go 工具链，`subagentregistry.go` + `subagent.go` + 各文件改动 + 836 行测试
+**仍未验证**：沙箱无 Go 工具链，`internal/agent/subagentregistry.go` + `subagent.go` + 各文件改动 + 836 行测试
 **未编译、未跑测试**。静态检查（BOM、括号配平、未使用 import、跨文件重复声明、结构体字面量
 字段名、疑似未使用局部变量）全过——唯一一条报错是 `chat.go:1185` 的 `result`，人工核对为误报
 （它在 `defer` 闭包里被赋值）。前端：`@vue/compiler-sfc` 对改过的两个 `.vue` 跑

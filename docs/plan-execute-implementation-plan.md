@@ -52,9 +52,9 @@ Plan & Execute 把执行拆为「**规划 → 审核 → 分步执行 → 汇总
 | 后端 | `chat.go` | `ChatEvent`（L384）：`tool_call_start/end / reply_delta / done / error / diff_update`，`Turn` 字段已存在 | 事件管道直接扩展计划事件 |
 | 后端 | `chat.go` | `callLLM` / `callLLMStream`；`buildLLMMessages(session, query, systemPrompt)`（L396） | 规划器复用 callLLM；步骤执行复用消息构建 |
 | 后端 | `chat.go` | `ChatResult{Reply, ToolCalls, Messages, Diff, Error}`（L92） | 增加 `Plan` 字段即可 |
-| 后端 | `sessions.go` | `Message{ID, Role, Content, ToolCalls, ToolCallID, CreatedAt}`；`AppendMessage` 自动更新标题 | 步骤执行过程作为普通消息持久化，历史/diff 无缝衔接 |
+| 后端 | `internal/store/sessions.go` | `Message{ID, Role, Content, ToolCalls, ToolCallID, CreatedAt}`；`AppendMessage` 自动更新标题 | 步骤执行过程作为普通消息持久化，历史/diff 无缝衔接 |
 | 后端 | `chat.go` L467-484 | system prompt 组装：基础人设 + 工作区 + Skills | 步骤执行在此之上追加「计划上下文」段 |
-| 后端 | `sessions.go` | `Session.PermissionMode`（默认 `manual`，L126） | 计划批准是任务级闸门；工具级权限沿用现状 |
+| 后端 | `internal/store/sessions.go` | `Session.PermissionMode`（默认 `manual`，L126） | 计划批准是任务级闸门；工具级权限沿用现状 |
 | 前端 | `panes/PlanPane.vue` | **已存在的演示占位组件**（硬编码 5 步骤 demo） | 直接重写为真实实现 |
 | 前端 | `PaneContainer.vue` L63 | `plan: PlanPane` 已注册进面板映射 | 打开计划面板零成本：`paneStore.openPane(sid, 'plan')` |
 | 前端 | `stores/chat.js` | `addLocalMessage / appendStreamContent / addToolCall / updateToolCall` | 步骤消息渲染复用 |
@@ -187,7 +187,7 @@ Plan & Execute 把执行拆为「**规划 → 审核 → 分步执行 → 汇总
 }
 ```
 
-### 5.2 Go 侧结构体（`plan.go`）
+### 5.2 Go 侧结构体（`internal/store/plan.go`）
 
 ```go
 // PlanStepStatus 步骤状态
@@ -282,7 +282,7 @@ type Plan struct {
 
 ## 六、后端实现
 
-### 6.1 新增文件 `plan.go`（核心）
+### 6.1 新增文件 `internal/store/plan.go`（核心）
 
 ```go
 package main
@@ -657,7 +657,7 @@ cd E:\learn\local-agent
 wails generate module
 ```
 
-确认 `frontend/wailsjs/go/main/App.js` 出现 `GetSessionPlan / SavePlan / ExecutePlan / CancelPlan / ListPlans`，且 `Chat` 变为四参。
+确认 `frontend/wailsjs/go/app/App.js` 出现 `GetSessionPlan / SavePlan / ExecutePlan / CancelPlan / ListPlans`，且 `Chat` 变为四参。
 
 ---
 
@@ -746,7 +746,7 @@ export const usePlanStore = defineStore('plan', () => {
 
 | 阶段 | 内容 | 验收标准 |
 | --- | --- | --- |
-| **P0 后端** | `plan.go`（模型/Store/规划器/解析/压缩/提示词）+ `chat.go` 抽 `runToolRun` + `ChatPlan`/`ExecutePlan`/事件 + `app.go` 绑定 + 绑定重生成 + `plan_test.go` | 单测全绿；curl/绑定层验证：ChatPlan 产出合法计划文件；ExecutePlan 逐步置状态、失败即停、done 步骤摘要回写 |
+| **P0 后端** | `internal/store/plan.go`（模型/Store/规划器/解析/压缩/提示词）+ `chat.go` 抽 `runToolRun` + `ChatPlan`/`ExecutePlan`/事件 + `app.go` 绑定 + 绑定重生成 + `plan_test.go` | 单测全绿；curl/绑定层验证：ChatPlan 产出合法计划文件；ExecutePlan 逐步置状态、失败即停、done 步骤摘要回写 |
 | **P1 前端** | `api/plan.js` + `stores/plan.js` + `PlanPane.vue` 重写 + `ChatPane` 计划开关/分支/事件 + mock | 浏览器 mock：生成计划→编辑步骤→批准→模拟逐步完成；桌面端真实模型走通端到端 |
 | **P2 增强** | `CancelPlan` + 取消按钮 + `ListPlans` 历史列表 + G9 逐步确认（`RequireStepApproval`） | 执行中取消后状态 cancelled、剩余步骤 skipped；历史计划可回看 |
 
@@ -793,11 +793,11 @@ export const usePlanStore = defineStore('plan', () => {
 
 | 层 | 文件 | 动作 |
 | --- | --- | --- |
-| Go | `plan.go` | **新增**：Plan/PlanStep/PlanStore + 规划器 + 解析 + 压缩 + 步骤提示词 |
+| Go | `internal/store/plan.go` | **新增**：Plan/PlanStep/PlanStore + 规划器 + 解析 + 压缩 + 步骤提示词 |
 | Go | `plan_test.go` | **新增**：T1-T10 |
 | Go | `chat.go` | `ChatResult` 增 `Plan`；`ChatEvent` 增 `Plan/StepIndex`；`executeChat` 抽出 `runToolRun`；新增 `ChatPlan`/`ExecutePlan`/`emitPlanUpdate`/`buildBasePrompt` |
 | Go | `app.go` | `planStore` 初始化、`planCancels` 注册表、`Chat` 四参、新增 5 个绑定 |
-| 自动 | `frontend/wailsjs/go/main/App.js`、`App.d.ts` | 重新生成绑定 |
+| 自动 | `frontend/wailsjs/go/app/App.js`、`App.d.ts` | 重新生成绑定 |
 | JS | `frontend/src/api/plan.js` | **新增** |
 | JS | `frontend/src/stores/plan.js` | **新增** |
 | JS | `frontend/src/api/session.js` | `chat()` 四参透传 + `plan_update` 分发 + mock |

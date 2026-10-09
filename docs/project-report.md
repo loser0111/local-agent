@@ -14,11 +14,11 @@ local-agent 是一个基于 Wails 框架构建的本地 AI Agent 桌面应用。
 | --- | --- |
 | main.go | 程序入口，创建 App 并以 1024x768 窗口启动 Wails |
 | app.go | 应用结构体与前端桥接层（模型/会话/对话方法） |
-| models.go | 模型配置的数据结构与 JSON 持久化存储 |
-| sessions.go | 会话数据模型与按文件持久化的会话存储 |
+| internal/store/models.go | 模型配置的数据结构与 JSON 持久化存储 |
+| internal/store/sessions.go | 会话数据模型与按文件持久化的会话存储 |
 | chat.go | LLM 请求/响应结构与多轮工具调用对话流程 |
 | tools.go | 工具接口、CLI 工具、元工具路由器与工具管理器 |
-| models_test.go / sessions_test.go | 单元测试 |
+| internal/store/models_test.go / internal/store/sessions_test.go | 单元测试 |
 | frontend/ | Vue 前端工程（Wails 模板） |
 | docs/ | 设计研究文档（claude-code-ui-research.md、frontend-design.md） |
 | wails.json | Wails 构建配置 |
@@ -30,11 +30,11 @@ local-agent 是一个基于 Wails 框架构建的本地 AI Agent 桌面应用。
 - startup 初始化用户目录下的 ~/.local-agent/，创建 models.json 与 sessions 目录。
 - 向前端暴露的方法：模型管理（GetModels/AddModel/DeleteModel 等）、会话管理（CreateSession/ListSessions/AppendMessage 等）、对话能力（Chat）。
 
-### 2. models.go — 模型配置存储
+### 2. internal/store/models.go — 模型配置存储
 - Model 字段：Name、Alias、ModelID、APIKey、URL。
 - ModelStore：基于 JSON 文件持久化，使用 sync.RWMutex 保证并发安全，增删查时带失败回滚。
 
-### 3. sessions.go — 会话存储
+### 3. internal/store/sessions.go — 会话存储
 - 数据结构：Session、Message、ToolCall、Conversation。
 - SessionStore：每个会话一个 JSON 文件；支持追加消息、更新元数据、按最近活跃倒序列表。
 - 首条用户消息自动作为会话标题（截断 30 字）。

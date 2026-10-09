@@ -16,7 +16,7 @@ import {
   UpdateTaskSettings,
   PauseAllTasks,
   TaskCounts,
-} from '@/../wailsjs/go/main/App'
+} from '@/../wailsjs/go/app/App'
 import { EventsOn, EventsOff } from '@/../wailsjs/runtime/runtime'
 
 /**
@@ -31,7 +31,7 @@ const MOCK_KEY = 'local-agent:tasks'
 
 /** 是否运行在 Wails 桌面环境 */
 function isWails() {
-  return typeof window !== 'undefined' && window.go && window.go.main && window.go.main.App
+  return typeof window !== 'undefined' && window.go && window.go.app && window.go.app.App
 }
 
 /** 读取 mock 数据（仅浏览器开发模式使用） */

@@ -13,13 +13,13 @@ import {
   ListSkillResources,
   PickSkillFolder,
   PickSkillZip,
-} from '@/../wailsjs/go/main/App'
+} from '@/../wailsjs/go/app/App'
 
 /**
  * 判断是否运行在 Wails 桌面环境
  */
 function isWails() {
-  return typeof window !== 'undefined' && window.go && window.go.main && window.go.main.App
+  return typeof window !== 'undefined' && window.go && window.go.app && window.go.app.App
 }
 
 // ===== 浏览器 dev mock（localStorage 持久化）=====

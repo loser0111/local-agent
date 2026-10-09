@@ -18,9 +18,9 @@
 
 **中断** 完全缺失，而且缺在两个地方。`runToolLoop` 的取消回调 `checkCancel` 只被计划执行注册（`app.go` 的 `ExecutePlan` → `registerPlanCancel`），普通聊天在 `chat.go:497` 附近调用时传的是 `nil`，所以循环里那句 `if checkCancel != nil` 永远是假。前端「停止」按钮在非计划路径上只做了 `chatStore.isGenerating = false`（`frontend/src/panes/ChatPane.vue:375`），是个纯客户端标志位——后端那一轮循环还在跑，还在写文件、还在起子进程。`MaxChatTurns = 50`（`chat.go:107`）保证它不会无限转，但"点了停止还在动"这件事本身不可接受。
 
-**上下文** 只在计划路径上有一点点。`compact` 参数为真时才对历史做 `compactMessages`（`chat.go:605`），而普通聊天传 `false`；`ExecutePlan` 传 `true`（`chat.go:1067`）。`compactMessages`（`plan.go:344`）是确定性截断早期工具结果，不是摘要。全仓库没有任何 token 计数，也没有对 API 的 "context length exceeded" 做识别与重试。`LLMResp`（`anthropic.go` 附近的响应结构）**连 `usage` 字段都没有解析**，所以连"上一次调用真实用了多少 token"这个最可靠的锚点都拿不到。
+**上下文** 只在计划路径上有一点点。`compact` 参数为真时才对历史做 `compactMessages`（`chat.go:605`），而普通聊天传 `false`；`ExecutePlan` 传 `true`（`chat.go:1067`）。`compactMessages`（`internal/store/plan.go:344`）是确定性截断早期工具结果，不是摘要。全仓库没有任何 token 计数，也没有对 API 的 "context length exceeded" 做识别与重试。`LLMResp`（`internal/llm/anthropic.go` 附近的响应结构）**连 `usage` 字段都没有解析**，所以连"上一次调用真实用了多少 token"这个最可靠的锚点都拿不到。
 
-**撤销** 的数据基础已经很好，缺的是"可回退性"。`DiffService.Snapshot`（`diff.go:406`）用 **`git stash create`** 产出悬空 commit，**不修改工作区与暂存区**，这正是回退所需的快照形态。本轮基线也在循环开头取好了（`chat.go:600` 的 `turnBase`）。但 `DiffTurn`（`diff.go:45`）只存 `Files/Additions/Deletions/CreatedAt`，**没有存这一轮的 baseline sha**，所以重启后无法回退；而且悬空 commit 没有任何引用，`git gc` 会把它回收掉。
+**撤销** 的数据基础已经很好，缺的是"可回退性"。`DiffService.Snapshot`（`internal/diff/diff.go:406`）用 **`git stash create`** 产出悬空 commit，**不修改工作区与暂存区**，这正是回退所需的快照形态。本轮基线也在循环开头取好了（`chat.go:600` 的 `turnBase`）。但 `DiffTurn`（`internal/diff/diff.go:45`）只存 `Files/Additions/Deletions/CreatedAt`，**没有存这一轮的 baseline sha**，所以重启后无法回退；而且悬空 commit 没有任何引用，`git gc` 会把它回收掉。
 
 **子代理** 完全不存在。Go 侧搜不到任何 spawn/task 派生能力；`frontend/src/panes/SubagentPane.vue` 与 `frontend/src/panes/TasksPane.vue` 是空壳——只 `import { ref } from 'vue'` 与 `PaneHeader`，没有任何 API 调用或数据源。
 
@@ -71,13 +71,13 @@ type App struct {
 
 盘点下来只有三处需要改，其余路径已经通了。
 
-第一个洞是 **LLM 调用根本没拿 ctx**。`callLLMForModel(model, req)`（`anthropic.go:69`）与 `callLLM(url, token, req)`（`chat.go:119`）签名里就没有 ctx；`callLLMStreamForModel(ctx, ...)`（`anthropic.go:76`）虽然有形参，但 `chat.go:655` 的调用点传的是 `context.Background()`。改法：给 `callLLMForModel` / `callLLM` 补上 ctx 形参，把 `chat.go:655`、`chat.go:658` 换成运行的 ctx，并且 HTTP 请求改用 `http.NewRequestWithContext` 构造（现在用的是固定 120s 超时的 client，硬取消必须能立刻断开在途请求，不能等超时）。`app.go:192` 的 `TestModelConnection` 没有运行 ctx，传 `context.Background()` 即可。
+第一个洞是 **LLM 调用根本没拿 ctx**。`callLLMForModel(model, req)`（`internal/llm/anthropic.go:69`）与 `callLLM(url, token, req)`（`chat.go:119`）签名里就没有 ctx；`callLLMStreamForModel(ctx, ...)`（`internal/llm/anthropic.go:76`）虽然有形参，但 `chat.go:655` 的调用点传的是 `context.Background()`。改法：给 `callLLMForModel` / `callLLM` 补上 ctx 形参，把 `chat.go:655`、`chat.go:658` 换成运行的 ctx，并且 HTTP 请求改用 `http.NewRequestWithContext` 构造（现在用的是固定 120s 超时的 client，硬取消必须能立刻断开在途请求，不能等超时）。`app.go:192` 的 `TestModelConnection` 没有运行 ctx，传 `context.Background()` 即可。
 
-第二个洞是 **`exec_shell` 忽略 ctx**。`CLITool.Execute`（`tools.go:58`、`tools.go:60`）用的是 `exec.Command`，虽然收到了 ctx 却没用——**这是硬取消杀不掉正在跑的 shell 命令的直接原因**。改成 `exec.CommandContext(ctx, ...)` 即可。有意思的是动态 CLI 工具（`toolruntime.go:70`、`toolruntime.go:72`）已经用了 `CommandContext`，所以这是个不一致造成的漏点，不是设计缺陷。
+第二个洞是 **`exec_shell` 忽略 ctx**。`CLITool.Execute`（`tools.go:58`、`tools.go:60`）用的是 `exec.Command`，虽然收到了 ctx 却没用——**这是硬取消杀不掉正在跑的 shell 命令的直接原因**。改成 `exec.CommandContext(ctx, ...)` 即可。有意思的是动态 CLI 工具（`internal/tool/toolruntime.go:70`、`internal/tool/toolruntime.go:72`）已经用了 `CommandContext`，所以这是个不一致造成的漏点，不是设计缺陷。
 
-第三个洞是 **两个阻塞等待不含 ctx**。权限询问的 `permissionBroker`（`permission_app.go:136` 起的 `register` / `Wait`）与提问回路 `askBroker.Wait`（`ask.go:176`）都是 `chan` + `timer` 的 select，**没有 ctx 分支**。硬取消如果只 cancel 了运行 ctx，这两个等待会一直挂到超时（权限默认 5 分钟、提问默认 10 分钟），用户点了停止却要再等十分钟——等于没取消。改法：两个 `Wait` 增加 ctx 形参并加入 `case <-ctx.Done()`；同时在硬取消时**主动把它们按"取消/拒绝"结掉**（复用现有的 `permissionStore.cancel` / `askStore.skip` 那条路），两条路都留着，谁先到算谁。
+第三个洞是 **两个阻塞等待不含 ctx**。权限询问的 `permissionBroker`（`permission_app.go:136` 起的 `register` / `Wait`）与提问回路 `askBroker.Wait`（`internal/agent/ask.go:176`）都是 `chan` + `timer` 的 select，**没有 ctx 分支**。硬取消如果只 cancel 了运行 ctx，这两个等待会一直挂到超时（权限默认 5 分钟、提问默认 10 分钟），用户点了停止却要再等十分钟——等于没取消。改法：两个 `Wait` 增加 ctx 形参并加入 `case <-ctx.Done()`；同时在硬取消时**主动把它们按"取消/拒绝"结掉**（复用现有的 `permissionStore.cancel` / `askStore.skip` 那条路），两条路都留着，谁先到算谁。
 
-顺带确认不需要改的：`diff.go:71`、`filetools.go:285`、`skillinstall.go:117` 已经用了 `CommandContext`；`toolruntime.go:233` 的 MCP stdio 服务进程故意用 `exec.Command`——那是**服务生命周期**，不应该跟着单次工具调用一起死，保持原样。
+顺带确认不需要改的：`internal/diff/diff.go:71`、`internal/tool/filetools.go:285`、`internal/skill/skillinstall.go:117` 已经用了 `CommandContext`；`internal/tool/toolruntime.go:233` 的 MCP stdio 服务进程故意用 `exec.Command`——那是**服务生命周期**，不应该跟着单次工具调用一起死，保持原样。
 
 ### 3.4 阻塞点解锁
 
@@ -169,13 +169,13 @@ ContextSummaryAt  int64  `json:"contextSummaryAt,omitempty"`   // 摘要生成�
 
 触发点放在循环开头（`chat.go:629` 之后、构造请求之前），这样每轮都有机会压。自动触发条件是"`ContextCoveredUpTo` 之后的部分 + 系统提示 + 工具定义"估算超过阈值。
 
-摘要本身要花一次 LLM 调用，所以有三条防线：摘要调用失败 → **降级为 `compactMessages` 的确定性截断**（已有实现，`plan.go:344`），保证这一轮一定能发出去；摘要结果为空或明显异常（比如比原文还长）→ 同样降级；API 返回 context 超长错误 → 强制压缩一次并重试**一次**，再失败就报错并把原始错误透出。
+摘要本身要花一次 LLM 调用，所以有三条防线：摘要调用失败 → **降级为 `compactMessages` 的确定性截断**（已有实现，`internal/store/plan.go:344`），保证这一轮一定能发出去；摘要结果为空或明显异常（比如比原文还长）→ 同样降级；API 返回 context 超长错误 → 强制压缩一次并重试**一次**，再失败就报错并把原始错误透出。
 
 摘要 prompt 要求输出结构化几段（已完成的工作、当前状态、涉及的文件、待办与约束），而不是随便一段散文——后面这个摘要要承担"模型继续干活所需的全部背景"，散文摘要会丢关键状态。
 
 ### 4.6 单条工具结果预算
 
-这一条独立于压缩，但属于同一个问题：一个 `read_file` 默认返回 2000 行（`filetools.go` 的 `defaultReadLimit`），`maxReadFileBytes` 是 2MB——**单个工具结果就能把窗口吃掉大半**。现有上限是"防止一次调用撑爆内存"，不是"控制上下文预算"。
+这一条独立于压缩，但属于同一个问题：一个 `read_file` 默认返回 2000 行（`internal/tool/filetools.go` 的 `defaultReadLimit`），`maxReadFileBytes` 是 2MB——**单个工具结果就能把窗口吃掉大半**。现有上限是"防止一次调用撑爆内存"，不是"控制上下文预算"。
 
 建议在工具结果回填进 `messages` 之前加一道统一截断：单条工具结果超过阈值（如 24K 字符）就保留头尾、中间省略并明确标注"已省略 N 字符"，同时提示模型"需要更多内容请用 offset/limit 或 grep 定位"。截断必须**只影响发给模型的内容**，持久化仍存全量（与 4.4 同一个原则）。
 
@@ -193,11 +193,11 @@ ContextSummaryAt  int64  `json:"contextSummaryAt,omitempty"`   // 摘要生成�
 
 ### 5.1 可复用资产
 
-三块现成的：`DiffService.Snapshot`（`diff.go:406`）用 `git stash create` 产出悬空 commit 且**不动工作区与暂存区**；每轮开头已经取好了本轮基线（`chat.go:600` 的 `turnBase`）；`TurnTouched` 给出了这一轮精准触碰过的路径集合。`DiffFile.Status`（`diff.go:38`）已经把每个文件标记成 `added / modified / deleted / renamed`，并且这份记录就存在 `DiffTurn.Files` 里——**回退算法应该直接读这份记录，而不是事后用 git 去猜当时的变更类型**。
+三块现成的：`DiffService.Snapshot`（`internal/diff/diff.go:406`）用 `git stash create` 产出悬空 commit 且**不动工作区与暂存区**；每轮开头已经取好了本轮基线（`chat.go:600` 的 `turnBase`）；`TurnTouched` 给出了这一轮精准触碰过的路径集合。`DiffFile.Status`（`internal/diff/diff.go:38`）已经把每个文件标记成 `added / modified / deleted / renamed`，并且这份记录就存在 `DiffTurn.Files` 里——**回退算法应该直接读这份记录，而不是事后用 git 去猜当时的变更类型**。
 
 ### 5.2 先要补两个洞，否则撤销会时灵时不灵
 
-**洞一：baseline 没有持久化。** `DiffTurn`（`diff.go:45`）只有 `Files/Additions/Deletions/CreatedAt`，没有存这一轮开始时的快照 sha。会话 JSON 里唯一存下来的是 `DiffBaseline`（会话级基线，`sessions.go`），那是**整个会话**的起点，不是某一轮的。所以重启后"回退到第 3 轮之前"无从下手。改法：`DiffTurn` 增加 `Base string json:"base,omitempty"`，写入时把 `turnBase` 一起存（`AppendDiff` 的签名要加一个参数）。
+**洞一：baseline 没有持久化。** `DiffTurn`（`internal/diff/diff.go:45`）只有 `Files/Additions/Deletions/CreatedAt`，没有存这一轮开始时的快照 sha。会话 JSON 里唯一存下来的是 `DiffBaseline`（会话级基线，`internal/store/sessions.go`），那是**整个会话**的起点，不是某一轮的。所以重启后"回退到第 3 轮之前"无从下手。改法：`DiffTurn` 增加 `Base string json:"base,omitempty"`，写入时把 `turnBase` 一起存（`AppendDiff` 的签名要加一个参数）。
 
 **洞二：悬空 commit 会被 gc 回收。** `git stash create` 产出的 commit **不在任何 ref 上**，`git gc` 或 `git prune` 之后它就是个不可达对象，随时可能被清掉。也就是说"今天能撤销、下周不能"这种间歇性故障一定会出现。改法：每轮快照生成后立刻用 `git update-ref` 把它钉住：
 
@@ -209,7 +209,7 @@ refs/local-agent/checkpoints/<sessionID>/<turn>  ->  <sha>
 
 ### 5.3 快照要覆盖未跟踪文件——这条不解决会有数据丢失
 
-`git stash create` **默认不包含未跟踪文件**。由此产生一个不显眼但会丢数据的场景：某个文件在第 N 轮之前就已存在、但一直是未跟踪状态（新项目里很常见），这一轮 agent 改了它。改动记录里它会被标成 `added`（因为 `DiffScoped` 走的是"未跟踪文件按整文件新增"那条路，`buildAddedFile`，`diff.go:422`），而它**在快照里根本没有副本**。于是回退时按 `added` 处理 → 删掉这个文件 → **用户原本手写的文件没了，且无法恢复**。
+`git stash create` **默认不包含未跟踪文件**。由此产生一个不显眼但会丢数据的场景：某个文件在第 N 轮之前就已存在、但一直是未跟踪状态（新项目里很常见），这一轮 agent 改了它。改动记录里它会被标成 `added`（因为 `DiffScoped` 走的是"未跟踪文件按整文件新增"那条路，`buildAddedFile`，`internal/diff/diff.go:422`），而它**在快照里根本没有副本**。于是回退时按 `added` 处理 → 删掉这个文件 → **用户原本手写的文件没了，且无法恢复**。
 
 所以不能直接复用 `TurnSnapshot`。设计上分成两种快照，各司其职：
 
@@ -286,7 +286,7 @@ UI 放在 `DiffPane` 的轮次列表上：每一轮右侧一个「回退到此�
 
 二是**子代理之间不共享上下文，只共享工作区**。这是它存在的意义——把"摸清这个模块"这类会产生几十万 token 中间过程的活隔离出去，主上下文只收一份结论。
 
-三是**子代理不能阻塞等人**。它没有 UI 通道，任何需要用户交互的操作（权限询问、`ask_user`）都必须**立即失败**而不是等待，否则会挂满权限询问默认的 5 分钟（`permission_app.go:127`）或提问默认的 10 分钟（`ask.go:87`）。
+三是**子代理不能阻塞等人**。它没有 UI 通道，任何需要用户交互的操作（权限询问、`ask_user`）都必须**立即失败**而不是等待，否则会挂满权限询问默认的 5 分钟（`permission_app.go:127`）或提问默认的 10 分钟（`internal/agent/ask.go:87`）。
 
 ### 6.2 执行核心参数化
 
@@ -395,12 +395,12 @@ UI 上有个容易混淆的地方需要澄清：`SubagentPane` 放**子代理**�
 **一、ctx 的洞是 7 个，不是设计里说的 3 个。** 逐一核对下来有七处，其中最关键的一处设计定位偏了一层：
 
 - **`SessionView.ExecuteTool` 硬编码 `context.Background()`**（`tools.go`）。这是最大的一个——它让权限等待里**已经写好的** `ctx.Done()` 分支（`permissionBroker.Wait`，`permission_app.go:358`）在真实运行里永远不可能触发。设计里写的是"权限询问没有 ctx 分支"，实际它有分支，只是拿到的 ctx 是死的。（顺带说明为什么这个洞没被更早发现：`permissionBroker.Wait` 的 ctx 参数看起来已经接好了，光看它的签名会以为链路是通的。）
-- `callAnthropic`（`anthropic.go`）内部硬编码 `context.Background()`。
+- `callAnthropic`（`internal/llm/anthropic.go`）内部硬编码 `context.Background()`。
 - `callLLM`（`chat.go`）用 `http.NewRequest` 而非 `NewRequestWithContext`。
 - `callLLMForModel` 与 `callLLM` 的**签名里根本没有 ctx 形参**。
 - 主循环的流式调用传的是 `context.Background()`。
 - `CLITool.Execute`（exec_shell）收了 ctx 却用 `exec.Command`。
-- `askBroker.Wait`（`ask.go`）确实没有 ctx 分支——设计里这条是对的。
+- `askBroker.Wait`（`internal/agent/ask.go`）确实没有 ctx 分支——设计里这条是对的。
 
 **二、没有改 `ExecuteTool` 的签名，而是新增了 `ExecuteToolCtx`。** 改签名要动 33 处测试调用点（横跨 5 个测试文件），为一次纯重命名付出这些改动不划算。做法是：`ExecuteToolCtx(ctx, name, args)` 是唯一实现，`ExecuteTool(name, args)` 退化成它的 `context.Background()` 薄封装，并在注释里明确标注"仅供测试与一次性调用，不会被硬取消中断"。生产侧只有 1 处调用点需要改（主循环的工具执行处）。这样既省掉大量测试改动，又把那个危险的默认值约束在一个有名字、有说明、有警告的入口里，而不是散落在实现内部。
 
@@ -416,7 +416,7 @@ UI 上有个容易混淆的地方需要澄清：`SubagentPane` 放**子代理**�
 
 ## 附：P1-B 实施记录（2026-09-17）
 
-新增 `contextmgmt.go`（核心）+ `contextmgmt_test.go`（15 个测试）。三层手段按设计落地，落地时的取舍与补充记录如下。
+新增 `internal/agent/contextmgmt.go`（核心）+ `contextmgmt_test.go`（15 个测试）。三层手段按设计落地，落地时的取舍与补充记录如下。
 
 **一、锚点的来源比设计里更细。** 设计只说要"补 `usage` 解析"，实际分三处：`LLMResp` 加 `Usage LLMUsage` 字段后，**OpenAI 兼容的非流式响应会自动映射进来**（json 字段名就是 `prompt_tokens`，无需额外代码）；Anthropic 的 `input_tokens`/`output_tokens` 需要手动映射，为此加了 `anthropicUsage` 与两个转换点的赋值；流式两端都尽量取——OpenAI 侧从最后一帧取（只在网关支持 `stream_options.include_usage` 时才有），Anthropic 侧从 `message_start` 取 input、`message_delta` 取 output 再拼起来。
 
@@ -442,8 +442,8 @@ UI 上有个容易混淆的地方需要澄清：`SubagentPane` 放**子代理**�
 
 **第一轮编译反馈（3 个错误，均为本批引入，已修）**：
 
-1. `anthropic.go` — `ev.Delta.Usage` 不存在。流式事件里的 `Delta` 原本是**内联匿名结构体**，我读它的 `Usage` 字段却忘了往那个内联结构里加字段。修法：把 `Delta` / `Error` / `Message` 全部提成具名类型（`anthropicStreamDelta` / `anthropicStreamError` / `anthropicStreamMessage`）。这不只是为了修错——**具名类型是可被静态检查的，匿名结构体不是**，提出来之后同类错误才有机会被工具提前发现。
-2. `contextmgmt.go:386` — 把本地 `Message` 当 `LLMMessage` 传给了 `messageTokens`。两者字段名相同，但工具调用的元素类型不同（`[]ToolCall` vs `[]LLMToolCall`），Go 拒绝隐式转换。修法：新增 `storedMessageTokens(Message)`，两个类型各用各的估算函数，不做转换。
+1. `internal/llm/anthropic.go` — `ev.Delta.Usage` 不存在。流式事件里的 `Delta` 原本是**内联匿名结构体**，我读它的 `Usage` 字段却忘了往那个内联结构里加字段。修法：把 `Delta` / `Error` / `Message` 全部提成具名类型（`anthropicStreamDelta` / `anthropicStreamError` / `anthropicStreamMessage`）。这不只是为了修错——**具名类型是可被静态检查的，匿名结构体不是**，提出来之后同类错误才有机会被工具提前发现。
+2. `internal/agent/contextmgmt.go:386` — 把本地 `Message` 当 `LLMMessage` 传给了 `messageTokens`。两者字段名相同，但工具调用的元素类型不同（`[]ToolCall` vs `[]LLMToolCall`），Go 拒绝隐式转换。修法：新增 `storedMessageTokens(Message)`，两个类型各用各的估算函数，不做转换。
 
 这两个错误恰好落在静态检查**够不着**的两类上，值得记下来：一是**字段读取**（只检查了结构体字面量里的字段名，没检查 `x.Field` 这种读取，尤其是匿名结构体上的读取）；二是**参数类型**（不做类型推导，看不出"长得像但不是一个类型"）。这两类只有编译器能拦——所以每批改动后那一轮本地编译不是形式，是必需的。
 
@@ -471,7 +471,7 @@ UI 上有个容易混淆的地方需要澄清：`SubagentPane` 放**子代理**�
 
 新增测试（`requestlog_test.go`，5 个）：摘要消息下标的各种边界（含 `ContextCoveredUpTo=0` 但摘要非空的异常态）、**快照与调用方切片解耦**、记录/读取对 nil 接收者安全（零值 App 不 panic）、会话间隔离与 `forget`、以及端到端——跑完一次真实对话后快照里是**压缩后**的序列（含摘要标记、条数少于原文）。
 
-**关于 gofmt 对齐的一点说明**：我这轮改动的文件里，凡是**我引入**的列错位都已修掉（`runcontrol.go` 与 `chat.go` 各一处，都用"把行尾注释改成独立行"的方式解决——行尾注释要参与列对齐，插在字段中间又会打断分组，两种写法都容易把相邻行带歪）。`chat.go`/`tools.go`/`ask.go`/`sessions.go` 里还有若干处**既有**错位我没有动：验证方法是拿 `git show HEAD:<file>` 跑同一个对齐器，行号与数量一致即说明早于本次改动（`tools.go` 3 处、`ask.go` 2 处、`chat.go` 7 处、`sessions.go` 6 处）。`gofmt -w .` 会一并抹平。
+**关于 gofmt 对齐的一点说明**：我这轮改动的文件里，凡是**我引入**的列错位都已修掉（`internal/agent/runcontrol.go` 与 `chat.go` 各一处，都用"把行尾注释改成独立行"的方式解决——行尾注释要参与列对齐，插在字段中间又会打断分组，两种写法都容易把相邻行带歪）。`chat.go`/`tools.go`/`internal/agent/ask.go`/`internal/store/sessions.go` 里还有若干处**既有**错位我没有动：验证方法是拿 `git show HEAD:<file>` 跑同一个对齐器，行号与数量一致即说明早于本次改动（`tools.go` 3 处、`internal/agent/ask.go` 2 处、`chat.go` 7 处、`internal/store/sessions.go` 6 处）。`gofmt -w .` 会一并抹平。
 
 顺带记一个自己踩的坑：我用来做对齐的脚本 v1 用有限正则匹配类型列，**认不出 `[]*Conversation` 这类写法**，于是把一个结构体切成不相邻的分组、只收窄了其中一部分——反而把文件改得比原来更不一致。已重写为"字段名之后、反引号 tag 之前都算类型"的分段解析（v3），并在已对齐的文件上自检零改动后才使用。教训是：**自动化格式化工具本身必须先有验证，否则它会以"修复"的名义制造新问题**。
 

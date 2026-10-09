@@ -14,7 +14,7 @@
 
 在权限引擎落地后补上了 Claude Code 风格的**文件工具**：`read_file` / `write_file` / `edit_file` / `glob` / `grep` / `list_dir`。这一步是为了让权限判定的主体从「命令字符串」升格为「工具 + 路径」——原先所有文件操作都挤过 `exec_shell`，判定只能靠命令拆解与正则。
 
-- **判定主体新增 `SubjectKind = path`**（`permission.go`）：读操作走只读放行，写操作按模式判定。`manual` 询问、`auto` 放行项目内写、`plan` 直接拒绝、**`acceptEdits` 终于生效**（项目内写自动放行，这正是该模式存在的意义）。敏感路径（`.env`、私钥）排在第 7 步，所以 acceptEdits 下改 `.env` 仍会问。
+- **判定主体新增 `SubjectKind = path`**（`internal/permission/permission.go`）：读操作走只读放行，写操作按模式判定。`manual` 询问、`auto` 放行项目内写、`plan` 直接拒绝、**`acceptEdits` 终于生效**（项目内写自动放行，这正是该模式存在的意义）。敏感路径（`.env`、私钥）排在第 7 步，所以 acceptEdits 下改 `.env` 仍会问。
 - **暴露策略**：六个文件工具直出给模型，`tool_router` 继续兜底 MCP / 自定义 CLI / API 等长尾工具，避免 prompt 膨胀。两条路径（直调与经路由器）落到同一个 registry，因此都被网关拦住（有测试断言）。
 - **路径边界**用 `pathWithinProject`：只认绝对路径、拒 `~`、拒 `..` 跳转、并正确处理公共前缀（`/home/me/proj-other` 不算项目内）。工作目录未知时一律不放行。
 - **差异归因**：`write_file` / `edit_file` 记录 before/after，用 `git diff --no-index` 生成统一 diff（复用差异面板的 `ParseUnifiedDiff`），改动挂到对应 `ToolCall.Files` 上，工具卡片展开即可看到本次调用改了哪些文件；完整 hunks 经 `GetToolFileChanges` 提供给差异面板。
@@ -26,7 +26,7 @@
 
 补齐的能力：模型不确定怎么实现、不知道某类信息从哪获取、或几种做法需要用户拍板时，可以**主动向用户提问并等待作答**，而不是把问题写在回复里、结束这一轮。答复作为工具结果回填，同一轮对话继续往下走。
 
-- 工具 `ask_user`（`ask.go`）：参数 `questions[1-4]`，每项含 `header` / `question` / `options[0-4]`（label + description）/ `multiSelect` / `allowFreeText`。参数非法时**不打扰用户**，直接把错误回给模型让它改正。
+- 工具 `ask_user`（`internal/agent/ask.go`）：参数 `questions[1-4]`，每项含 `header` / `question` / `options[0-4]`（label + description）/ `multiSelect` / `allowFreeText`。参数非法时**不打扰用户**，直接把错误回给模型让它改正。
 - 回路 `askBroker`：与权限回路（`permissionBroker`）刻意分开——语义不同（"允许做吗" vs "你想怎么做"），失败方向也不同（权限超时=拒绝；提问超时/取消=**用户未作答**，工具返回可读错误，提示模型自行决策并说明假设，而不是让整轮失败）。超时 10 分钟（比权限的 5 分钟长：提问常需要用户查一下或想一会儿）。
 - 事件与前端：`ChatEvent.Ask`（type=`ask_user`）→ `AskUserDialog.vue` 弹窗（单选点选即提交、多选、自由文本补充、跳过）→ `ResolveAskUser` 回传。切走会话再切回会用 `GetPendingAsk` 把弹窗补回来（否则后端还在阻塞、界面上却什么都没有）。点「停止」会取消挂起提问。
 - 权限侧：`ask_user` 进 `readOnlyTools` 直接放行——它本身就是问用户，再叠一层授权弹窗只会变成连续两个弹窗且毫无安全收益。
@@ -71,9 +71,9 @@ cd frontend && npm run build
 
 ### 实际改动的文件
 
-新增：`permission.go`（决策/规则/分解/只读白名单/内置名单/管线/授权/审计）、`permission_config.go`（三层配置读写与合并）、`permission_app.go`（网关接口与装饰器、询问回路 broker、bound 方法与状态快照）、`permission_test.go`、**`filetools.go`（六个文件工具 + 路径解析 + 改动归因日志）**、`filetools_test.go`；前端 `api/permission.js`、`stores/permissions.js`、`components/business/PermissionDialog.vue`、`components/business/PermissionSettings.vue`。
+新增：`internal/permission/permission.go`（决策/规则/分解/只读白名单/内置名单/管线/授权/审计）、`internal/permission/permission_config.go`（三层配置读写与合并）、`permission_app.go`（网关接口与装饰器、询问回路 broker、bound 方法与状态快照）、`permission_test.go`、**`internal/tool/filetools.go`（六个文件工具 + 路径解析 + 改动归因日志）**、`filetools_test.go`；前端 `api/permission.js`、`stores/permissions.js`、`components/business/PermissionDialog.vue`、`components/business/PermissionSettings.vue`。
 
-修改：`toolstore.go`（新增 6 个内置工具配置 + `ensureBuiltins` 迁移）、`tools.go`（BuildOptions + 装配期统一装饰 + 工作目录 + 直出工具定义）、`toolruntime.go`（CLI/API 工具自报判定主体 + 工作目录）、`chat.go`（事件常量与 `permission_request` 事件、统一的 `emitChatEvent`、装配网关）、`app.go`（权限组件初始化、`baseDir` 字段、新建会话采用配置层默认模式）、`sessions.go`（模式归一化）、前端 `api/session.js`（事件分发）、`panes/ChatPane.vue`（弹窗挂载 + 工具卡片 pending 态 + 停止按钮取消等待）、`components/business/ToolCallCard.vue`（等待授权状态）、`components/business/ToolProcess.vue`（pending 计入进行中、摘要优先展示等待授权）、`views/Settings.vue`（权限面板换真实现）、`types/index.js`（模式语义定稿）、`wailsjs/go/{App.js,App.d.ts,models.ts}`（补齐绑定）。
+修改：`internal/tool/toolstore.go`（新增 6 个内置工具配置 + `ensureBuiltins` 迁移）、`tools.go`（BuildOptions + 装配期统一装饰 + 工作目录 + 直出工具定义）、`internal/tool/toolruntime.go`（CLI/API 工具自报判定主体 + 工作目录）、`chat.go`（事件常量与 `permission_request` 事件、统一的 `emitChatEvent`、装配网关）、`app.go`（权限组件初始化、`baseDir` 字段、新建会话采用配置层默认模式）、`internal/store/sessions.go`（模式归一化）、前端 `api/session.js`（事件分发）、`panes/ChatPane.vue`（弹窗挂载 + 工具卡片 pending 态 + 停止按钮取消等待）、`components/business/ToolCallCard.vue`（等待授权状态）、`components/business/ToolProcess.vue`（pending 计入进行中、摘要优先展示等待授权）、`views/Settings.vue`（权限面板换真实现）、`types/index.js`（模式语义定稿）、`wailsjs/go/{App.js,App.d.ts,models.ts}`（补齐绑定）。
 
 ---
 
@@ -143,17 +143,17 @@ LLM 只能看到 tool_router          tools.go:314  SessionView.GetToolsForLLM()
 
 | 能力 | 位置 | 怎么用 |
 |------|------|--------|
-| 会话级工具白名单 | `sessions.go` `EnabledTools` / `EnabledSkills` | 先「白名单过滤」再「权限判定」，两级正交 |
+| 会话级工具白名单 | `internal/store/sessions.go` `EnabledTools` / `EnabledSkills` | 先「白名单过滤」再「权限判定」，两级正交 |
 | 前端事件通道 | `chat.go:590` `EventsEmit(a.ctx, "chat:event", ChatEvent{...})` | 询问请求复用同一条通道 |
 | 事件分发 | `frontend/src/api/session.js` `chat()` 内 `EventsOn('chat:event')` | 加一个事件类型即可 |
 | 可打断的长流程 | `app.go:577` `registerPlanCancel` + `chat.go:861` `checkCancel` 轮询 channel | 询问的取消语义照抄 |
-| 异步审批范式 | `plan.go` `PlanAwaitingApproval` → 前端展示 → 用户确认后 `ExecutePlan` | 询问回路方案 B 的现成骨架 |
+| 异步审批范式 | `internal/store/plan.go` `PlanAwaitingApproval` → 前端展示 → 用户确认后 `ExecutePlan` | 询问回路方案 B 的现成骨架 |
 | 工具调用三态展示 | `ToolProcess.vue` / `ToolCallCard.vue` 的 running/success/error | 加一个 `pending`（等待授权）态 |
 | 决策结果回填 | `chat.go:600-608` 工具错误以 `role=tool` 消息回填给 LLM | 拒绝结果直接走这条路，LLM 能感知并调整 |
 
 ### 3.4 关键缺口
 
-1. **零权限判定**：除 `sessions.go` 自身的结构体/默认值/patch 外，Go 侧没有任何代码读取 `Session.PermissionMode`，工具执行链路完全不看它。当前分支上的权限 UI 是失效的。
+1. **零权限判定**：除 `internal/store/sessions.go` 自身的结构体/默认值/patch 外，Go 侧没有任何代码读取 `Session.PermissionMode`，工具执行链路完全不看它。当前分支上的权限 UI 是失效的。
 2. **ctx 未贯通**：`SessionView.ExecuteTool` 与 `MetaTool.executeTool` 都用 `context.Background()`，超时与取消传不进来。若要"等待用户应答可被打断"，这是必须先改的前置项。
 3. **事件协议无权限位**：`ChatEvent`（`chat.go:385`）现有字段为 toolCall / reply / error / diff / plan / turn / stepIndex，没有承载"请求授权"的位置。
 4. **无配置层**：当前分支没有 `settings.go`，没有规则文件、没有分层合并。
@@ -281,7 +281,7 @@ type Subject struct {
 
 ### 8.2 推翻或调整
 
-1. **规模**：旧方案 `permission.go` 1596 行 + `settings.go` 410 行 + `permission_app.go` 396 行 + 904 行测试，且**从未编译验证过**（沙箱无 Go 工具链）。新方案把"可验证性"当一等约束：每阶段可编译、可测、可手动验收，宁可少做功能也不留未验证的大块代码。
+1. **规模**：旧方案 `internal/permission/permission.go` 1596 行 + `settings.go` 410 行 + `permission_app.go` 396 行 + 904 行测试，且**从未编译验证过**（沙箱无 Go 工具链）。新方案把"可验证性"当一等约束：每阶段可编译、可测、可手动验收，宁可少做功能也不留未验证的大块代码。
 2. **模式词汇表不统一**：旧引擎用 `default/acceptEdits/plan/bypassPermissions`，当前前端用 `manual/acceptEdits/plan/auto`，两套并存正是合并时的静默故障源。新方案先冻结一套（§4.3）。
 3. **模式存储位置**：旧方案把 `Session.PermissionMode` 字段删掉、改为运行时引擎持有且不落盘；当前分支是写进会话文件。新方案需要与刚实现的 `viewMode`（会话级、落盘）保持一致。
 4. **文档即开发依据的写法**：旧文档 1039 行、含五处"与文档的有意偏离"章节。新方案不追求篇幅，追求"每一条断言都能被代码或测试指认"。
@@ -339,8 +339,8 @@ broker（请求/应答/超时/取消）；事件协议扩展；前端授权弹�
 
 ## 附录 B：改动文件清单（预估）
 
-**新增**：`permission.go`（模型与判定，纯函数为主）、`permission_app.go`（bound 方法、broker、bound 装配）、`permission_test.go`、`docs/permission-management-plan-v2.md`（本大纲展开后的完整方案）。
+**新增**：`internal/permission/permission.go`（模型与判定，纯函数为主）、`permission_app.go`（bound 方法、broker、bound 装配）、`permission_test.go`、`docs/permission-management-plan-v2.md`（本大纲展开后的完整方案）。
 
-**修改**：`tools.go`（网关装饰 + ctx 贯通 + 解包）、`toolruntime.go`（CLI/API/MCP 三类工具的 ctx 与主体归一化）、`chat.go`（事件协议扩展）、`app.go`（装配与 bound 方法注册）、`sessions.go`（模式字段按 §4.3 定稿）、`frontend/src/api/session.js`（事件分发）、`frontend/src/stores/`（权限状态）、`frontend/src/components/business/`（授权弹窗、工具卡片 pending 态）、`frontend/src/types/index.js`（模式取值定稿）。
+**修改**：`tools.go`（网关装饰 + ctx 贯通 + 解包）、`internal/tool/toolruntime.go`（CLI/API/MCP 三类工具的 ctx 与主体归一化）、`chat.go`（事件协议扩展）、`app.go`（装配与 bound 方法注册）、`internal/store/sessions.go`（模式字段按 §4.3 定稿）、`frontend/src/api/session.js`（事件分发）、`frontend/src/stores/`（权限状态）、`frontend/src/components/business/`（授权弹窗、工具卡片 pending 态）、`frontend/src/types/index.js`（模式取值定稿）。
 
 **待定**：`settings.go`（是否引入独立配置层，取决于 §七 的存储方案）。

@@ -7,7 +7,7 @@ import { fetchModelNames } from '@/api/model'
 import { useToolsStore } from '@/stores/tools'
 import { useSkillsStore } from '@/stores/skills'
 import ToolIcon from './ToolIcon.vue'
-import { PickDirectory } from '@/../wailsjs/go/main/App'
+import { PickDirectory } from '@/../wailsjs/go/app/App'
 import { useUiStore } from '@/stores/ui'
 
 const ui = useUiStore()
@@ -89,7 +89,7 @@ const form = reactive({
  * Wails 环境调用系统目录选择对话框；浏览器 mock 模式降级为手动输入框
  */
 async function browseProject() {
-  if (window.go && window.go.main && window.go.main.App) {
+  if (window.go && window.go.app && window.go.app.App) {
     try {
       const dir = await PickDirectory()
       if (dir) form.project = dir

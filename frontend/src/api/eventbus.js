@@ -32,7 +32,7 @@ const latestRunBySession = new Map()
 let started = false
 
 function isWails() {
-  return typeof window !== 'undefined' && window.go && window.go.main && window.go.main.App
+  return typeof window !== 'undefined' && window.go && window.go.app && window.go.app.App
 }
 
 /** 解析 `run_<毫秒>_<序号>`；解析不出来返回 null */

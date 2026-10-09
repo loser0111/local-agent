@@ -39,7 +39,7 @@
 | --- | --- | --- |
 | 后端 | `tools.go` | 仅有一个能力型工具 `exec_shell`（CLITool）+ 元工具 `tool_router`；**无文件编辑工具** |
 | 后端 | `chat.go` | `executeChat()` 多轮工具循环；通过 `wailsRuntime.EventsEmit(ctx, "chat:event", ChatEvent{...})` 推送 `tool_call_start` / `tool_call_end` / `done` / `error` |
-| 后端 | `sessions.go` | `Session{ Project, Messages, Conversations }`；`ToolCall{ID,Name,Args,Status,Duration,Result}` |
+| 后端 | `internal/store/sessions.go` | `Session{ Project, Messages, Conversations }`；`ToolCall{ID,Name,Args,Status,Duration,Result}` |
 | 后端 | `app.go` | `App` 聚合 `modelStore` / `sessionStore` / `toolManager`，暴露 bound 方法给前端 |
 | 前端 | `panes/DiffPane.vue` | **UI 完整**（文件列表 + 双行号 unified diff + add/del 配色），但数据是**写死的 mock** |
 | 前端 | `components/layout/PaneContainer.vue` | 已把 `diff` 注册进右侧 Tab 面板体系 |
@@ -100,7 +100,7 @@ ChatPane.sendMessage()
 
 > 契约是前后端并行开发的分界点，**先冻结本节再开工**。
 
-### 4.1 Go 侧（`diff.go`）
+### 4.1 Go 侧（`internal/diff/diff.go`）
 
 ```go
 // DiffLine 单行差异。add 行 OldLineNo=0；del 行 NewLineNo=0。
@@ -185,7 +185,7 @@ type DiffTurn struct {
 
 ## 五、后端实现
 
-### 5.1 新增文件 `diff.go`
+### 5.1 新增文件 `internal/diff/diff.go`
 
 完整实现如下（含 git 封装、快照、diff 解析、未跟踪文件兜底）。
 
@@ -589,7 +589,7 @@ func (a *App) GetDiffTurns(sessionID string) ([]DiffTurn, error) {
 > `app.go` 需新增 `import "time"`（若尚未引入）。
 > 新增 bound 方法后**必须重新生成 Wails 绑定**，见 5.5。
 
-### 5.3 `sessions.go` 增加轮次持久化
+### 5.3 `internal/store/sessions.go` 增加轮次持久化
 
 ```go
 type Session struct {
@@ -702,7 +702,7 @@ cd E:\learn\local-agent
 wails generate module      # 或直接 wails dev 一次
 ```
 
-生成后确认 `frontend/wailsjs/go/main/App.js` 与 `App.d.ts` 中出现：
+生成后确认 `frontend/wailsjs/go/app/App.js` 与 `App.d.ts` 中出现：
 
 ```js
 export function GetDiff(arg1) { ... }
@@ -716,7 +716,7 @@ export function GetDiffTurns(arg1) { ... }
 ### 6.1 `api/session.js`
 
 ```js
-import { GetDiff, GetDiffTurns } from "@/../wailsjs/go/main/App"
+import { GetDiff, GetDiffTurns } from "@/../wailsjs/go/app/App"
 
 // 浏览器开发模式（非 Wails）下的 mock，便于脱离桌面环境调试 UI
 const MOCK_DIFF = [
@@ -1096,7 +1096,7 @@ return {
 | R9 | 用户原有未提交改动被计入 | 属预期（等价于 `git diff`）。若需严格只看本会话，需在会话创建时立即打基线 |
 | R10 | 并发多会话 | `DiffService.baseline` 由 `sync.Mutex` 保护；各 git 进程相互独立 |
 | R11 | Wails 绑定未更新 | 新增 bound 方法后必须重新生成绑定（见 5.5），否则前端调用报 `undefined` |
-| R12 | 解析器误判 | 必须使用 `inHunk` 状态机；配套 `diff_test.go` 覆盖“正文含 `---` 行”的用例 |
+| R12 | 解析器误判 | 必须使用 `inHunk` 状态机；配套 `internal/diff/diff_test.go` 覆盖“正文含 `---` 行”的用例 |
 | R13 | JSON 序列化 `null` | Go 端保证返回 `[]DiffFile{}` 而非 `nil` |
 
 ---
@@ -1105,7 +1105,7 @@ return {
 
 | 阶段 | 内容 | 预估 | 验收标准 |
 | --- | --- | --- | --- |
-| **P0** | 后端 `diff.go` + `App.GetDiff` + 前端 `stores/diff.js` + `DiffPane` 接真实数据 | 1–2h | 打开 Diff 面板能看到工作区真实 diff，且与 `git status` 一致 |
+| **P0** | 后端 `internal/diff/diff.go` + `App.GetDiff` + 前端 `stores/diff.js` + `DiffPane` 接真实数据 | 1–2h | 打开 Diff 面板能看到工作区真实 diff，且与 `git status` 一致 |
 | **P1** | `chat.go` 每轮 `diff:update` + `sessions.AppendDiff` 持久化 + 轮次切换 UI | 1–2h | 让 AI 用 `exec_shell` 改一个文件：右侧栏自动弹出并显示该轮 diff；刷新后仍可见 |
 | **P2** | `ChatPane` 自动开面板 + 工具栏 Diff 按钮 + Review code 打通 | 0.5h | 点击 Review code，AI 收到审查请求并回复 |
 | **P3（可选）** | 新增 `write_file` / `edit_file` 工具，工具层记录 before/after **（2026-09-17 已实现：文件六件套 + `FileChangeLog` 归因，工具卡片展示改动文件，hunks 经 `GetToolFileChanges` 提供）** | 1–2h | 工具卡片出现“查看差异”，且差异可归因到具体工具调用 |
@@ -1116,7 +1116,7 @@ return {
 
 ## 九、测试方案
 
-### 9.1 后端单测（新增 `diff_test.go`）
+### 9.1 后端单测（新增 `internal/diff/diff_test.go`）
 
 | 用例 | 输入 | 断言 |
 | --- | --- | --- |
@@ -1157,12 +1157,12 @@ git -C E:\learn\local-agent --no-pager -c core.quotepath=false diff HEAD --unifi
 
 | 层 | 文件 | 动作 |
 | --- | --- | --- |
-| Go | `diff.go` | **新增**：数据结构 + DiffService + 解析器 |
-| Go | `diff_test.go` | **新增**：解析器单测 |
+| Go | `internal/diff/diff.go` | **新增**：数据结构 + DiffService + 解析器 |
+| Go | `internal/diff/diff_test.go` | **新增**：解析器单测 |
 | Go | `app.go` | 新增 `diffService` 字段、`resolveProjectDir`、`GetDiff`、`GetDiffTurns` |
-| Go | `sessions.go` | `Session` 增 `Diffs`；新增 `AppendDiff`；`ListSessions` 清空 `Diffs` |
+| Go | `internal/store/sessions.go` | `Session` 增 `Diffs`；新增 `AppendDiff`；`ListSessions` 清空 `Diffs` |
 | Go | `chat.go` | `ChatEvent` / `ChatResult` 增字段；`executeChat` 两处插入 |
-| 自动 | `frontend/wailsjs/go/main/App.js`、`App.d.ts` | 重新生成绑定 |
+| 自动 | `frontend/wailsjs/go/app/App.js`、`App.d.ts` | 重新生成绑定 |
 | JS | `frontend/src/api/session.js` | 增 `getDiff` / `getDiffTurns` / `onDiffUpdate` + mock |
 | JS | `frontend/src/stores/diff.js` | **新增** |
 | JS | `frontend/src/stores/chat.js` | 增 `pendingPrompt` 通道 |

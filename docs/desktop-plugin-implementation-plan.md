@@ -108,7 +108,7 @@ Emit(name string, payload any)   // 由 main 实现为 wailsRuntime.EventsEmit(a
 
 | 文件 | 职责 |
 |---|---|
-| `frontend/src/api/task.js` | 从 `@/../wailsjs/go/main/App` 导入绑定、从 `@/../wailsjs/runtime/runtime` 导入 `EventsOn/EventsOff`；订阅 `task:event`；带 `isWails()` + localStorage mock 以支持浏览器 `vite dev`（照 `api/plan.js` 写法） |
+| `frontend/src/api/task.js` | 从 `@/../wailsjs/go/app/App` 导入绑定、从 `@/../wailsjs/runtime/runtime` 导入 `EventsOn/EventsOff`；订阅 `task:event`；带 `isWails()` + localStorage mock 以支持浏览器 `vite dev`（照 `api/plan.js` 写法） |
 | `frontend/src/stores/task.js` | Pinia store：任务列表/详情/历史/全局配置/预览；`task:event` 增量更新（**不本地推断状态**） |
 | `frontend/src/components/business/TaskFormDialog.vue` | 创建/编辑表单：类型选择、时间规则编辑器、**保存前展示未来 3 次触发时间**、校验不通过不可存 |
 | `frontend/src/components/business/TaskSettings.vue` | 设置页「定时任务」tab 内容：全局配置（默认 snooze、DND 时段、全局暂停、删除保留历史、并发上限等） |
@@ -125,7 +125,7 @@ Emit(name string, payload any)   // 由 main 实现为 wailsRuntime.EventsEmit(a
 
 ### 2.6 生成物（改完 Go 后用 `wails build`/`wails dev` 重新生成，**不手改**）
 
-`frontend/wailsjs/go/main/App.js`、`App.d.ts`、`frontend/wailsjs/go/models.ts`（后者会新增 `plugin` 命名空间）。
+`frontend/wailsjs/go/app/App.js`、`App.d.ts`、`frontend/wailsjs/go/models.ts`（后者会新增 `plugin` 命名空间）。
 
 ## 3. 依赖变更
 
