@@ -3,6 +3,7 @@ package main
 import (
 	"strings"
 
+	"wails-tmp/internal/store"
 	"wails-tmp/memory"
 )
 
@@ -15,12 +16,12 @@ func (a *App) memoryEnabled() bool {
 	return a != nil && a.memory != nil && a.memory.AutoEnabled()
 }
 
-func (a *App) sessionIgnoresMemory(session *Session) bool {
+func (a *App) sessionIgnoresMemory(session *store.Session) bool {
 	return session != nil && session.IgnoreMemory
 }
 
 // memoryIndexBlock L1 索引（常驻系统提示）。空库或关闭时返回空串。
-func (a *App) memoryIndexBlock(session *Session) string {
+func (a *App) memoryIndexBlock(session *store.Session) string {
 	if !a.memoryEnabled() {
 		return ""
 	}
@@ -39,8 +40,8 @@ func (a *App) memoryIndexBlock(session *Session) string {
 		"记忆是写下时的观察；项目级超过 1 天的事实，引用文件或函数前先 grep/read。"
 }
 
-// attachMemoryRecall 叠加本轮 L2 召回。召回块不写进 Session.Messages。
-func (a *App) attachMemoryRecall(session *Session, query, prompt string) string {
+// attachMemoryRecall 叠加本轮 L2 召回。召回块不写进 store.Session.Messages。
+func (a *App) attachMemoryRecall(session *store.Session, query, prompt string) string {
 	if !a.memoryEnabled() || a.sessionIgnoresMemory(session) || session == nil {
 		return prompt
 	}

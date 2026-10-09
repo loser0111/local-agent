@@ -4,7 +4,12 @@ import (
 	"context"
 	"fmt"
 	"time"
+	"wails-tmp/internal/agent"
 	"wails-tmp/internal/diff"
+	"wails-tmp/internal/llm"
+	"wails-tmp/internal/media"
+	"wails-tmp/internal/store"
+	"wails-tmp/internal/tool"
 
 	wailsRuntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
@@ -28,27 +33,27 @@ type agentRun struct {
 	SessionID string // 消息与会话状态的归属；子代理填自己的会话 ID
 	PlanID    string // 非空表示这是一次计划执行
 
-	Dir          string       // 工作区目录
-	IsRepo       bool         // 工作区是否为 git 仓库（决定要不要算 diff / 取 checkpoint）
-	SystemPrompt string       // 本次运行的系统提示词
-	Model        *Model       // 使用的模型
-	ToolView     *SessionView // 工具视图：由调用方装配（子代理要用不同的权限网关与工具子集）
-	Stream       bool         // 是否流式输出
-	Compact      bool         // 强制走确定性截断（降级路径与调试开关）
-	Control      *runControl  // 取消控制；为 nil 时循环自建一个不可取消的
+	Dir          string            // 工作区目录
+	IsRepo       bool              // 工作区是否为 git 仓库（决定要不要算 diff / 取 checkpoint）
+	SystemPrompt string            // 本次运行的系统提示词
+	Model        *store.Model      // 使用的模型
+	ToolView     *tool.SessionView // 工具视图：由调用方装配（子代理要用不同的权限网关与工具子集）
+	Stream       bool              // 是否流式输出
+	Compact      bool              // 强制走确定性截断（降级路径与调试开关）
+	Control      *agent.RunControl // 取消控制；为 nil 时循环自建一个不可取消的
 	// MaxTurns 本次运行的轮次上限；<=0 时用全局的 MaxChatTurns。
 	// 子代理用它把探索限制在有限轮内——没有上限的话，一个跑偏的子代理会一直烧下去。
 	MaxTurns int
 
 	// 依赖。全部来自 App，但循环只认这里的字段，不直接摸 App。
-	Store   *SessionStore
+	Store   *store.SessionStore
 	Diff    *diff.DiffService
-	Changes *FileChangeLog
-	ReqLog  *llmRequestLog
+	Changes *tool.FileChangeLog
+	ReqLog  *llm.RequestLog
 	// Attachments 附件存储（会话里的图片）。循环用它把消息上的附件引用读成
 	// 发给模型的图片；为 nil 时图片会以"未能载入"的文字说明出现在消息里，
 	// 而不是静默消失（见 imageLoader 的说明）。
-	Attachments *AttachmentStore
+	Attachments *media.AttachmentStore
 	// VisionUnsupported 该会话的模型**已被 /vision 证明**看不到图。
 	// 为 true 时循环会往系统提示词里补一句实话，避免模型在收不到图时去 curl 下载、
 	// 编造图片内容、或让用户另存文件（三种行为在真机上都出现过）。
@@ -56,12 +61,12 @@ type agentRun struct {
 
 	// Compactor 摘要式压缩。为 nil 表示本次运行不做摘要压缩——
 	// 子代理应当关掉它：多条运行同时去改同一份会话的摘要字段会互相打架。
-	Compactor func(ctx context.Context, session *Session, model *Model) (*CompactOutcome, error)
+	Compactor func(ctx context.Context, session *store.Session, model *store.Model) (*agent.CompactOutcome, error)
 
 	// TokenCalib 估算校准系数（真实 usage / 字符估算，按模型观测）。为 nil 时一律按 1.0，
 	// 即退化成纯字符估算——子代理的运行刻意不带它：校准是"这个模型这个分词器"的属性，
 	// 由主会话的观测流维护一份就够了，多条运行各自写同一份文件只会互相覆盖。
-	TokenCalib *TokenCalibStore
+	TokenCalib *llm.CalibStore
 
 	Recorder runRecorder
 
@@ -73,7 +78,7 @@ type agentRun struct {
 	// 刻意用快照而不是实时读取配置：一次运行可能持续几分钟、几十轮，
 	// 用户中途改了开关会让同一会话前后两轮的统计口径不一致，
 	// 而"连续零命中"这类判断正好依赖口径一致。
-	PromptCache PromptCachePrefs
+	PromptCache store.PromptCachePrefs
 }
 
 // noteUsage 处理一轮模型调用的用量：记内存明细 → 累加落盘 → 推送前端。
@@ -89,7 +94,7 @@ type agentRun struct {
 //
 // 统计是**旁路**：任何一步失败都只记日志，绝不能让这一轮的对话失败——
 // 回复已经拿到了，为统计去报错是本末倒置。
-func (ar *agentRun) noteUsage(u TokenUsage, raw string) {
+func (ar *agentRun) noteUsage(u store.TokenUsage, raw string) {
 	if ar == nil || !u.HasData() {
 		return
 	}
@@ -97,7 +102,7 @@ func (ar *agentRun) noteUsage(u TokenUsage, raw string) {
 
 	ar.UsageLog.record(ar.SessionID, u, raw, now)
 
-	var totals UsageTotals
+	var totals store.UsageTotals
 	if ar.Store != nil && ar.SessionID != "" {
 		if t, err := ar.Store.AddUsage(ar.SessionID, u, now, ar.PromptCache.Enabled); err != nil {
 			fmt.Printf("[usage] 累加会话用量失败（不影响本轮对话）: %v\n", err)
@@ -113,7 +118,7 @@ func (ar *agentRun) noteUsage(u TokenUsage, raw string) {
 				Turn:   totals.Turns,
 				Last:   u,
 				Totals: totals,
-				Cache:  cacheViewOf(u, totals, ar.PromptCache),
+				Cache:  store.CacheViewOf(u, totals, ar.PromptCache),
 			},
 		})
 	}
@@ -121,7 +126,7 @@ func (ar *agentRun) noteUsage(u TokenUsage, raw string) {
 
 // runRecorder 事件推送的抽象：主会话推给 wails 前端，子代理推给自己那条通道。
 //
-// 刻意**不**抽象消息持久化：主会话与子代理都走同一个 SessionStore（子代理有自己的
+// 刻意**不**抽象消息持久化：主会话与子代理都走同一个 store.SessionStore（子代理有自己的
 // 会话文件），多一层抽象只会多一处可能不一致的地方。
 type runRecorder interface {
 	// Emit 推送聊天事件（chat:event 通道）
@@ -178,12 +183,12 @@ func (r *appRecorder) FlushStream() (func(string), func()) {
 //
 // 工具视图、权限网关、提问回路都在这里装配——这三样是子代理唯一需要与主会话不同的地方，
 // 所以装配点必须留在调用方（子代理会走另一个构造函数，最终交给同一个 runToolLoop）。
-func (a *App) newMainAgentRun(run *runControl, session *Session, dir, systemPrompt string,
-	model *Model, useStream, compact bool) *agentRun {
+func (a *App) newMainAgentRun(run *agent.RunControl, session *store.Session, dir, systemPrompt string,
+	model *store.Model, useStream, compact bool) *agentRun {
 
 	sessionID, runID, planID := "", "", ""
 	if run != nil {
-		sessionID, runID, planID = run.sessionID, run.runID, run.planID
+		sessionID, runID, planID = run.SessionID, run.RunID, run.PlanID
 	}
 	if session != nil && session.ID != "" {
 		sessionID = session.ID
@@ -196,14 +201,14 @@ func (a *App) newMainAgentRun(run *runControl, session *Session, dir, systemProm
 		SessionID:     sessionID,
 		Changes:       a.fileChanges,
 		Attachments:   a.attachments,
-		Enforcer:      a.newPermissionEnforcer(session, dir),
+		Enforcer:      toolEnforcer{a.newPermissionEnforcer(session, dir)},
 		// ask_user 的回路：绑定当前会话（阻塞等待用户作答后把结果回填给模型）
-		Ask: func(ctx context.Context, req AskRequest) (AskAnswer, error) {
+		Ask: func(ctx context.Context, req agent.AskRequest) (agent.AskAnswer, error) {
 			return a.askUser(ctx, sessionID, req)
 		},
 		// spawn_agent 的回路：把"派生一个子代理"这件事交回 App。
 		// 子代理自己的视图刻意不设这个回调，于是它无法再次派生（禁止嵌套）。
-		SpawnAgent: func(ctx context.Context, task string, maxTurns int) (*SubagentResult, error) {
+		SpawnAgent: func(ctx context.Context, task string, maxTurns int) (*agent.SubagentResult, error) {
 			return a.runSubagent(run, session, dir, model, task, maxTurns)
 		},
 		Memory:        a.memory,
@@ -233,7 +238,7 @@ func (a *App) newMainAgentRun(run *runControl, session *Session, dir, systemProm
 		Attachments:  a.attachments,
 		// "这个模型看不到图"是**已测出来的事实**（/vision），不是猜测；
 		// 且与端点绑定（换了 ModelID/URL 就自动失效，见 VisionVerdictStore.Get）。
-		VisionUnsupported: a.visionVerdicts.Unsupported(session.Model, modelCallID(model), model.URL),
+		VisionUnsupported: a.visionVerdicts.Unsupported(session.Model, store.ModelCallID(model), model.URL),
 		Compactor:         a.compactSession,
 		TokenCalib:        a.tokenCalib,
 		Recorder:          &appRecorder{app: a, sessionID: sessionID, runID: runID},

@@ -9,6 +9,9 @@ import (
 	"image/draw"
 	"image/jpeg"
 	"strings"
+
+	"wails-tmp/internal/llm"
+	"wails-tmp/internal/store"
 )
 
 // ===== 模型看图能力自检（/vision）=====
@@ -59,7 +62,7 @@ var visionProbeColors = []struct {
 //
 // 用纯色块而不是文字/图形：判定只依赖颜色名，任何字体渲染、OCR、空间推理的差异
 // 都不会干扰"能不能看到图"这个结论。JPEG 编码让体积稳定在几十 KB。
-func makeVisionProbe() (LLMImage, error) {
+func makeVisionProbe() (llm.LLMImage, error) {
 	const (
 		probeW = 480
 		probeH = 180
@@ -77,9 +80,9 @@ func makeVisionProbe() (LLMImage, error) {
 	}
 	var buf bytes.Buffer
 	if err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: 88}); err != nil {
-		return LLMImage{}, fmt.Errorf("生成测试图失败: %v", err)
+		return llm.LLMImage{}, fmt.Errorf("生成测试图失败: %v", err)
 	}
-	return LLMImage{
+	return llm.LLMImage{
 		MediaType: "image/jpeg",
 		Data:      buf.Bytes(),
 		Bytes:     buf.Len(),
@@ -110,20 +113,20 @@ func judgeVisionAnswer(answer string) (hit, missing []string) {
 }
 
 // probeOnce 发一次探针请求，返回模型回答。
-func probeOnce(ctx context.Context, model *Model, modelID, question string, img *LLMImage) (string, error) {
-	msg := LLMMessage{Role: RoleUser, Content: question}
+func probeOnce(ctx context.Context, model *store.Model, modelID, question string, img *llm.LLMImage) (string, error) {
+	msg := llm.LLMMessage{Role: store.RoleUser, Content: question}
 	if img != nil {
-		msg.Images = []LLMImage{*img}
+		msg.Images = []llm.LLMImage{*img}
 	}
-	req := &LLMReq{
+	req := &llm.LLMReq{
 		Model:       modelID,
 		Temperature: 0,
-		Messages: []LLMMessage{
-			{Role: RoleSystem, Content: visionProbeSystem},
+		Messages: []llm.LLMMessage{
+			{Role: store.RoleSystem, Content: visionProbeSystem},
 			msg,
 		},
 	}
-	resp, err := callLLMForModel(ctx, model, req)
+	resp, err := llm.CallLLMForModel(ctx, model, req)
 	if err != nil {
 		return "", err
 	}
@@ -145,7 +148,7 @@ func (a *App) handleVisionTestCommand(sessionID string) (*ChatResult, error) {
 		return nil, fmt.Errorf("获取模型配置失败: %v", err)
 	}
 	// 用与工具循环同一口径解析模型 ID（见 modelCallID 的说明：口径不一致会让结论永远匹配不上）
-	modelID := modelCallID(&model)
+	modelID := store.ModelCallID(&model)
 	probe, err := makeVisionProbe()
 	if err != nil {
 		return nil, err
@@ -153,11 +156,11 @@ func (a *App) handleVisionTestCommand(sessionID string) (*ChatResult, error) {
 
 	// 与普通对话一样登记为可取消的运行：自检也要能被「停止」断掉。
 	// 同样走互斥登记：自检是一次真实模型调用，与普通对话抢同一条会话没有意义。
-	run, berr := a.runs.beginExclusive(sessionID, "")
+	run, berr := a.runs.BeginExclusive(sessionID, "")
 	if berr != nil {
 		return nil, berr
 	}
-	defer a.runs.end(run)
+	defer a.runs.End(run)
 	ctx := run.Ctx()
 
 	var b strings.Builder
@@ -235,10 +238,10 @@ func (a *App) handleVisionTestCommand(sessionID string) (*ChatResult, error) {
 	result := &ChatResult{Reply: reply}
 	// 与 /compact、/context-stat 一致：落一条 assistant 消息，保持 user/assistant 成对，
 	// 也让这次自检留在会话记录里（它是一份结论，日后能查）。
-	if saved, serr := a.sessionStore.AppendMessage(sessionID, Message{Role: RoleAssistant, Content: reply}); serr == nil {
-		result.Messages = []Message{*saved}
+	if saved, serr := a.sessionStore.AppendMessage(sessionID, store.Message{Role: store.RoleAssistant, Content: reply}); serr == nil {
+		result.Messages = []store.Message{*saved}
 	}
-	a.emitChatEvent(sessionID, run.runID, ChatEvent{Type: "done", Reply: reply})
+	a.emitChatEvent(sessionID, run.RunID, ChatEvent{Type: "done", Reply: reply})
 	result.Context = a.contextStatForSession(sessionID)
 	return result, nil
 }

@@ -7,67 +7,75 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"wails-tmp/internal/agent"
 	"wails-tmp/internal/diff"
 
 	wailsRuntime "github.com/wailsapp/wails/v2/pkg/runtime"
+	"wails-tmp/internal/llm"
+	"wails-tmp/internal/media"
+	"wails-tmp/internal/permission"
+	"wails-tmp/internal/skill"
+	"wails-tmp/internal/snapshot"
+	"wails-tmp/internal/store"
+	"wails-tmp/internal/tool"
 	"wails-tmp/memory"
 )
 
 // App struct
 type App struct {
 	ctx          context.Context
-	modelStore   *ModelStore
-	sessionStore *SessionStore
-	toolStore    *ToolStore
+	modelStore   *store.ModelStore
+	sessionStore *store.SessionStore
+	toolStore    *tool.ToolStore
 	toolManager  *ToolManager
-	skillStore   *SkillStore
-	skillInstall *SkillInstaller
+	skillStore   *skill.SkillStore
+	skillInstall *skill.SkillInstaller
 	diffService  *diff.DiffService
-	planStore    *PlanStore
+	planStore    *store.PlanStore
 	memory       *memory.MemoryStore
 
 	// baseDir 本地数据目录（~/.local-agent）：权限配置的用户全局层也放在这里
 	baseDir string
 
 	// 权限管理：授权（内存，会话结束即失效）、审计、授权询问回路
-	permissionGrants *GrantStore
-	permissionAudit  *AuditLog
-	permissionBroker *permissionBroker
+	permissionGrants *permission.GrantStore
+	permissionAudit  *permission.AuditLog
+	permissionBroker *permission.Broker
 
 	// 用户提问回路（ask_user 工具阻塞等待用户作答）
-	askBroker *askBroker
+	askBroker *agent.AskBroker
 
 	// 文件改动归因：文件工具写入时记录 before/after（内存）
-	fileChanges *FileChangeLog
+	fileChanges *tool.FileChangeLog
 
 	// attachments 附件存储（图片等二进制资产）：~/.local-agent/attachments/<会话ID>/
 	// 与会话消息分离落盘，见 attachments.go 顶部关于"为什么不内联 base64"的说明。
-	attachments *AttachmentStore
+	attachments *media.AttachmentStore
 
 	// 运行取消注册表：普通聊天与计划执行共用，支持软/硬两级取消
-	runs *runRegistry
+	runs *agent.RunRegistry
 
 	// subagents 运行中的子代理（内存态）。跑完的写回它自己的会话文件，
-	// 列表接口把两者合起来（见 subagentregistry.go）。
-	subagents *subagentTracker
+	// 列表接口把两者合起来（见 subagent_app.go；注册表本身在 internal/agent/subagentregistry.go）。
+	subagents *agent.SubagentTracker
 
 	// reqLog 各会话最近一次真实发出的 LLM 请求快照（仅供界面查看/排障，内存态）
-	reqLog *llmRequestLog
+	reqLog *llm.RequestLog
 	// contextPrefs 上下文压缩策略（~/.local-agent/context.json）。
 	// 独立于模型配置：压缩时留多少条原文是全局策略，不该逼用户去改模型条目。
-	contextPrefs *ContextPrefsStore
+	contextPrefs *store.ContextPrefsStore
 	// tokenCalib 估算校准系数（~/.local-agent/token-calib.json）。
 	// 与 contextPrefs 不同：那个是用户的意图，这个是**观测缓存**——由每次模型调用
 	// 回传的 usage 自动更新，用户不需要也不应该手改它。
-	tokenCalib *TokenCalibStore
+	tokenCalib *llm.CalibStore
 	// visionVerdicts 各模型的看图能力自检结论（~/.local-agent/vision-check.json）。
 	// 同样是观测缓存：由 /vision 写入，用于在用户贴图时提前说明"这个模型看不到图"。
-	visionVerdicts *VisionVerdictStore
+	visionVerdicts *store.VisionVerdictStore
 
 	// promptCachePrefs 提示缓存偏好（~/.local-agent/prompt-cache.json）。
 	// **默认关闭**：这个能力"配错了不会报错、只会多花钱"，属于必须靠观测才能确认的一类，
 	// 因此不默认开启；等命中率在真机上验证过再由用户打开。
-	promptCachePrefs *PromptCachePrefsStore
+	promptCachePrefs *store.PromptCachePrefsStore
 	// usageLog 每会话最近一次的 token 用量（含原始 usage JSON）。
 	// 内存态，与 reqLog 同一个定位：它是排障视图，不是审计日志——
 	// 需要看的时候通常就是刚跑完那次，而落盘会让每轮都多一次写 I/O。
@@ -90,29 +98,29 @@ func (a *App) startup(ctx context.Context) {
 		baseDir = "."
 	}
 	// 初始化模型存储：~/.local-agent/models.json
-	a.modelStore = NewModelStore(filepath.Join(baseDir, "models.json"))
+	a.modelStore = store.NewModelStore(filepath.Join(baseDir, "models.json"))
 	// 初始化会话存储：~/.local-agent/sessions/*.json
-	a.sessionStore = NewSessionStore(filepath.Join(baseDir, "sessions"))
+	a.sessionStore = store.NewSessionStore(filepath.Join(baseDir, "sessions"))
 	// 初始化附件存储：~/.local-agent/attachments/（图片字节，与会话 JSON 分离）
-	a.attachments = NewAttachmentStore(filepath.Join(baseDir, "attachments"))
+	a.attachments = media.NewAttachmentStore(filepath.Join(baseDir, "attachments"))
 	// 初始化技能存储：~/.local-agent/skills/（文件夹 + SKILL.md）
-	a.skillStore = NewSkillStore(filepath.Join(baseDir, "skills"))
-	a.skillInstall = NewSkillInstaller(a.skillStore)
+	a.skillStore = skill.NewSkillStore(filepath.Join(baseDir, "skills"))
+	a.skillInstall = skill.NewSkillInstaller(a.skillStore)
 	a.skillStore.EnsureDefaultSkill() // 首次运行写入示例技能
 	// 初始化工具配置存储与工具管理器（~/.local-agent/tools.json）
-	a.toolStore = NewToolStore(filepath.Join(baseDir, "tools.json"))
+	a.toolStore = tool.NewToolStore(filepath.Join(baseDir, "tools.json"))
 	a.toolManager = NewToolManager(a.toolStore, a.skillStore)
 	// 初始化差异服务（基于 git 快照计算工作区 diff）
 	a.diffService = diff.NewDiffService()
 	// 初始化计划存储：~/.local-agent/plans/（重启时 running 计划自动置为失败）
-	a.planStore = NewPlanStore(filepath.Join(baseDir, "plans"))
+	a.planStore = store.NewPlanStore(filepath.Join(baseDir, "plans"))
 	// 初始化权限管理（授权存储 / 审计 / 授权询问回路）与文件改动归因
 	a.baseDir = baseDir
-	a.runs = &runRegistry{}
-	a.reqLog = &llmRequestLog{}
-	a.subagents = newSubagentTracker()
+	a.runs = &agent.RunRegistry{}
+	a.reqLog = &llm.RequestLog{}
+	a.subagents = agent.NewSubagentTracker()
 	a.ensurePermissionState()
-	a.fileChanges = NewFileChangeLog(500)
+	a.fileChanges = tool.NewFileChangeLog(500)
 	// 初始化长期记忆：~/.local-agent/memory/（失败不阻断启动）
 	if store, err := memory.NewMemoryStore(filepath.Join(baseDir, "memory"), memory.MemoryConfig{}); err != nil {
 		fmt.Printf("[App] 初始化记忆库失败: %v\n", err)
@@ -120,13 +128,13 @@ func (a *App) startup(ctx context.Context) {
 		a.memory = store
 	}
 	// 初始化上下文压缩策略：~/.local-agent/context.json（不存在则全用内置默认值）
-	a.contextPrefs = NewContextPrefsStore(filepath.Join(baseDir, "context.json"))
+	a.contextPrefs = store.NewContextPrefsStore(filepath.Join(baseDir, "context.json"))
 	// 估算校准系数：不存在 = 还没观测过，一律按 1.0（纯字符估算）
-	a.tokenCalib = NewTokenCalibStore(filepath.Join(baseDir, "token-calib.json"))
+	a.tokenCalib = llm.NewCalibStore(filepath.Join(baseDir, "token-calib.json"))
 	// 看图能力自检结论：不存在 = 还没测过（"没测过"与"测过且未通过"必须区分）
-	a.visionVerdicts = NewVisionVerdictStore(filepath.Join(baseDir, "vision-check.json"))
+	a.visionVerdicts = store.NewVisionVerdictStore(filepath.Join(baseDir, "vision-check.json"))
 	// 提示缓存偏好：不存在 = 关闭（失败方向是"更保守"，不是"更激进"）
-	a.promptCachePrefs = NewPromptCachePrefsStore(filepath.Join(baseDir, "prompt-cache.json"))
+	a.promptCachePrefs = store.NewPromptCachePrefsStore(filepath.Join(baseDir, "prompt-cache.json"))
 	// 各会话最近一次用量（内存态排障视图）
 	a.usageLog = &usageLog{}
 }
@@ -151,7 +159,7 @@ func (a *App) Greet(name string) string {
 
 // ===== 模型管理 =====
 // GetModels 返回所有已配置的模型列表（APIKey 脱敏）
-func (a *App) GetModels() []Model {
+func (a *App) GetModels() []store.Model {
 	return a.modelStore.GetModels()
 }
 
@@ -161,13 +169,13 @@ func (a *App) GetModelNames() []string {
 }
 
 // AddModel 添加一个新模型配置，保存到本地 JSON 文件
-func (a *App) AddModel(model Model) error {
+func (a *App) AddModel(model store.Model) error {
 	return a.modelStore.AddModel(model)
 }
 
 // UpdateModel 更新已有模型配置。支持重命名：若 model.Name 与旧 name 不同，
 // 自动级联更新所有引用该模型名称的会话。
-func (a *App) UpdateModel(name string, model Model) error {
+func (a *App) UpdateModel(name string, model store.Model) error {
 	if err := a.modelStore.UpdateModel(name, model); err != nil {
 		return err
 	}
@@ -198,17 +206,17 @@ func (a *App) DeleteModel(name string) error {
 }
 
 // GetModel 根据名称获取模型详情（APIKey 脱敏）
-func (a *App) GetModel(name string) (Model, error) {
+func (a *App) GetModel(name string) (store.Model, error) {
 	return a.modelStore.GetModel(name)
 }
 
 // GetModelFull 根据名称获取模型完整信息（不脱敏，供编辑时回填）
-func (a *App) GetModelFull(name string) (Model, error) {
+func (a *App) GetModelFull(name string) (store.Model, error) {
 	return a.modelStore.GetModelFull(name)
 }
 
 // TestModelConnection 测试模型连通性：发送一条简短消息验证 API 配置是否正确
-func (a *App) TestModelConnection(model Model) error {
+func (a *App) TestModelConnection(model store.Model) error {
 	if model.Name == "" {
 		return fmt.Errorf("模型名称不能为空")
 	}
@@ -219,18 +227,18 @@ func (a *App) TestModelConnection(model Model) error {
 	if modelID == "" {
 		modelID = model.Name
 	}
-	req := &LLMReq{
+	req := &llm.LLMReq{
 		Model:       modelID,
 		Temperature: 0,
-		Messages: []LLMMessage{
-			{Role: RoleSystem, Content: "You are a test assistant. Reply with: OK"},
-			{Role: RoleUser, Content: "ping"},
+		Messages: []llm.LLMMessage{
+			{Role: store.RoleSystem, Content: "You are a test assistant. Reply with: OK"},
+			{Role: store.RoleUser, Content: "ping"},
 		},
 		Stream: false,
 	}
 	// 复用已有的协议适配逻辑（OpenAI / Anthropic 自动分发）
 	// 连接测试没有运行上下文，用 Background 即可（它本身可以被取消也没意义）
-	resp, err := callLLMForModel(context.Background(), &model, req)
+	resp, err := llm.CallLLMForModel(context.Background(), &model, req)
 	if err != nil {
 		return err
 	}
@@ -243,7 +251,7 @@ func (a *App) TestModelConnection(model Model) error {
 // ===== 会话管理 =====
 // CreateSession 创建新会话。
 // 未显式指定权限模式时，采用权限配置里建议的默认模式（三层合并的 mode 字段）。
-func (a *App) CreateSession(config SessionConfig) (*Session, error) {
+func (a *App) CreateSession(config store.SessionConfig) (*store.Session, error) {
 	if strings.TrimSpace(config.PermissionMode) == "" {
 		config.PermissionMode = string(a.defaultPermissionMode(config.Project))
 	}
@@ -251,23 +259,23 @@ func (a *App) CreateSession(config SessionConfig) (*Session, error) {
 }
 
 // defaultPermissionMode 取权限配置建议的默认模式；未配置或不可识别时回退 manual
-func (a *App) defaultPermissionMode(projectDir string) Mode {
-	rules, _, _ := LoadRuleSet(a.baseDir, projectDir)
+func (a *App) defaultPermissionMode(projectDir string) permission.Mode {
+	rules, _, _ := permission.LoadRuleSet(a.baseDir, projectDir)
 	if rules != nil {
-		if m := Mode(strings.TrimSpace(rules.Mode)); ValidMode(m) {
+		if m := permission.Mode(strings.TrimSpace(rules.Mode)); permission.ValidMode(m) {
 			return m
 		}
 	}
-	return ModeManual
+	return permission.ModeManual
 }
 
 // ListSessions 返回所有会话（元数据，按最近活跃倒序）
-func (a *App) ListSessions() ([]*Session, error) {
+func (a *App) ListSessions() ([]*store.Session, error) {
 	return a.sessionStore.ListSessions()
 }
 
 // GetSession 返回完整会话（含消息历史）
-func (a *App) GetSession(id string) (*Session, error) {
+func (a *App) GetSession(id string) (*store.Session, error) {
 	return a.sessionStore.GetSession(id)
 }
 
@@ -283,10 +291,10 @@ func (a *App) DeleteSession(id string) error {
 	}
 	for _, child := range children {
 		if dir, derr := a.resolveProjectDir(child.ID); derr == nil && dir != "" {
-			_ = DropSessionCheckpoints(dir, child.ID)
+			_ = snapshot.DropSessionCheckpoints(dir, child.ID)
 		}
 		a.diffService.ForgetBaseline(child.ID)
-		a.reqLog.forget(child.ID)
+		a.reqLog.Forget(child.ID)
 		a.usageLog.forget(child.ID)
 		_ = a.attachments.DeleteSession(child.ID)
 		if derr := a.sessionStore.DeleteSession(child.ID); derr != nil {
@@ -296,10 +304,10 @@ func (a *App) DeleteSession(id string) error {
 	// 清掉该会话的 checkpoint ref。这是本项目唯一会写入用户仓库 refs/ 的地方，
 	// 必须在会话生命周期结束时清理干净，否则会在用户的 .git 里永久残留。
 	if dir, err := a.resolveProjectDir(id); err == nil && dir != "" {
-		_ = DropSessionCheckpoints(dir, id)
+		_ = snapshot.DropSessionCheckpoints(dir, id)
 	}
 	a.diffService.ForgetBaseline(id)
-	a.reqLog.forget(id)
+	a.reqLog.Forget(id)
 	a.usageLog.forget(id)
 	// 附件同样要级联清掉：它们不出现在会话列表里，会话删掉之后再没有入口能发现，
 	// 留着就是永久占地的孤儿文件（与上面 checkpoint ref 是同一类问题）。
@@ -311,12 +319,12 @@ func (a *App) DeleteSession(id string) error {
 
 // ===== 工具配置管理 =====
 // ListTools 返回全部工具配置及运行时状态（供工具配置界面渲染）
-func (a *App) ListTools() []ToolInfo {
+func (a *App) ListTools() []tool.ToolInfo {
 	sources := a.toolStore.GetAll()
-	list := make([]ToolInfo, 0, len(sources))
+	list := make([]tool.ToolInfo, 0, len(sources))
 	for _, src := range sources {
-		info := ToolInfo{ToolSource: *src, Status: ToolRuntimeStatus{Connected: true}}
-		if src.Kind == SourceMCP {
+		info := tool.ToolInfo{ToolSource: *src, Status: tool.ToolRuntimeStatus{Connected: true}}
+		if src.Kind == tool.SourceMCP {
 			connected, errMsg := a.toolManager.Pool().Status(src.ID)
 			info.Status.Connected = connected
 			info.Status.Error = errMsg
@@ -328,7 +336,7 @@ func (a *App) ListTools() []ToolInfo {
 						disabled[d] = true
 					}
 					count := 0
-					for _, mt := range entry.tools {
+					for _, mt := range entry.Tools {
 						if !disabled[mt.Name] {
 							count++
 						}
@@ -345,14 +353,14 @@ func (a *App) ListTools() []ToolInfo {
 }
 
 // SaveTool 新增或更新工具配置；新工具无 ID 时自动生成
-func (a *App) SaveTool(src ToolSource) (*ToolSource, error) {
+func (a *App) SaveTool(src tool.ToolSource) (*tool.ToolSource, error) {
 	if strings.TrimSpace(src.Name) == "" {
 		return nil, fmt.Errorf("工具名称不能为空")
 	}
 	if !validToolName(src.Name) {
 		return nil, fmt.Errorf("工具名称只能包含字母、数字、下划线和连字符")
 	}
-	if !ValidSourceKind(src.Kind) {
+	if !tool.ValidSourceKind(src.Kind) {
 		return nil, fmt.Errorf("未知的来源类型: %s", src.Kind)
 	}
 	// 名称唯一性校验（排除自身）
@@ -365,7 +373,7 @@ func (a *App) SaveTool(src ToolSource) (*ToolSource, error) {
 		src.ID = fmt.Sprintf("tool_%d", time.Now().UnixMilli())
 	}
 	if src.Icon == "" {
-		src.Icon = defaultIconForSource(src.Kind)
+		src.Icon = tool.DefaultIconForSource(src.Kind)
 	}
 	if src.Label == "" {
 		src.Label = src.Name
@@ -374,7 +382,7 @@ func (a *App) SaveTool(src ToolSource) (*ToolSource, error) {
 		return nil, err
 	}
 	// 配置变更后关闭旧 MCP 连接，下次对话/测试时按新配置重连
-	if src.Kind == SourceMCP {
+	if src.Kind == tool.SourceMCP {
 		a.toolManager.Pool().Close(src.ID)
 	}
 	return &src, nil
@@ -387,7 +395,7 @@ func (a *App) SetSubToolEnabled(id, tool string, enabled bool) error {
 
 // SetExposure 设置来源的暴露策略：direct（直出给模型）/ router（经路由器发现）/ internal（模型不可见）
 func (a *App) SetExposure(id string, exposure string) error {
-	return a.toolStore.SetExposure(id, Exposure(strings.TrimSpace(exposure)))
+	return a.toolStore.SetExposure(id, tool.Exposure(strings.TrimSpace(exposure)))
 }
 
 // DeleteTool 删除工具配置（内置工具拒绝）
@@ -409,8 +417,8 @@ func (a *App) ToggleTool(id string, enabled bool) error {
 
 // TestToolConnection 测试 MCP server 连接并发现工具；成功后缓存发现结果。
 // 传入未保存的配置（ID 为空）也可测试，使用临时连接不污染缓存。
-func (a *App) TestToolConnection(cfg ToolSource) ([]MCPToolMeta, error) {
-	if cfg.Kind != SourceMCP {
+func (a *App) TestToolConnection(cfg tool.ToolSource) ([]tool.MCPToolMeta, error) {
+	if cfg.Kind != tool.SourceMCP {
 		return nil, fmt.Errorf("仅 MCP 来源支持连接测试")
 	}
 	if reason := cfg.MCP.Validate(); reason != "" {
@@ -432,9 +440,9 @@ func (a *App) TestToolConnection(cfg ToolSource) ([]MCPToolMeta, error) {
 	if err != nil {
 		return nil, err
 	}
-	metas := make([]MCPToolMeta, 0, len(entry.tools))
-	for _, t := range entry.tools {
-		metas = append(metas, MCPToolMeta{Name: t.Name, Description: t.Description})
+	metas := make([]tool.MCPToolMeta, 0, len(entry.Tools))
+	for _, t := range entry.Tools {
+		metas = append(metas, tool.MCPToolMeta{Name: t.Name, Description: t.Description})
 	}
 	if !temp {
 		_ = a.toolStore.UpdateDiscovered(cfg.ID, metas)
@@ -457,16 +465,16 @@ func validToolName(name string) bool {
 
 // ===== 技能管理（Skills）=====
 // ListSkills 返回全部技能元数据（不含正文）
-func (a *App) ListSkills() []*SkillMeta {
+func (a *App) ListSkills() []*skill.SkillMeta {
 	list := a.skillStore.GetAll()
 	if list == nil {
-		return []*SkillMeta{}
+		return []*skill.SkillMeta{}
 	}
 	return list
 }
 
 // GetSkill 返回含正文与完整 frontmatter 的技能详情
-func (a *App) GetSkill(id string) (*SkillDetail, error) {
+func (a *App) GetSkill(id string) (*skill.SkillDetail, error) {
 	d, ok := a.skillStore.GetDetail(id)
 	if !ok {
 		return nil, fmt.Errorf("技能不存在: %s", id)
@@ -475,7 +483,7 @@ func (a *App) GetSkill(id string) (*SkillDetail, error) {
 }
 
 // SaveSkill 新建或更新技能（写入 <id>/SKILL.md，走标准 frontmatter 序列化）
-func (a *App) SaveSkill(id string, draft SkillDraft) error {
+func (a *App) SaveSkill(id string, draft skill.SkillDraft) error {
 	return a.skillStore.SaveSkill(id, draft)
 }
 
@@ -490,7 +498,7 @@ func (a *App) ToggleSkill(id string, enabled bool) error {
 }
 
 // RefreshSkills 重新扫描技能目录并返回最新元数据
-func (a *App) RefreshSkills() []*SkillMeta {
+func (a *App) RefreshSkills() []*skill.SkillMeta {
 	a.skillStore.Refresh()
 	return a.ListSkills()
 }
@@ -502,27 +510,27 @@ func (a *App) SkillsDir() string {
 
 // ===== 技能安装 / 卸载 / 更新 =====
 // InstallSkillFromFolder 从本地文件夹安装（文件夹本身是技能，或是装着若干技能的父目录）
-func (a *App) InstallSkillFromFolder(path string) ([]*SkillInstallResult, error) {
+func (a *App) InstallSkillFromFolder(path string) ([]*skill.SkillInstallResult, error) {
 	return a.skillInstall.InstallFromFolder(path)
 }
 
 // InstallSkillFromZip 从 zip 压缩包安装
-func (a *App) InstallSkillFromZip(path string) ([]*SkillInstallResult, error) {
+func (a *App) InstallSkillFromZip(path string) ([]*skill.SkillInstallResult, error) {
 	return a.skillInstall.InstallFromZip(path)
 }
 
 // InstallSkillFromGit 从 Git 仓库安装；ref 可为空，subdir 为仓库内子目录
-func (a *App) InstallSkillFromGit(url, ref, subdir string) ([]*SkillInstallResult, error) {
+func (a *App) InstallSkillFromGit(url, ref, subdir string) ([]*skill.SkillInstallResult, error) {
 	return a.skillInstall.InstallFromGit(url, ref, subdir)
 }
 
 // UpdateSkill 重新拉取 git 来源的技能；失败时旧版本保持原样
-func (a *App) UpdateSkill(id string) (*SkillInstallResult, error) {
+func (a *App) UpdateSkill(id string) (*skill.SkillInstallResult, error) {
 	return a.skillInstall.Update(id)
 }
 
 // ListSkillResources 列出技能目录内的可读资源（界面展示 L3 内容）
-func (a *App) ListSkillResources(id string) ([]SkillResource, error) {
+func (a *App) ListSkillResources(id string) ([]skill.SkillResource, error) {
 	return a.skillStore.ListSkillResources(id)
 }
 
@@ -546,7 +554,7 @@ func (a *App) PickSkillZip() (string, error) {
 }
 
 // enabledSkillsForSession 按会话白名单过滤技能；白名单为空=全部技能
-func (a *App) enabledSkillsForSession(session *Session) []*SkillMeta {
+func (a *App) enabledSkillsForSession(session *store.Session) []*skill.SkillMeta {
 	all := a.skillStore.GetAll()
 	if len(session.EnabledSkills) == 0 {
 		return all
@@ -555,7 +563,7 @@ func (a *App) enabledSkillsForSession(session *Session) []*SkillMeta {
 	for _, id := range session.EnabledSkills {
 		wl[id] = true
 	}
-	out := make([]*SkillMeta, 0, len(all))
+	out := make([]*skill.SkillMeta, 0, len(all))
 	for _, m := range all {
 		if wl[m.ID] {
 			out = append(out, m)
@@ -630,12 +638,12 @@ func (a *App) GetDiffTurns(sessionID string) ([]diff.DiffTurn, error) {
 }
 
 // AppendMessage 向会话追加一条消息并持久化
-func (a *App) AppendMessage(sessionID string, message Message) (*Message, error) {
+func (a *App) AppendMessage(sessionID string, message store.Message) (*store.Message, error) {
 	return a.sessionStore.AppendMessage(sessionID, message)
 }
 
 // AppendConversation 追加一轮完整对话记录
-func (a *App) AppendConversation(sessionID string, conversation *Conversation) error {
+func (a *App) AppendConversation(sessionID string, conversation *store.Conversation) error {
 	return a.sessionStore.AppendConversation(sessionID, conversation)
 }
 
@@ -645,11 +653,11 @@ func (a *App) AppendConversation(sessionID string, conversation *Conversation) e
 // 前端流程是"先存附件、再带引用落消息"：消息落库时引用已经完整，
 // 因此不会出现"消息里挂着一张读不到的图"这种中间态。
 // payload 是 base64 字符串（也接受 data URL 形式，见 DecodeUpload）。
-func (a *App) SaveAttachment(sessionID, name, payload, source string) (*Attachment, error) {
+func (a *App) SaveAttachment(sessionID, name, payload, source string) (*media.Attachment, error) {
 	if strings.TrimSpace(sessionID) == "" {
 		return nil, fmt.Errorf("会话 ID 不能为空")
 	}
-	data, err := DecodeUpload(payload)
+	data, err := media.DecodeUpload(payload)
 	if err != nil {
 		return nil, err
 	}
@@ -678,7 +686,7 @@ func (a *App) GetAttachmentDataURL(sessionID, id string) (string, error) {
 }
 
 // UpdateSession 更新会话元数据（模型、权限模式、标题、状态等）
-func (a *App) UpdateSession(id string, patch SessionPatch) (*Session, error) {
+func (a *App) UpdateSession(id string, patch store.SessionPatch) (*store.Session, error) {
 	return a.sessionStore.UpdateSession(id, patch)
 }
 
@@ -690,20 +698,20 @@ func (a *App) UpdateSession(id string, patch SessionPatch) (*Session, error) {
 func (a *App) Chat(sessionID string, query string, useStream bool, usePlan bool) (*ChatResult, error) {
 	// /context-stat 是纯读操作：只报告用量与压缩状态，不改任何状态。
 	// 同样放在最前面拦截——内置命令优先于同名技能。
-	if cmd, _, ok := ParseSkillCommand(query); ok && cmd == contextStatCmd {
+	if cmd, _, ok := skill.ParseSkillCommand(query); ok && cmd == agent.CmdContextStat {
 		return a.handleContextStatCommand(sessionID)
 	}
 	// 手动压缩：/compact 不是一次对话，而是对当前上下文的一次维护操作。
 	// 放在最前面拦截——内置命令的优先级高于同名技能，技能不该能覆盖掉它。
-	if cmd, _, ok := ParseSkillCommand(query); ok && cmd == contextCompactCmd {
+	if cmd, _, ok := skill.ParseSkillCommand(query); ok && cmd == agent.CmdContextCompact {
 		return a.handleCompactCommand(sessionID)
 	}
 	// /vision：用当前会话的模型实测一次"能不能看图"，结果落一条 assistant 消息。
 	// 它同样优先于同名技能（理由同上），并且走的是一次真实模型调用。
-	if cmd, _, ok := ParseSkillCommand(query); ok && cmd == visionTestCmd {
+	if cmd, _, ok := skill.ParseSkillCommand(query); ok && cmd == visionTestCmd {
 		return a.handleVisionTestCommand(sessionID)
 	}
-	if cmd, rest, ok := ParseSkillCommand(query); ok && isMemoryCommand(cmd) {
+	if cmd, rest, ok := skill.ParseSkillCommand(query); ok && isMemoryCommand(cmd) {
 		return a.handleMemoryCommand(sessionID, cmd, rest)
 	}
 	var result *ChatResult
@@ -724,7 +732,7 @@ func (a *App) Chat(sessionID string, query string, useStream bool, usePlan bool)
 // GetContextStat 返回某会话当前的上下文用量，供界面显示。
 // 这是**近似值**：不含系统提示与工具定义的精确开销（那两者只有运行期才知道），
 // 用于给用户一个大致的占用比例，不用于任何判定。
-func (a *App) GetContextStat(sessionID string) (*ContextStat, error) {
+func (a *App) GetContextStat(sessionID string) (*agent.ContextStat, error) {
 	st := a.contextStatForSession(sessionID)
 	if st == nil {
 		return nil, fmt.Errorf("会话不存在: %s", sessionID)
@@ -733,14 +741,14 @@ func (a *App) GetContextStat(sessionID string) (*ContextStat, error) {
 }
 
 // contextStatForSession 组装界面用的上下文用量（会话不存在时返回 nil）
-func (a *App) contextStatForSession(sessionID string) *ContextStat {
+func (a *App) contextStatForSession(sessionID string) *agent.ContextStat {
 	session, err := a.sessionStore.GetSession(sessionID)
 	if err != nil {
 		return nil
 	}
 	model, _ := a.modelStore.GetModelForCall(session.Model)
-	messages := buildRunMessages(session, "", false, a.attachments.LoadImages)
-	return contextStatOf(session, messages, contextWindowOf(&model), nil, 0, a.calibFor(session.Model))
+	messages := buildRunMessages(session, "", false, imageLoaderFor(a.attachments))
+	return agent.ContextStatOf(session, messages, agent.ContextWindowOf(&model), nil, 0, a.calibFor(session.Model))
 }
 
 // handleCompactCommand 处理 /compact：压缩当前会话上下文，并把结果作为一条
@@ -748,11 +756,11 @@ func (a *App) contextStatForSession(sessionID string) *ContextStat {
 func (a *App) handleCompactCommand(sessionID string) (*ChatResult, error) {
 	// 与普通对话一样登记为可取消的运行：压缩要额外发一次 LLM 请求，
 	// 硬取消同样应该能把它断掉，而不是让用户白等。
-	run, berr := a.runs.beginExclusive(sessionID, "")
+	run, berr := a.runs.BeginExclusive(sessionID, "")
 	if berr != nil {
 		return nil, berr
 	}
-	defer a.runs.end(run)
+	defer a.runs.End(run)
 	out, err := a.compactSessionContext(run.Ctx(), sessionID)
 	if err != nil {
 		return nil, err
@@ -766,10 +774,10 @@ func (a *App) handleCompactCommand(sessionID string) (*ChatResult, error) {
 	}
 	// 落一条 assistant 消息：保持 user/assistant 成对，也让这次操作留在会话记录里
 	result := &ChatResult{Reply: reply}
-	if saved, serr := a.sessionStore.AppendMessage(sessionID, Message{Role: RoleAssistant, Content: reply}); serr == nil {
-		result.Messages = []Message{*saved}
+	if saved, serr := a.sessionStore.AppendMessage(sessionID, store.Message{Role: store.RoleAssistant, Content: reply}); serr == nil {
+		result.Messages = []store.Message{*saved}
 	}
-	a.emitChatEvent(sessionID, run.runID, ChatEvent{Type: "done", Reply: reply})
+	a.emitChatEvent(sessionID, run.RunID, ChatEvent{Type: "done", Reply: reply})
 	result.Context = a.contextStatForSession(sessionID)
 	return result, nil
 }
@@ -785,10 +793,10 @@ func (a *App) handleContextStatCommand(sessionID string) (*ChatResult, error) {
 	if st == nil {
 		return nil, fmt.Errorf("会话不存在: %s", sessionID)
 	}
-	reply := FormatContextStatReport(st, a.keepRecentMsgs())
+	reply := agent.FormatContextStatReport(st, a.keepRecentMsgs())
 	result := &ChatResult{Reply: reply}
-	if saved, serr := a.sessionStore.AppendMessage(sessionID, Message{Role: RoleAssistant, Content: reply}); serr == nil {
-		result.Messages = []Message{*saved}
+	if saved, serr := a.sessionStore.AppendMessage(sessionID, store.Message{Role: store.RoleAssistant, Content: reply}); serr == nil {
+		result.Messages = []store.Message{*saved}
 	}
 	// 纯读操作，没有登记运行（不需要取消），因此事件不带 runId。
 	// 归属仍然必须有：前端靠它把这条 done 归到正确会话。
@@ -801,20 +809,20 @@ func (a *App) handleContextStatCommand(sessionID string) (*ChatResult, error) {
 
 // ===== 上下文压缩策略（可配置项）=====
 // GetContextPrefs 返回当前上下文压缩偏好（供设置界面显示）
-func (a *App) GetContextPrefs() ContextPrefs {
+func (a *App) GetContextPrefs() store.ContextPrefs {
 	if a.contextPrefs == nil {
-		return ContextPrefs{KeepRecentMsgs: contextKeepRecentMsgs}
+		return store.ContextPrefs{KeepRecentMsgs: store.KeepRecentMsgsDefault}
 	}
 	return a.contextPrefs.Get()
 }
 
 // SetContextKeepRecentMsgs 更新"压缩时保留最近多少条原文"，返回更新后的偏好。
-func (a *App) SetContextKeepRecentMsgs(n int) (ContextPrefs, error) {
+func (a *App) SetContextKeepRecentMsgs(n int) (store.ContextPrefs, error) {
 	if a.contextPrefs == nil {
-		return ContextPrefs{}, fmt.Errorf("上下文配置存储未初始化")
+		return store.ContextPrefs{}, fmt.Errorf("上下文配置存储未初始化")
 	}
 	if err := a.contextPrefs.SetKeepRecentMsgs(n); err != nil {
-		return ContextPrefs{}, err
+		return store.ContextPrefs{}, err
 	}
 	return a.contextPrefs.Get(), nil
 }
@@ -834,8 +842,8 @@ func (a *App) GetUsageDetail(sessionID string) (*UsageDetail, error) {
 		return nil, fmt.Errorf("会话不存在: %s", sessionID)
 	}
 
-	var last TokenUsage
-	var totals UsageTotals
+	var last store.TokenUsage
+	var totals store.UsageTotals
 	var raw string
 	if rec := a.usageLog.get(sessionID); rec != nil {
 		last = rec.Usage
@@ -853,18 +861,18 @@ func (a *App) GetUsageDetail(sessionID string) (*UsageDetail, error) {
 		HasData:   totals.Turns > 0,
 		Last:      last,
 		Totals:    totals,
-		Cache:     cacheViewOf(last, totals, prefs),
+		Cache:     store.CacheViewOf(last, totals, prefs),
 		// 与指示器用的是同一份计算，保证弹窗与指示器上的百分比必然一致。
 		Context:  a.contextStatForSession(sessionID),
-		Request:  a.reqLog.get(sessionID),
+		Request:  a.reqLog.Get(sessionID),
 		RawUsage: raw,
 	}, nil
 }
 
 // GetPromptCachePrefs 返回提示缓存偏好（供设置界面显示）
-func (a *App) GetPromptCachePrefs() PromptCachePrefs {
+func (a *App) GetPromptCachePrefs() store.PromptCachePrefs {
 	if a.promptCachePrefs == nil {
-		return PromptCachePrefs{RollingGuardBlocks: promptCacheRollingGuardDefault}
+		return store.PromptCachePrefs{RollingGuardBlocks: store.PromptCacheRollingGuardDefault}
 	}
 	return a.promptCachePrefs.Get()
 }
@@ -873,29 +881,29 @@ func (a *App) GetPromptCachePrefs() PromptCachePrefs {
 //
 // 归一化在这里做（而不是存下去再靠 Get 纠正），用户改完立刻能在返回值里看到实际生效值——
 // 否则他设了一个越界值、界面显示成功、实际被静默改掉，属于最难排查的那类不一致。
-func (a *App) SetPromptCachePrefs(p PromptCachePrefs) (PromptCachePrefs, error) {
+func (a *App) SetPromptCachePrefs(p store.PromptCachePrefs) (store.PromptCachePrefs, error) {
 	if a.promptCachePrefs == nil {
-		return PromptCachePrefs{}, fmt.Errorf("提示缓存配置存储未初始化")
+		return store.PromptCachePrefs{}, fmt.Errorf("提示缓存配置存储未初始化")
 	}
 	if err := a.promptCachePrefs.Set(p); err != nil {
-		return PromptCachePrefs{}, err
+		return store.PromptCachePrefs{}, err
 	}
 	return a.promptCachePrefs.Get(), nil
 }
 
 // ===== 计划管理（Plan & Execute）=====
 // GetSessionPlan 返回会话当前（最新创建的）计划；无计划时返回 nil
-func (a *App) GetSessionPlan(sessionID string) *Plan {
+func (a *App) GetSessionPlan(sessionID string) *store.Plan {
 	return a.planStore.GetBySession(sessionID)
 }
 
 // ListPlans 返回会话全部历史计划（按创建时间倒序）
-func (a *App) ListPlans(sessionID string) []*Plan {
+func (a *App) ListPlans(sessionID string) []*store.Plan {
 	return a.planStore.ListBySession(sessionID)
 }
 
 // SavePlan 保存审核阶段的计划编辑（仅 awaiting_approval 可改；只更新标题与步骤）
-func (a *App) SavePlan(plan *Plan) error {
+func (a *App) SavePlan(plan *store.Plan) error {
 	if plan == nil || plan.ID == "" {
 		return fmt.Errorf("计划不能为空")
 	}
@@ -903,7 +911,7 @@ func (a *App) SavePlan(plan *Plan) error {
 	if err != nil {
 		return err
 	}
-	if cur.Status != PlanAwaitingApproval {
+	if cur.Status != store.PlanAwaitingApproval {
 		return fmt.Errorf("计划当前状态不可编辑: %s", cur.Status)
 	}
 	if len(plan.Steps) == 0 {
@@ -915,7 +923,7 @@ func (a *App) SavePlan(plan *Plan) error {
 		st.Index = i
 		st.Title = strings.TrimSpace(st.Title)
 		if st.Status == "" {
-			st.Status = StepPending
+			st.Status = store.StepPending
 		}
 	}
 	return a.planStore.Save(cur)
@@ -928,7 +936,7 @@ func (a *App) ExecutePlan(planID string, useStream bool) *ChatResult {
 
 // ReopenPlan 把已结束的计划退回待审核（失败后「修改后重试」的入口）。
 // 已完成的步骤保留，失败/跳过/中断的步骤重置为待执行。
-func (a *App) ReopenPlan(planID string) (*Plan, error) {
+func (a *App) ReopenPlan(planID string) (*store.Plan, error) {
 	plan, err := a.planStore.Reopen(planID)
 	if err != nil {
 		return nil, err
@@ -943,25 +951,25 @@ func (a *App) ReopenPlan(planID string) (*Plan, error) {
 // 强制把计划收尾为 cancelled —— 否则前端只能重启应用才能脱困。
 // 计划本身已不在 running 时明确报错，且不改动它的状态。
 func (a *App) CancelPlan(planID string) error {
-	if hit, _ := a.runs.stopPlan(planID, false); hit {
+	if hit, _ := a.runs.StopPlan(planID, false); hit {
 		return nil
 	}
 	plan, err := a.planStore.Get(planID)
 	if err != nil {
 		return err
 	}
-	if plan.Status != PlanRunning {
+	if plan.Status != store.PlanRunning {
 		return fmt.Errorf("计划未在执行中: %s", planID)
 	}
 	for _, st := range plan.Steps {
-		if st.Status == StepRunning {
-			st.Status = StepFailed
+		if st.Status == store.StepRunning {
+			st.Status = store.StepFailed
 			st.Error = "执行中断（已强制取消）"
 			st.FinishedAt = time.Now().UnixMilli()
 		}
 	}
-	markRemainingSkipped(plan, 0)
-	plan.Status = PlanCancelled
+	store.MarkRemainingSkipped(plan, 0)
+	plan.Status = store.PlanCancelled
 	if err := a.planStore.Save(plan); err != nil {
 		return err
 	}
@@ -986,7 +994,7 @@ func (a *App) StopChat(sessionID string, hard bool) (bool, error) {
 	if sessionID == "" {
 		return false, fmt.Errorf("会话 ID 不能为空")
 	}
-	hit, _ := a.runs.stopSession(sessionID, hard)
+	hit, _ := a.runs.StopSession(sessionID, hard)
 	return hit, nil
 }
 
@@ -999,15 +1007,15 @@ func (a *App) StopChat(sessionID string, hard bool) (bool, error) {
 //
 // 刻意只给 ID 列表、不给进度：进度只能靠事件流，这里能补的仅仅是"在跑"这个事实。
 func (a *App) ListRunningSessions() []string {
-	return a.runs.activeSessions()
+	return a.runs.ActiveSessions()
 }
 
 // ===== 文件改动归因（供差异面板与工具卡片展示）=====
 // GetToolFileChanges 返回本会话由文件工具产生的改动，可归因到具体工具调用。
 // 记录里带统一 diff 文本，这里按差异面板的结构解析后返回。
-func (a *App) GetToolFileChanges(sessionID string) []ToolFileChange {
+func (a *App) GetToolFileChanges(sessionID string) []tool.ToolFileChange {
 	list := a.fileChanges.List(sessionID)
-	out := make([]ToolFileChange, 0, len(list))
+	out := make([]tool.ToolFileChange, 0, len(list))
 	for _, c := range list {
 		// 差异文本里的文件名是临时的 before/after 占位，这里改回真实路径，
 		// 便于界面直接按路径展示
@@ -1016,7 +1024,7 @@ func (a *App) GetToolFileChanges(sessionID string) []ToolFileChange {
 			files[i].Path = c.Rel
 			files[i].OldPath = ""
 		}
-		out = append(out, ToolFileChange{
+		out = append(out, tool.ToolFileChange{
 			Time:    c.Time,
 			Tool:    c.Tool,
 			Path:    c.Path,

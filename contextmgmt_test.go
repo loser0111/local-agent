@@ -12,46 +12,37 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"wails-tmp/internal/agent"
+	"wails-tmp/internal/llm"
+	"wails-tmp/internal/store"
+	"wails-tmp/internal/tool"
 )
 
 // ===== 上下文管理（P1-B）=====
 //
 // 这些测试守三件事：估算的准确性来源（锚点）、压缩切点的合法性（不能切开
 // tool_calls 与 tool 结果）、以及"压缩失败不能阻断这一轮"这条底线。
-
-// 字符估算的量级：中日韩字符明显比同长度的 ASCII 贵
-func TestEstimateTokens(t *testing.T) {
-	if got := estimateTokens(""); got != 0 {
-		t.Fatalf("空串应为 0，实际 %d", got)
-	}
-	ascii := estimateTokens(strings.Repeat("a", 400))
-	cjk := estimateTokens(strings.Repeat("字", 400))
-	if ascii != 100 {
-		t.Fatalf("400 个 ASCII 字符应约 100 token，实际 %d", ascii)
-	}
-	if cjk != 400 {
-		t.Fatalf("400 个汉字应约 400 token，实际 %d", cjk)
-	}
-	if cjk <= ascii {
-		t.Fatal("同等长度的中文应比英文贵——系数写反了")
-	}
-}
+//
+// 只断言包内未导出函数的用例（字符估算系数、切点搜索、工具结果预算裁剪）已随实现
+// 迁到 internal/agent/contextmgmt_internal_test.go；这里留的是用导出 API 就能表达的，
+// 以及必须走 App 才能验证的。
 
 // 锚点生效时，估算 = 锚点 + 其后增量（误差不累积）
 func TestEstimateSeqTokensWithAnchor(t *testing.T) {
-	msgs := []LLMMessage{
-		{Role: RoleSystem, Content: "system"},
-		{Role: RoleUser, Content: "你好"},
+	msgs := []llm.LLMMessage{
+		{Role: store.RoleSystem, Content: "system"},
+		{Role: store.RoleUser, Content: "你好"},
 	}
 	// 没有锚点：整体估算
-	whole := estimateSeqTokens(msgs, nil)
+	whole := agent.EstimateSeqTokens(msgs, nil)
 	if whole <= 0 {
 		t.Fatalf("整体估算应大于 0，实际 %d", whole)
 	}
 
 	// 有锚点：锚点值 + 其后新增消息的增量
-	anchor := &tokenAnchor{InputTokens: 1000, MsgCount: 1}
-	after := estimateSeqTokens(msgs, anchor)
+	anchor := &agent.TokenAnchor{InputTokens: 1000, MsgCount: 1}
+	after := agent.EstimateSeqTokens(msgs, anchor)
 	if after <= 1000 {
 		t.Fatalf("应等于 1000 加上第二条消息的估算，实际 %d", after)
 	}
@@ -60,114 +51,20 @@ func TestEstimateSeqTokensWithAnchor(t *testing.T) {
 	}
 
 	// 锚点计数超出当前序列（压缩后序列变短）：退回整体估算，不能算出负数
-	stale := &tokenAnchor{InputTokens: 9999, MsgCount: 99}
-	if got := estimateSeqTokens(msgs, stale); got != whole {
+	stale := &agent.TokenAnchor{InputTokens: 9999, MsgCount: 99}
+	if got := agent.EstimateSeqTokens(msgs, stale); got != whole {
 		t.Fatalf("失效锚点应退回整体估算，实际 %d（期望 %d）", got, whole)
-	}
-}
-
-// 切点必须落在非 tool 结果的 user 消息之前，且不能切开 assistant(tool_calls) 与其 tool 结果
-func TestFindCompactCut(t *testing.T) {
-	build := func() []Message {
-		return []Message{
-			{ID: "m0", Role: RoleUser, Content: "任务"},
-			{ID: "m1", Role: RoleAssistant, Content: "", ToolCalls: []ToolCall{{ID: "c1", Name: "exec_shell"}}},
-			{ID: "m2", Role: RoleTool, Content: "结果1", ToolCallID: "c1"},
-			{ID: "m3", Role: RoleAssistant, Content: "做完了第一步"},
-			{ID: "m4", Role: RoleUser, Content: "继续"},
-			{ID: "m5", Role: RoleAssistant, Content: "", ToolCalls: []ToolCall{{ID: "c2", Name: "read_file"}}},
-			{ID: "m6", Role: RoleTool, Content: "结果2", ToolCallID: "c2"},
-			{ID: "m7", Role: RoleAssistant, Content: "读完了"},
-			{ID: "m8", Role: RoleUser, Content: "再看一下"},
-			{ID: "m9", Role: RoleAssistant, Content: "好的"},
-			{ID: "m10", Role: RoleUser, Content: "还有吗"},
-			{ID: "m11", Role: RoleAssistant, Content: "有"},
-			{ID: "m12", Role: RoleUser, Content: "最后一个问题"},
-			{ID: "m13", Role: RoleAssistant, Content: "答"},
-		}
-	}
-
-	msgs := build()
-	cut := findCompactCut(msgs, 6)
-	if cut <= 0 {
-		t.Fatalf("应找到一个合法切点，实际 %d", cut)
-	}
-	if msgs[cut].Role != RoleUser {
-		t.Fatalf("切点应落在 user 消息之前，实际在第 %d 条（role=%s）", cut, msgs[cut].Role)
-	}
-	if msgs[cut].ToolCallID != "" {
-		t.Fatal("切点不能落在 tool 结果消息之前")
-	}
-	// 左侧必须自洽：不能以"带 tool_calls 的 assistant"收尾（那样它的 tool 结果会被切走）
-	prev := msgs[cut-1]
-	if len(prev.ToolCalls) > 0 {
-		t.Fatalf("切点左侧不该是带 tool_calls 的 assistant（第 %d 条）", cut-1)
-	}
-
-	// 消息太少：不切
-	if got := findCompactCut(msgs, len(msgs)); got != -1 {
-		t.Fatalf("消息数不超过保留条数时应返回 -1，实际 %d", got)
-	}
-	if got := findCompactCut(msgs, len(msgs)+5); got != -1 {
-		t.Fatalf("保留数超过总条数时应返回 -1，实际 %d", got)
-	}
-}
-
-// 找不到合法切点时返回 -1（整段都是 tool 结果，硬切会产生非法序列）
-func TestFindCompactCutNoLegalPoint(t *testing.T) {
-	msgs := []Message{
-		{ID: "m0", Role: RoleUser, Content: "任务"},
-		{ID: "m1", Role: RoleAssistant, Content: "", ToolCalls: []ToolCall{{ID: "c1", Name: "t"}}},
-	}
-	// 后面全是 tool 结果，没有可切的 user 消息（除 index 0，但它不构成"非空切点"）
-	for i := 0; i < 12; i++ {
-		msgs = append(msgs, Message{ID: "t", Role: RoleTool, Content: "r", ToolCallID: "c1"})
-	}
-	if got := findCompactCut(msgs, 4); got != -1 {
-		t.Fatalf("没有合法的 user 切点时应返回 -1，实际 %d", got)
-	}
-}
-
-// 工具结果预算：超限保留头尾、短的原样；且**不改动传入的切片**（持久化存全量）
-func TestApplyToolResultBudget(t *testing.T) {
-	long := strings.Repeat("x", contextToolResultBudget+5000)
-	msgs := []Message{
-		{ID: "a", Role: RoleTool, Content: long},
-		{ID: "b", Role: RoleTool, Content: "短的"},
-		{ID: "c", Role: RoleUser, Content: long},
-	}
-	out := applyToolResultBudget(msgs)
-
-	got := []rune(out[0].Content)
-	if len(got) >= len([]rune(long)) {
-		t.Fatal("超限的工具结果应被截断")
-	}
-	if !strings.Contains(out[0].Content, "中间省略") {
-		t.Fatal("截断处应有明确说明，否则模型以为它看到的就是全部")
-	}
-	if !strings.HasPrefix(out[0].Content, "xxx") || !strings.HasSuffix(out[0].Content, "xxx") {
-		t.Fatal("应保留头尾")
-	}
-	if out[1].Content != "短的" {
-		t.Fatal("未超限的工具结果不应被改动")
-	}
-	if out[2].Content != long {
-		t.Fatal("非工具消息不应被改动")
-	}
-	// 关键：原切片必须原样——持久化存全量，只有发给模型的那份被裁剪
-	if msgs[0].Content != long {
-		t.Fatal("预算只该作用于副本，不能改动传入的消息（持久化要存全量）")
 	}
 }
 
 // 有摘要时：前缀被换成一条摘要说明，其余原样
 func TestBuildRunMessagesWithSummary(t *testing.T) {
-	session := &Session{
-		Messages: []Message{
-			{ID: "m0", Role: RoleUser, Content: "第一轮问题"},
-			{ID: "m1", Role: RoleAssistant, Content: "第一轮回答"},
-			{ID: "m2", Role: RoleUser, Content: "第二轮问题"},
-			{ID: "m3", Role: RoleAssistant, Content: "第二轮回答"},
+	session := &store.Session{
+		Messages: []store.Message{
+			{ID: "m0", Role: store.RoleUser, Content: "第一轮问题"},
+			{ID: "m1", Role: store.RoleAssistant, Content: "第一轮回答"},
+			{ID: "m2", Role: store.RoleUser, Content: "第二轮问题"},
+			{ID: "m3", Role: store.RoleAssistant, Content: "第二轮回答"},
 		},
 		ContextSummary:     "之前聊了两轮，结论是 X。",
 		ContextCoveredUpTo: 2,
@@ -178,7 +75,7 @@ func TestBuildRunMessagesWithSummary(t *testing.T) {
 	if len(out) != 4 {
 		t.Fatalf("应为 system + 摘要 + 2 条，实际 %d 条", len(out))
 	}
-	if out[0].Role != RoleSystem || out[0].Content != "SYS" {
+	if out[0].Role != store.RoleSystem || out[0].Content != "SYS" {
 		t.Fatalf("第一条应为 system，实际 %+v", out[0])
 	}
 	if !strings.Contains(out[1].Content, "之前聊了两轮") {
@@ -198,9 +95,9 @@ func TestBuildRunMessagesWithSummary(t *testing.T) {
 
 // 没有摘要时：全部消息都发出去
 func TestBuildRunMessagesWithoutSummary(t *testing.T) {
-	session := &Session{Messages: []Message{
-		{ID: "m0", Role: RoleUser, Content: "问题"},
-		{ID: "m1", Role: RoleAssistant, Content: "回答"},
+	session := &store.Session{Messages: []store.Message{
+		{ID: "m0", Role: store.RoleUser, Content: "问题"},
+		{ID: "m1", Role: store.RoleAssistant, Content: "回答"},
 	}}
 	out := buildRunMessages(session, "SYS", false, nil)
 	if len(out) != 3 {
@@ -213,36 +110,36 @@ func TestBuildRunMessagesWithoutSummary(t *testing.T) {
 
 // 清空摘要字段即回到全量上下文（压缩可逆的落点）
 func TestContextSummaryIsReversible(t *testing.T) {
-	store := NewSessionStore(t.TempDir())
-	sess, err := store.CreateSession(SessionConfig{Title: "t", Model: "m", Project: t.TempDir()})
+	ss := store.NewSessionStore(t.TempDir())
+	sess, err := ss.CreateSession(store.SessionConfig{Title: "t", Model: "m", Project: t.TempDir()})
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, m := range []Message{
-		{Role: RoleUser, Content: "问题一"},
-		{Role: RoleAssistant, Content: "回答一"},
-		{Role: RoleUser, Content: "问题二"},
-		{Role: RoleAssistant, Content: "回答二"},
+	for _, m := range []store.Message{
+		{Role: store.RoleUser, Content: "问题一"},
+		{Role: store.RoleAssistant, Content: "回答一"},
+		{Role: store.RoleUser, Content: "问题二"},
+		{Role: store.RoleAssistant, Content: "回答二"},
 	} {
-		if _, err := store.AppendMessage(sess.ID, m); err != nil {
+		if _, err := ss.AppendMessage(sess.ID, m); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := store.SetContextSummary(sess.ID, "摘要正文", 2, time.Now().UnixMilli()); err != nil {
+	if err := ss.SetContextSummary(sess.ID, "摘要正文", 2, time.Now().UnixMilli()); err != nil {
 		t.Fatal(err)
 	}
 
-	got, _ := store.GetSession(sess.ID)
+	got, _ := ss.GetSession(sess.ID)
 	compressed := buildRunMessages(got, "SYS", false, nil)
 	if !strings.Contains(compressed[1].Content, "摘要正文") {
 		t.Fatalf("应发送摘要，实际 %q", compressed[1].Content)
 	}
 
 	// 清空 → 回到全量
-	if err := store.ClearContextSummary(sess.ID); err != nil {
+	if err := ss.ClearContextSummary(sess.ID); err != nil {
 		t.Fatal(err)
 	}
-	got2, _ := store.GetSession(sess.ID)
+	got2, _ := ss.GetSession(sess.ID)
 	restored := buildRunMessages(got2, "SYS", false, nil)
 	if !strings.Contains(restored[1].Content, "问题一") {
 		t.Fatalf("清空摘要后应回到全量上下文，实际 %q", restored[1].Content)
@@ -254,14 +151,14 @@ func TestContextSummaryIsReversible(t *testing.T) {
 
 // 用量统计
 func TestContextStatOf(t *testing.T) {
-	session := &Session{
+	session := &store.Session{
 		ID:                 "s1",
-		Messages:           []Message{{Role: RoleUser, Content: strings.Repeat("字", 200)}},
+		Messages:           []store.Message{{Role: store.RoleUser, Content: strings.Repeat("字", 200)}},
 		ContextCoveredUpTo: 3,
 		ContextSummary:     "摘要",
 	}
 	msgs := buildRunMessages(session, "", false, nil)
-	st := contextStatOf(session, msgs, 1000, nil, 0, 1.0)
+	st := agent.ContextStatOf(session, msgs, 1000, nil, 0, 1.0)
 	if st.SessionID != "s1" || st.WindowTokens != 1000 {
 		t.Fatalf("基础字段错误: %+v", st)
 	}
@@ -272,7 +169,7 @@ func TestContextStatOf(t *testing.T) {
 		t.Fatalf("应带上压缩状态: %+v", st)
 	}
 	// 窗口未知时不除零
-	zero := contextStatOf(session, msgs, 0, nil, 0, 1.0)
+	zero := agent.ContextStatOf(session, msgs, 0, nil, 0, 1.0)
 	if zero.Ratio != 0 {
 		t.Fatalf("窗口为 0 时比例应为 0，实际 %v", zero.Ratio)
 	}
@@ -280,16 +177,16 @@ func TestContextStatOf(t *testing.T) {
 
 // 阈值判定
 func TestNeedCompact(t *testing.T) {
-	if needCompact(100, 0) {
+	if agent.NeedCompact(100, 0) {
 		t.Fatal("窗口未知时不应触发压缩")
 	}
-	if needCompact(690, 1000) {
+	if agent.NeedCompact(690, 1000) {
 		t.Fatal("69% 不该触发（阈值 70%）")
 	}
-	if !needCompact(700, 1000) {
+	if !agent.NeedCompact(700, 1000) {
 		t.Fatal("70% 应触发")
 	}
-	if !needCompact(1500, 1000) {
+	if !agent.NeedCompact(1500, 1000) {
 		t.Fatal("超过窗口更应触发")
 	}
 }
@@ -303,7 +200,7 @@ func TestIsContextOverflowError(t *testing.T) {
 		"请求过长，请缩短",
 	}
 	for _, s := range yes {
-		if !isContextOverflowError(errString(s)) {
+		if !llm.IsContextOverflowError(errString(s)) {
 			t.Fatalf("应识别为上下文超长: %q", s)
 		}
 	}
@@ -314,11 +211,11 @@ func TestIsContextOverflowError(t *testing.T) {
 		"",
 	}
 	for _, s := range no {
-		if isContextOverflowError(errString(s)) {
+		if llm.IsContextOverflowError(errString(s)) {
 			t.Fatalf("不该识别为上下文超长: %q", s)
 		}
 	}
-	if isContextOverflowError(nil) {
+	if llm.IsContextOverflowError(nil) {
 		t.Fatal("nil 不应算超长")
 	}
 }
@@ -349,7 +246,7 @@ func TestAnthropicStreamCapturesUsage(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	resp, err := callAnthropicStream(context.Background(), srv.URL, "tok", &LLMReq{Model: "m"}, func(string) {})
+	resp, err := llm.CallAnthropicStream(context.Background(), srv.URL, "tok", &llm.LLMReq{Model: "m"}, func(string) {})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -399,9 +296,9 @@ func TestCompactSessionDegradesWhenSummarizerFails(t *testing.T) {
 func TestCompactSessionWritesSummary(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(LLMResp{Choices: []LLMChoice{{
-			FinishReason: FinishReasonStop,
-			Message:      LLMMessage{Role: RoleAssistant, Content: "## 已完成\n- 做了 A\n\n## 待办\n- 做 B"},
+		_ = json.NewEncoder(w).Encode(llm.LLMResp{Choices: []llm.LLMChoice{{
+			FinishReason: llm.FinishReasonStop,
+			Message:      llm.LLMMessage{Role: store.RoleAssistant, Content: "## 已完成\n- 做了 A\n\n## 待办\n- 做 B"},
 		}}})
 	}))
 	defer srv.Close()
@@ -450,7 +347,7 @@ func TestSecondCompactCarriesPreviousSummary(t *testing.T) {
 	)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
-		var req LLMReq
+		var req llm.LLMReq
 		_ = json.Unmarshal(body, &req)
 		if len(req.Tools) > 0 {
 			t.Error("本测试不该发起带工具的请求")
@@ -469,9 +366,9 @@ func TestSecondCompactCarriesPreviousSummary(t *testing.T) {
 			text = "第二段摘要标记-BETA"
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(LLMResp{Choices: []LLMChoice{{
-			FinishReason: FinishReasonStop,
-			Message:      LLMMessage{Role: RoleAssistant, Content: text},
+		_ = json.NewEncoder(w).Encode(llm.LLMResp{Choices: []llm.LLMChoice{{
+			FinishReason: llm.FinishReasonStop,
+			Message:      llm.LLMMessage{Role: store.RoleAssistant, Content: text},
 		}}})
 	}))
 	defer srv.Close()
@@ -490,12 +387,12 @@ func TestSecondCompactCarriesPreviousSummary(t *testing.T) {
 
 	// 再造出足够多的待压缩内容（角色与 seedMessages 保持同一奇偶约定，切点才找得到）
 	for i := 0; i < 20; i++ {
-		role := RoleUser
+		role := store.RoleUser
 		if i%2 == 1 {
-			role = RoleAssistant
+			role = store.RoleAssistant
 		}
 		if _, err := app.sessionStore.AppendMessage(sess.ID,
-			Message{Role: role, Content: strings.Repeat("后续内容", 20)}); err != nil {
+			store.Message{Role: role, Content: strings.Repeat("后续内容", 20)}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -554,15 +451,15 @@ func TestContextOverflowRetryRecovers(t *testing.T) {
 	var toolCalls int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
-		var req LLMReq
+		var req llm.LLMReq
 		_ = json.Unmarshal(body, &req)
 
 		if len(req.Tools) == 0 {
 			// 摘要请求
 			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(LLMResp{Choices: []LLMChoice{{
-				FinishReason: FinishReasonStop,
-				Message:      LLMMessage{Role: RoleAssistant, Content: "压缩后的摘要"},
+			_ = json.NewEncoder(w).Encode(llm.LLMResp{Choices: []llm.LLMChoice{{
+				FinishReason: llm.FinishReasonStop,
+				Message:      llm.LLMMessage{Role: store.RoleAssistant, Content: "压缩后的摘要"},
 			}}})
 			return
 		}
@@ -573,19 +470,19 @@ func TestContextOverflowRetryRecovers(t *testing.T) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(LLMResp{Choices: []LLMChoice{{
-			FinishReason: FinishReasonStop,
-			Message:      LLMMessage{Role: RoleAssistant, Content: "重试后正常回复"},
+		_ = json.NewEncoder(w).Encode(llm.LLMResp{Choices: []llm.LLMChoice{{
+			FinishReason: llm.FinishReasonStop,
+			Message:      llm.LLMMessage{Role: store.RoleAssistant, Content: "重试后正常回复"},
 		}}})
 	}))
 	defer srv.Close()
 
 	app, sess := newPlanTestApp(t, srv.URL)
-	app.runs = &runRegistry{}
+	app.runs = &agent.RunRegistry{}
 	app.baseDir = t.TempDir()
-	app.fileChanges = NewFileChangeLog(50)
+	app.fileChanges = tool.NewFileChangeLog(50)
 	seedMessages(t, app, sess.ID, 16)
-	if _, err := app.sessionStore.AppendMessage(sess.ID, Message{Role: RoleUser, Content: "继续"}); err != nil {
+	if _, err := app.sessionStore.AppendMessage(sess.ID, store.Message{Role: store.RoleUser, Content: "继续"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -610,7 +507,7 @@ func TestContextOverflowFallsBackToTruncation(t *testing.T) {
 	var toolCalls int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
-		var req LLMReq
+		var req llm.LLMReq
 		_ = json.Unmarshal(body, &req)
 
 		if len(req.Tools) == 0 {
@@ -625,19 +522,19 @@ func TestContextOverflowFallsBackToTruncation(t *testing.T) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(LLMResp{Choices: []LLMChoice{{
-			FinishReason: FinishReasonStop,
-			Message:      LLMMessage{Role: RoleAssistant, Content: "截断后也能回复"},
+		_ = json.NewEncoder(w).Encode(llm.LLMResp{Choices: []llm.LLMChoice{{
+			FinishReason: llm.FinishReasonStop,
+			Message:      llm.LLMMessage{Role: store.RoleAssistant, Content: "截断后也能回复"},
 		}}})
 	}))
 	defer srv.Close()
 
 	app, sess := newPlanTestApp(t, srv.URL)
-	app.runs = &runRegistry{}
+	app.runs = &agent.RunRegistry{}
 	app.baseDir = t.TempDir()
-	app.fileChanges = NewFileChangeLog(50)
+	app.fileChanges = tool.NewFileChangeLog(50)
 	seedMessages(t, app, sess.ID, 16)
-	if _, err := app.sessionStore.AppendMessage(sess.ID, Message{Role: RoleUser, Content: "继续"}); err != nil {
+	if _, err := app.sessionStore.AppendMessage(sess.ID, store.Message{Role: store.RoleUser, Content: "继续"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -656,17 +553,17 @@ func TestContextOverflowFallsBackToTruncation(t *testing.T) {
 func TestCompactCommand(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(LLMResp{Choices: []LLMChoice{{
-			FinishReason: FinishReasonStop,
-			Message:      LLMMessage{Role: RoleAssistant, Content: "摘要内容"},
+		_ = json.NewEncoder(w).Encode(llm.LLMResp{Choices: []llm.LLMChoice{{
+			FinishReason: llm.FinishReasonStop,
+			Message:      llm.LLMMessage{Role: store.RoleAssistant, Content: "摘要内容"},
 		}}})
 	}))
 	defer srv.Close()
 
 	app, sess := newPlanTestApp(t, srv.URL)
-	app.runs = &runRegistry{}
+	app.runs = &agent.RunRegistry{}
 	app.baseDir = t.TempDir()
-	app.fileChanges = NewFileChangeLog(50)
+	app.fileChanges = tool.NewFileChangeLog(50)
 	seedMessages(t, app, sess.ID, 16)
 
 	res, err := app.Chat(sess.ID, "/compact", false, false)
@@ -679,7 +576,7 @@ func TestCompactCommand(t *testing.T) {
 	if res.Context == nil {
 		t.Fatal("应带回上下文用量")
 	}
-	if len(res.Messages) != 1 || res.Messages[0].Role != RoleAssistant {
+	if len(res.Messages) != 1 || res.Messages[0].Role != store.RoleAssistant {
 		t.Fatalf("应落一条 assistant 说明消息，实际 %+v", res.Messages)
 	}
 }
@@ -692,9 +589,9 @@ func TestCompactCommandWithoutEnoughMessages(t *testing.T) {
 	defer srv.Close()
 
 	app, sess := newPlanTestApp(t, srv.URL)
-	app.runs = &runRegistry{}
+	app.runs = &agent.RunRegistry{}
 	app.baseDir = t.TempDir()
-	app.fileChanges = NewFileChangeLog(50)
+	app.fileChanges = tool.NewFileChangeLog(50)
 	seedMessages(t, app, sess.ID, 2)
 
 	res, err := app.Chat(sess.ID, "/compact", false, false)
@@ -707,16 +604,16 @@ func TestCompactCommandWithoutEnoughMessages(t *testing.T) {
 }
 
 // seedMessages 往会话里塞 n 条交替的 user/assistant 消息（偶数下标是 user，
-// 这样 findCompactCut 能找到合法切点）
+// 这样 agent.FindCompactCut 能找到合法切点）
 func seedMessages(t *testing.T, app *App, sessionID string, n int) {
 	t.Helper()
 	for i := 0; i < n; i++ {
-		role := RoleUser
+		role := store.RoleUser
 		if i%2 == 1 {
-			role = RoleAssistant
+			role = store.RoleAssistant
 		}
 		content := strings.Repeat("内容", 20)
-		if _, err := app.sessionStore.AppendMessage(sessionID, Message{Role: role, Content: content}); err != nil {
+		if _, err := app.sessionStore.AppendMessage(sessionID, store.Message{Role: role, Content: content}); err != nil {
 			t.Fatal(err)
 		}
 	}

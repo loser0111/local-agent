@@ -6,26 +6,28 @@ import (
 	"strings"
 	"testing"
 
+	"wails-tmp/internal/store"
+	"wails-tmp/internal/tool"
 	"wails-tmp/memory"
 )
 
-func newMemoryTestApp(t *testing.T) (*App, *Session) {
+func newMemoryTestApp(t *testing.T) (*App, *store.Session) {
 	t.Helper()
 	app := &App{}
 	base := t.TempDir()
-	app.sessionStore = NewSessionStore(filepath.Join(base, "sessions"))
-	app.modelStore = NewModelStore(filepath.Join(base, "models.json"))
-	app.toolStore = NewToolStore(filepath.Join(base, "tools.json"))
+	app.sessionStore = store.NewSessionStore(filepath.Join(base, "sessions"))
+	app.modelStore = store.NewModelStore(filepath.Join(base, "models.json"))
+	app.toolStore = tool.NewToolStore(filepath.Join(base, "tools.json"))
 	app.toolManager = NewToolManager(app.toolStore, nil)
-	store, err := memory.NewMemoryStore(filepath.Join(base, "memory"), memory.MemoryConfig{StalenessCaveat: true})
+	memStore, err := memory.NewMemoryStore(filepath.Join(base, "memory"), memory.MemoryConfig{StalenessCaveat: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	app.memory = store
-	if err := app.modelStore.AddModel(Model{Name: "mock", URL: "http://127.0.0.1:9", APIKey: "k"}); err != nil {
+	app.memory = memStore
+	if err := app.modelStore.AddModel(store.Model{Name: "mock", URL: "http://127.0.0.1:9", APIKey: "k"}); err != nil {
 		t.Fatal(err)
 	}
-	sess, err := app.sessionStore.CreateSession(SessionConfig{Title: "记忆测试", Model: "mock", Project: filepath.Join(base, "proj")})
+	sess, err := app.sessionStore.CreateSession(store.SessionConfig{Title: "记忆测试", Model: "mock", Project: filepath.Join(base, "proj")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,7 +53,7 @@ func TestRememberForgetAndListCommands(t *testing.T) {
 		t.Fatalf("列表应含刚写下的记忆: %q", list.Reply)
 	}
 
-	other, err := app.sessionStore.CreateSession(SessionConfig{Title: "另一会话", Model: "mock", Project: sess.Project})
+	other, err := app.sessionStore.CreateSession(store.SessionConfig{Title: "另一会话", Model: "mock", Project: sess.Project})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,7 +147,7 @@ func TestRecallSurfacedThenClearedOnCompact(t *testing.T) {
 func TestMemoryToolsDirectAndAutoAllow(t *testing.T) {
 	app, sess := newMemoryTestApp(t)
 	view := app.toolManager.BuildView(context.Background(), BuildOptions{
-		Enforcer:      AllowAllEnforcer{},
+		Enforcer:      tool.AllowAllEnforcer{},
 		Memory:        app.memory,
 		MemoryProject: memoryProjectSlug(sess.Project),
 		SessionID:     sess.ID,
@@ -201,7 +203,7 @@ func TestMemorySearchRespectsIgnore(t *testing.T) {
 	app, _ := newMemoryTestApp(t)
 	_, _ = app.memory.AddMemory(memory.MemoryMeta{Title: "x", Scope: memory.ScopeUser, Type: memory.TypeUser}, "secret-fact")
 	view := app.toolManager.BuildView(context.Background(), BuildOptions{
-		Enforcer:     AllowAllEnforcer{},
+		Enforcer:     tool.AllowAllEnforcer{},
 		Memory:       app.memory,
 		IgnoreMemory: true,
 	})
@@ -217,7 +219,7 @@ func TestMemorySearchRespectsIgnore(t *testing.T) {
 func TestSubagentExcludesMemoryWrites(t *testing.T) {
 	app, sess := newMemoryTestApp(t)
 	view := app.toolManager.BuildView(context.Background(), BuildOptions{
-		Enforcer:      AllowAllEnforcer{},
+		Enforcer:      tool.AllowAllEnforcer{},
 		Memory:        app.memory,
 		MemoryProject: memoryProjectSlug(sess.Project),
 		ExcludeTools:  []string{toolAskUser, toolMemorySave, toolMemoryForget},

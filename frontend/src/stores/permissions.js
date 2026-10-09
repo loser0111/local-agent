@@ -28,7 +28,7 @@ import { useSessionStore } from '@/stores/session'
 export const usePermissionStore = defineStore('permissions', () => {
   const sessionStore = useSessionStore()
 
-  // sessionId -> PermissionAskRequest
+  // sessionId -> 挂起的授权请求（后端 permission.Request，JSON 字段未变）
   const pendingBySession = ref({})
   const state = ref(null)
   const audit = ref([])

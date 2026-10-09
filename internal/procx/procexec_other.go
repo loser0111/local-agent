@@ -1,6 +1,7 @@
 //go:build !windows
 
 package procx
+
 import "os/exec"
 
 // HideConsoleWindow 在非 Windows 上是空操作：类 Unix 没有"子进程控制台窗口"这回事

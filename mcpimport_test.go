@@ -6,17 +6,19 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"wails-tmp/internal/tool"
 )
 
 // ===== MCP 导入 / 导出 + 落盘迁移 =====
 
 func newMCPTestApp(t *testing.T) *App {
 	t.Helper()
-	store := NewToolStore(filepath.Join(t.TempDir(), "tools.json"))
+	store := tool.NewToolStore(filepath.Join(t.TempDir(), "tools.json"))
 	return &App{toolStore: store, toolManager: NewToolManager(store, nil)}
 }
 
-func findSource(t *testing.T, app *App, name string) *ToolSource {
+func findSource(t *testing.T, app *App, name string) *tool.ToolSource {
 	t.Helper()
 	for _, s := range app.toolStore.GetAll() {
 		if s.Name == name {
@@ -51,7 +53,7 @@ func TestImportMCPServersOfficialShape(t *testing.T) {
 	if src == nil {
 		t.Fatal("来源未落库")
 	}
-	if src.Kind != SourceMCP || !src.Enabled || src.Icon != "blocks" {
+	if src.Kind != tool.SourceMCP || !src.Enabled || src.Icon != "blocks" {
 		t.Fatalf("来源字段异常: %+v", src)
 	}
 	if src.MCP == nil {
@@ -257,16 +259,16 @@ func TestExportMCPServersByName(t *testing.T) {
 }
 
 func TestDeriveAndSanitizeMCPName(t *testing.T) {
-	if got := deriveMCPServerName(officialMCPServer{URL: "https://qconfig-mcp-server-function.faas.ctripcorp.com/mcp"}); got != "qconfig-mcp-server-function" {
+	if got := tool.DeriveMCPServerName(tool.OfficialMCPServer{URL: "https://qconfig-mcp-server-function.faas.ctripcorp.com/mcp"}); got != "qconfig-mcp-server-function" {
 		t.Errorf("应从 url 推断出服务器名，实际 %q", got)
 	}
-	if got := deriveMCPServerName(officialMCPServer{Command: "/usr/local/bin/my-mcp-server"}); got != "my-mcp-server" {
+	if got := tool.DeriveMCPServerName(tool.OfficialMCPServer{Command: "/usr/local/bin/my-mcp-server"}); got != "my-mcp-server" {
 		t.Errorf("应从 command 推断出服务器名，实际 %q", got)
 	}
-	if got := sanitizeToolName("my mcp/server@1.0"); got != "my-mcp-server-1-0" {
+	if got := tool.SanitizeToolName("my mcp/server@1.0"); got != "my-mcp-server-1-0" {
 		t.Errorf("非法字符应替换为连字符，实际 %q", got)
 	}
-	if got := normalizeMCPName("mcp__qconfig__changeqconfig"); got != "qconfig" {
+	if got := tool.NormalizeMCPName("mcp__qconfig__changeqconfig"); got != "qconfig" {
 		t.Errorf("工具名应归一为来源名，实际 %q", got)
 	}
 }
@@ -290,7 +292,7 @@ func TestToolStoreMigratesV1File(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	store := NewToolStore(file)
+	store := tool.NewToolStore(file)
 
 	// 内置照旧
 	if _, ok := store.GetByName("exec_shell"); !ok {
@@ -298,7 +300,7 @@ func TestToolStoreMigratesV1File(t *testing.T) {
 	}
 	// api → http，且配置进类型化字段
 	weather, ok := store.GetByName("weather")
-	if !ok || weather.Kind != SourceHTTP || weather.HTTP == nil {
+	if !ok || weather.Kind != tool.SourceHTTP || weather.HTTP == nil {
 		t.Fatalf("api 应迁移为 http 来源: %+v", weather)
 	}
 	if weather.HTTP.URL != "https://x/weather" || weather.HTTP.Method != "GET" {
@@ -306,7 +308,7 @@ func TestToolStoreMigratesV1File(t *testing.T) {
 	}
 	// mcp：transport=http → 官方 type=streamable-http；禁用名单与发现缓存保留
 	qc, ok := store.GetByName("qconfig")
-	if !ok || qc.Kind != SourceMCP || qc.MCP == nil {
+	if !ok || qc.Kind != tool.SourceMCP || qc.MCP == nil {
 		t.Fatalf("mcp 应迁移为 MCP 来源: %+v", qc)
 	}
 	if qc.MCP.Type != "streamable-http" || qc.MCP.URL != "https://q/mcp" || qc.MCP.Headers["t"] != "1" {
@@ -324,12 +326,12 @@ func TestToolStoreMigratesV1File(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var f ToolFile
+	var f tool.ToolFile
 	if err := json.Unmarshal(data, &f); err != nil {
 		t.Fatalf("迁移后应写成 v2 结构: %v", err)
 	}
-	if f.Version != ToolFileVersion {
-		t.Fatalf("版本号应为 %d，实际 %d", ToolFileVersion, f.Version)
+	if f.Version != tool.ToolFileVersion {
+		t.Fatalf("版本号应为 %d，实际 %d", tool.ToolFileVersion, f.Version)
 	}
 
 	// 旧文件必须留备份（配置是用户资产，迁移要可回退）
@@ -343,7 +345,7 @@ func TestToolStoreMigratesV1File(t *testing.T) {
 
 	// 再次加载不应重复迁移（备份不被覆盖）
 	before, _ := os.Stat(file + ".bak")
-	_ = NewToolStore(file)
+	_ = tool.NewToolStore(file)
 	after, _ := os.Stat(file + ".bak")
 	if !after.ModTime().Equal(before.ModTime()) {
 		t.Fatal("重复加载不应覆盖已有备份")
@@ -358,7 +360,7 @@ func TestSubToolToggleAndExposure(t *testing.T) {
 		t.Fatal(err)
 	}
 	src := findSource(t, app, "qconfig")
-	if err := app.toolStore.UpdateDiscovered(src.ID, []MCPToolMeta{
+	if err := app.toolStore.UpdateDiscovered(src.ID, []tool.MCPToolMeta{
 		{Name: "list_envs"}, {Name: "changeqconfig"},
 	}); err != nil {
 		t.Fatal(err)
@@ -390,13 +392,13 @@ func TestSubToolToggleAndExposure(t *testing.T) {
 	}
 
 	// 暴露策略：默认 router；可改为 direct / internal；非法值拒绝
-	if got.Exposure != ExposureRouter {
+	if got.Exposure != tool.ExposureRouter {
 		t.Fatalf("MCP 默认暴露策略应为 router，实际 %s", got.Exposure)
 	}
-	if err := app.SetExposure(src.ID, string(ExposureDirect)); err != nil {
+	if err := app.SetExposure(src.ID, string(tool.ExposureDirect)); err != nil {
 		t.Fatalf("设置暴露策略失败: %v", err)
 	}
-	if got := findSource(t, app, "qconfig").Exposure; got != ExposureDirect {
+	if got := findSource(t, app, "qconfig").Exposure; got != tool.ExposureDirect {
 		t.Fatalf("暴露策略应已更新，实际 %s", got)
 	}
 	if err := app.SetExposure(src.ID, "nonsense"); err == nil {

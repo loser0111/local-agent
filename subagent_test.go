@@ -13,7 +13,12 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"wails-tmp/internal/agent"
 	"wails-tmp/internal/diff"
+	"wails-tmp/internal/llm"
+	"wails-tmp/internal/permission"
+	"wails-tmp/internal/store"
+	"wails-tmp/internal/tool"
 )
 
 // ===== P3 第 2 步：权限的"只判定不等待"入口 + 子代理网关 =====
@@ -24,18 +29,14 @@ import (
 // Enforce 而不是 Decide），测试会在毫秒级拿到"等待用户授权超时"——**错误因此快速
 // 且可区分**，而不是把测试挂满默认的 5 分钟。这类"间歇性卡住"的错误最难查，
 // 所以要在测试层面把它变成确定性失败。
-func newTestSubagentEnforcer(t *testing.T, mode Mode, rules *RuleSet) (*App, *permissionEnforcer, *subagentEnforcer) {
+func newTestSubagentEnforcer(t *testing.T, mode permission.Mode, rules *permission.RuleSet) (*App, *permission.Enforcer, *agent.SubagentEnforcer) {
 	t.Helper()
-	app := &App{permissionBroker: newPermissionBroker(80 * time.Millisecond)}
+	app := &App{permissionBroker: permission.NewBroker(80 * time.Millisecond)}
 	app.ensurePermissionState()
-	enf := &permissionEnforcer{
-		app:        app,
-		sessionID:  "parent-sess",
-		projectDir: t.TempDir(),
-		mode:       mode,
-		rules:      rules,
-	}
-	return app, enf, &subagentEnforcer{parent: enf}
+	enf := app.bindEnforcer("parent-sess", mode)
+	enf.ProjectDir = t.TempDir()
+	enf.Rules = rules
+	return app, enf, agent.NewSubagentEnforcer(enf)
 }
 
 // ★ 本文件最重要的一条：需要用户授权的操作，子代理必须**立即**拒绝，而不是阻塞等待。
@@ -44,11 +45,11 @@ func newTestSubagentEnforcer(t *testing.T, mode Mode, rules *RuleSet) (*App, *pe
 // "等待用户授权超时"，而不是"需要用户授权"。两者含义完全不同：前者是系统故障，
 // 后者是给模型的可用反馈（模型可以改路子或在结论里申请授权）。
 func TestSubagentDeclinesWithoutBlocking(t *testing.T) {
-	_, _, sub := newTestSubagentEnforcer(t, ModeManual, nil)
-	tool := &CLITool{BaseTool: &BaseTool{Name: "exec_shell"}}
+	_, _, sub := newTestSubagentEnforcer(t, permission.ModeManual, nil)
+	tl := &tool.CLITool{BaseTool: &tool.BaseTool{Name: "exec_shell"}}
 
 	start := time.Now()
-	err := sub.Enforce(context.Background(), tool, map[string]interface{}{"cmd": "python fetch.py"})
+	err := sub.Enforce(context.Background(), tl, map[string]interface{}{"cmd": "python fetch.py"})
 	elapsed := time.Since(start)
 
 	if err == nil {
@@ -71,10 +72,10 @@ func TestSubagentDeclinesWithoutBlocking(t *testing.T) {
 
 // 父网关允许的，子代理照常放行
 func TestSubagentAllowsWhatParentAllows(t *testing.T) {
-	_, _, sub := newTestSubagentEnforcer(t, ModeManual, nil)
-	tool := &CLITool{BaseTool: &BaseTool{Name: "exec_shell"}}
+	_, _, sub := newTestSubagentEnforcer(t, permission.ModeManual, nil)
+	tl := &tool.CLITool{BaseTool: &tool.BaseTool{Name: "exec_shell"}}
 
-	if err := sub.Enforce(context.Background(), tool, map[string]interface{}{"cmd": "ls -la"}); err != nil {
+	if err := sub.Enforce(context.Background(), tl, map[string]interface{}{"cmd": "ls -la"}); err != nil {
 		t.Fatalf("只读命令应放行: %v", err)
 	}
 	if got := sub.Declined(); len(got) != 0 {
@@ -85,12 +86,12 @@ func TestSubagentAllowsWhatParentAllows(t *testing.T) {
 // 硬性拒绝与"缺授权"是两回事：前者不该进 Declined。
 // 用户需要能区分"这东西被规则挡死了"和"子代理缺一次授权"——后者的处置方式完全不同。
 func TestSubagentHardDenyIsNotDeclined(t *testing.T) {
-	_, _, sub := newTestSubagentEnforcer(t, ModeManual, &RuleSet{
-		Deny: []Rule{{Tool: "exec_shell", Source: "测试规则"}},
+	_, _, sub := newTestSubagentEnforcer(t, permission.ModeManual, &permission.RuleSet{
+		Deny: []permission.Rule{{Tool: "exec_shell", Source: "测试规则"}},
 	})
-	tool := &CLITool{BaseTool: &BaseTool{Name: "exec_shell"}}
+	tl := &tool.CLITool{BaseTool: &tool.BaseTool{Name: "exec_shell"}}
 
-	err := sub.Enforce(context.Background(), tool, map[string]interface{}{"cmd": "python fetch.py"})
+	err := sub.Enforce(context.Background(), tl, map[string]interface{}{"cmd": "python fetch.py"})
 	if err == nil || !strings.Contains(err.Error(), "权限拒绝") {
 		t.Fatalf("命中 deny 规则应明确拒绝，实际: %v", err)
 	}
@@ -101,10 +102,10 @@ func TestSubagentHardDenyIsNotDeclined(t *testing.T) {
 
 // 调用错误（如命令为空）不是权限结论，也不该记入 Declined
 func TestSubagentCallErrorIsNotDeclined(t *testing.T) {
-	_, _, sub := newTestSubagentEnforcer(t, ModeManual, nil)
-	tool := &CLITool{BaseTool: &BaseTool{Name: "exec_shell"}}
+	_, _, sub := newTestSubagentEnforcer(t, permission.ModeManual, nil)
+	tl := &tool.CLITool{BaseTool: &tool.BaseTool{Name: "exec_shell"}}
 
-	err := sub.Enforce(context.Background(), tool, map[string]interface{}{"cmd": "   "})
+	err := sub.Enforce(context.Background(), tl, map[string]interface{}{"cmd": "   "})
 	if err == nil || !strings.Contains(err.Error(), "命令为空") {
 		t.Fatalf("空命令应报调用错误，实际: %v", err)
 	}
@@ -115,13 +116,13 @@ func TestSubagentCallErrorIsNotDeclined(t *testing.T) {
 
 // 没有父网关时 fail closed：宁可拒绝，也不能静默放行
 func TestSubagentWithoutParentFailsClosed(t *testing.T) {
-	tool := &CLITool{BaseTool: &BaseTool{Name: "exec_shell"}}
-	sub := &subagentEnforcer{}
-	if err := sub.Enforce(context.Background(), tool, map[string]interface{}{"cmd": "ls"}); err == nil {
+	tl := &tool.CLITool{BaseTool: &tool.BaseTool{Name: "exec_shell"}}
+	sub := agent.NewSubagentEnforcer(nil)
+	if err := sub.Enforce(context.Background(), tl, map[string]interface{}{"cmd": "ls"}); err == nil {
 		t.Fatal("没有父网关时应拒绝，不能放行")
 	}
 	// nil 接收者也要安全（构造期可能拿到 nil）
-	var nilSub *subagentEnforcer
+	var nilSub *agent.SubagentEnforcer
 	if got := nilSub.Declined(); got != nil {
 		t.Fatalf("nil 接收者的 Declined 应返回 nil，实际 %v", got)
 	}
@@ -132,24 +133,24 @@ func TestSubagentWithoutParentFailsClosed(t *testing.T) {
 //
 // 这条守的是重构本身——把 Enforce 拆成 Decide + 审计 + 分派之后，行为不能变。
 func TestDecideMatchesEnforceAndAuditBelongs(t *testing.T) {
-	app, enf, _ := newTestSubagentEnforcer(t, ModeManual, nil)
-	tool := &CLITool{BaseTool: &BaseTool{Name: "exec_shell"}}
+	app, enf, _ := newTestSubagentEnforcer(t, permission.ModeManual, nil)
+	tl := &tool.CLITool{BaseTool: &tool.BaseTool{Name: "exec_shell"}}
 
-	subject, verdict, callErr := enf.Decide(tool, map[string]interface{}{"cmd": "ls"})
+	subject, verdict, callErr := enf.Decide(tl, map[string]interface{}{"cmd": "ls"})
 	if callErr != nil {
 		t.Fatalf("只读命令不该是调用错误: %v", callErr)
 	}
-	if verdict.Decision != DecisionAllow {
+	if verdict.Decision != permission.DecisionAllow {
 		t.Fatalf("只读命令应判 allow，实际 %s（%s）", verdict.Decision, verdict.Reason)
 	}
-	if subject.Kind != SubjectCommand || subject.Tool != "exec_shell" {
+	if subject.Kind != permission.SubjectCommand || subject.Tool != "exec_shell" {
 		t.Fatalf("主体应保留工具名与类型，实际 %+v", subject)
 	}
 	if n := len(app.permissionAudit.List("parent-sess")); n != 0 {
 		t.Fatalf("Decide 自己不该写审计（否则子代理会双重记账），实际 %d 条", n)
 	}
 
-	if err := enf.Enforce(context.Background(), tool, map[string]interface{}{"cmd": "ls"}); err != nil {
+	if err := enf.Enforce(context.Background(), tl, map[string]interface{}{"cmd": "ls"}); err != nil {
 		t.Fatalf("Enforce 同样应放行: %v", err)
 	}
 	if n := len(app.permissionAudit.List("parent-sess")); n != 1 {
@@ -157,34 +158,34 @@ func TestDecideMatchesEnforceAndAuditBelongs(t *testing.T) {
 	}
 
 	// deny 路径：两边结论也要一致
-	_, denied, _ := newTestSubagentEnforcer(t, ModeManual, &RuleSet{
-		Deny: []Rule{{Tool: "exec_shell", Source: "测试规则"}},
+	_, denied, _ := newTestSubagentEnforcer(t, permission.ModeManual, &permission.RuleSet{
+		Deny: []permission.Rule{{Tool: "exec_shell", Source: "测试规则"}},
 	})
-	if _, v, _ := denied.Decide(tool, map[string]interface{}{"cmd": "python x.py"}); v.Decision != DecisionDeny {
+	if _, v, _ := denied.Decide(tl, map[string]interface{}{"cmd": "python x.py"}); v.Decision != permission.DecisionDeny {
 		t.Fatalf("命中 deny 规则时 Decide 应判 deny，实际 %s", v.Decision)
 	}
-	if err := denied.Enforce(context.Background(), tool, map[string]interface{}{"cmd": "python x.py"}); err == nil {
+	if err := denied.Enforce(context.Background(), tl, map[string]interface{}{"cmd": "python x.py"}); err == nil {
 		t.Fatal("命中 deny 规则时 Enforce 应报错")
 	}
 }
 
 // 子代理挡下时写的审计，stage 必须能与"用户拒绝"区分开
 func TestSubagentDeclineIsAuditedWithItsOwnStage(t *testing.T) {
-	app, _, sub := newTestSubagentEnforcer(t, ModeManual, nil)
-	tool := &CLITool{BaseTool: &BaseTool{Name: "exec_shell"}}
+	app, _, sub := newTestSubagentEnforcer(t, permission.ModeManual, nil)
+	tl := &tool.CLITool{BaseTool: &tool.BaseTool{Name: "exec_shell"}}
 
-	if err := sub.Enforce(context.Background(), tool, map[string]interface{}{"cmd": "python fetch.py"}); err == nil {
+	if err := sub.Enforce(context.Background(), tl, map[string]interface{}{"cmd": "python fetch.py"}); err == nil {
 		t.Fatal("应被拒绝")
 	}
 	entries := app.permissionAudit.List("parent-sess")
 	if len(entries) != 1 {
 		t.Fatalf("应写一条审计，实际 %d 条", len(entries))
 	}
-	if entries[0].Stage != StageSubagentDeclined {
+	if entries[0].Stage != permission.StageSubagentDeclined {
 		t.Fatalf("stage 应为 %s（否则与用户的真实拒绝混在一起），实际 %s",
-			StageSubagentDeclined, entries[0].Stage)
+			permission.StageSubagentDeclined, entries[0].Stage)
 	}
-	if entries[0].Decision != DecisionDeny.String() {
+	if entries[0].Decision != permission.DecisionDeny.String() {
 		t.Fatalf("审计里的结论应为拒绝，实际 %s", entries[0].Decision)
 	}
 }
@@ -294,37 +295,37 @@ func fakeChatResp(t *testing.T, content string, calls ...fakeCall) string {
 type subagentEnv struct {
 	app    *App
 	dir    string
-	model  Model
-	parent *Session
+	model  store.Model
+	parent *store.Session
 	llm    *fakeLLM
 }
 
 // newSubagentTestEnv 造一个能真正跑一次子代理的环境：临时数据目录 + 假网关 + 真实会话存储。
 // dir 传 newTestRepo(t) 就是一个真实的 git 仓库（diff 与回退都依赖它）。
-func newSubagentTestEnv(t *testing.T, dir string, mode Mode, responses ...string) *subagentEnv {
+func newSubagentTestEnv(t *testing.T, dir string, mode permission.Mode, responses ...string) *subagentEnv {
 	t.Helper()
-	llm := newFakeLLM(t, responses...)
+	fake := newFakeLLM(t, responses...)
 	baseDir := t.TempDir()
 	app := &App{
 		baseDir:      baseDir,
-		sessionStore: NewSessionStore(filepath.Join(baseDir, "sessions")),
-		toolStore:    NewToolStore(filepath.Join(baseDir, "tools.json")),
+		sessionStore: store.NewSessionStore(filepath.Join(baseDir, "sessions")),
+		toolStore:    tool.NewToolStore(filepath.Join(baseDir, "tools.json")),
 		diffService:  diff.NewDiffService(),
-		fileChanges:  NewFileChangeLog(50),
-		reqLog:       &llmRequestLog{},
-		runs:         &runRegistry{},
-		subagents:    newSubagentTracker(),
+		fileChanges:  tool.NewFileChangeLog(50),
+		reqLog:       &llm.RequestLog{},
+		runs:         &agent.RunRegistry{},
+		subagents:    agent.NewSubagentTracker(),
 	}
 	app.toolManager = NewToolManager(app.toolStore, nil) // 技能为空：这些测试不涉及技能
-	app.modelStore = NewModelStore(filepath.Join(baseDir, "models.json"))
-	if err := app.modelStore.AddModel(Model{Name: "m1", URL: llm.server.URL, Protocol: "openai"}); err != nil {
+	app.modelStore = store.NewModelStore(filepath.Join(baseDir, "models.json"))
+	if err := app.modelStore.AddModel(store.Model{Name: "m1", URL: fake.server.URL, Protocol: "openai"}); err != nil {
 		t.Fatalf("添加模型失败: %v", err)
 	}
 	model, err := app.modelStore.GetModelForCall("m1")
 	if err != nil {
 		t.Fatalf("取模型失败: %v", err)
 	}
-	parent, err := app.sessionStore.CreateSession(SessionConfig{
+	parent, err := app.sessionStore.CreateSession(store.SessionConfig{
 		Title:          "主会话",
 		Project:        dir,
 		Model:          "m1",
@@ -333,10 +334,10 @@ func newSubagentTestEnv(t *testing.T, dir string, mode Mode, responses ...string
 	if err != nil {
 		t.Fatalf("创建父会话失败: %v", err)
 	}
-	return &subagentEnv{app: app, dir: dir, model: model, parent: parent, llm: llm}
+	return &subagentEnv{app: app, dir: dir, model: model, parent: parent, llm: fake}
 }
 
-func toolDefNames(defs []LLMTool) map[string]bool {
+func toolDefNames(defs []llm.LLMTool) map[string]bool {
 	out := map[string]bool{}
 	for _, d := range defs {
 		out[d.Function.Name] = true
@@ -363,29 +364,27 @@ func waitUntil(t *testing.T, cond func() bool, timeout time.Duration) bool {
 func TestSpawnAgentToolContract(t *testing.T) {
 	var gotTask string
 	var gotTurns int
-	tool := newSpawnAgentTool(buildContext{
-		spawner: func(ctx context.Context, task string, maxTurns int) (*SubagentResult, error) {
-			gotTask, gotTurns = task, maxTurns
-			return &SubagentResult{
-				RunID:     "sub_1",
-				Status:    subagentStatusCompleted,
-				Summary:   "结论正文",
-				Files:     []string{"x.go"},
-				ToolCalls: 3,
-				Declined:  []string{"exec_shell: python x.py"},
-			}, nil
-		},
+	spawnTool := agent.NewSpawnAgentTool(func(ctx context.Context, task string, maxTurns int) (*agent.SubagentResult, error) {
+		gotTask, gotTurns = task, maxTurns
+		return &agent.SubagentResult{
+			RunID:     "sub_1",
+			Status:    subagentStatusCompleted,
+			Summary:   "结论正文",
+			Files:     []string{"x.go"},
+			ToolCalls: 3,
+			Declined:  []string{"exec_shell: python x.py"},
+		}, nil
 	})
 
-	if _, err := tool.Execute(context.Background(), map[string]interface{}{}); err == nil {
+	if _, err := spawnTool.Execute(context.Background(), map[string]interface{}{}); err == nil {
 		t.Fatal("缺 task 应报错")
 	}
-	if _, err := tool.Execute(context.Background(), map[string]interface{}{"task": "   "}); err == nil {
+	if _, err := spawnTool.Execute(context.Background(), map[string]interface{}{"task": "   "}); err == nil {
 		t.Fatal("空白 task 应报错")
 	}
 
 	// JSON 解析出来的是 float64（真实链路走的就是这一种）
-	out, err := tool.Execute(context.Background(), map[string]interface{}{"task": "查一下", "max_turns": float64(7)})
+	out, err := spawnTool.Execute(context.Background(), map[string]interface{}{"task": "查一下", "max_turns": float64(7)})
 	if err != nil {
 		t.Fatalf("正常调用不应报错: %v", err)
 	}
@@ -393,7 +392,7 @@ func TestSpawnAgentToolContract(t *testing.T) {
 		t.Fatalf("参数应原样透传，实际 task=%q turns=%d", gotTask, gotTurns)
 	}
 	// 直接调用方可能给 int，也要认
-	if _, err := tool.Execute(context.Background(), map[string]interface{}{"task": "查一下", "max_turns": 3}); err != nil {
+	if _, err := spawnTool.Execute(context.Background(), map[string]interface{}{"task": "查一下", "max_turns": 3}); err != nil {
 		t.Fatalf("int 形态的 max_turns 不应报错: %v", err)
 	}
 	if gotTurns != 3 {
@@ -408,22 +407,22 @@ func TestSpawnAgentToolContract(t *testing.T) {
 	}
 
 	// 没有 spawner 时不注册——这正是"子代理不能再派生子代理"的实现方式
-	if _, ok := newBuiltinTool(&ToolSource{Name: toolSpawnAgent, Kind: SourceBuiltin}, buildContext{}); ok {
+	if _, ok := newBuiltinTool(&tool.ToolSource{Name: toolSpawnAgent, Kind: tool.SourceBuiltin}, buildContext{}); ok {
 		t.Fatal("没有 spawner 时 spawn_agent 不应被注册")
 	}
 }
 
 // 曝光与排除：主会话直出 spawn_agent，子代理视图里既没有它也没有 ask_user。
 func TestSpawnAgentExposureAndExclusion(t *testing.T) {
-	tm := NewToolManager(NewToolStore(filepath.Join(t.TempDir(), "tools.json")), nil)
-	spawner := func(ctx context.Context, task string, maxTurns int) (*SubagentResult, error) {
-		return &SubagentResult{Status: subagentStatusCompleted}, nil
+	tm := NewToolManager(tool.NewToolStore(filepath.Join(t.TempDir(), "tools.json")), nil)
+	spawner := func(ctx context.Context, task string, maxTurns int) (*agent.SubagentResult, error) {
+		return &agent.SubagentResult{Status: subagentStatusCompleted}, nil
 	}
 
 	// 主会话：系统提示词点名了 spawn_agent，工具列表里就必须有它的 schema——
 	// 否则模型只能照着名字瞎猜参数（这是"提示词与工具列表不一致"的经典来源）
 	main := tm.BuildView(context.Background(), BuildOptions{
-		Enforcer:   AllowAllEnforcer{},
+		Enforcer:   tool.AllowAllEnforcer{},
 		SpawnAgent: spawner,
 	})
 	if !toolDefNames(main.GetToolsForLLM())[toolSpawnAgent] {
@@ -432,7 +431,7 @@ func TestSpawnAgentExposureAndExclusion(t *testing.T) {
 
 	// 子代理：不给 spawner + 显式排除 ask_user
 	sub := tm.BuildView(context.Background(), BuildOptions{
-		Enforcer:     AllowAllEnforcer{},
+		Enforcer:     tool.AllowAllEnforcer{},
 		ExcludeTools: []string{toolAskUser},
 	})
 	names := toolDefNames(sub.GetToolsForLLM())
@@ -451,12 +450,12 @@ func TestSpawnAgentExposureAndExclusion(t *testing.T) {
 // 网关会直接拒绝）、子代理的工具列表里没有 ask_user/spawn_agent、改动不归因给父会话。
 func TestSubagentRunsIsolatedFromParentContext(t *testing.T) {
 	dir := newTestRepo(t)
-	env := newSubagentTestEnv(t, dir, ModeAcceptEdits,
-		fakeChatResp(t, "", fakeCall{id: "c1", name: toolWriteFile, args: `{"path":"sub.txt","content":"hi"}`}),
+	env := newSubagentTestEnv(t, dir, permission.ModeAcceptEdits,
+		fakeChatResp(t, "", fakeCall{id: "c1", name: tool.ToolWriteFile, args: `{"path":"sub.txt","content":"hi"}`}),
 		fakeChatResp(t, "已完成：写了 sub.txt"),
 	)
 
-	run := env.app.runs.begin(env.parent.ID, "")
+	run := env.app.runs.Begin(env.parent.ID, "")
 	before, _ := env.app.sessionStore.GetSession(env.parent.ID)
 	res, err := env.app.runSubagent(run, env.parent, dir, &env.model, "写一个 sub.txt", 0)
 	if err != nil {
@@ -492,7 +491,7 @@ func TestSubagentRunsIsolatedFromParentContext(t *testing.T) {
 	if len(child.Messages) < 2 {
 		t.Fatalf("子代理会话不该是空的，实际 %d 条", len(child.Messages))
 	}
-	if child.Messages[0].Role != RoleUser || child.Messages[0].Content != "写一个 sub.txt" {
+	if child.Messages[0].Role != store.RoleUser || child.Messages[0].Content != "写一个 sub.txt" {
 		t.Fatalf("第一条消息应是任务原文，实际 %+v", child.Messages[0])
 	}
 	if child.Subagent == nil || child.Subagent.Status != subagentStatusCompleted {
@@ -518,7 +517,7 @@ func TestSubagentRunsIsolatedFromParentContext(t *testing.T) {
 	}
 	hasUser := false
 	for _, m := range req.Messages {
-		if m.Role == RoleUser {
+		if m.Role == store.RoleUser {
 			hasUser = true
 		}
 	}
@@ -538,7 +537,7 @@ func TestSubagentRunsIsolatedFromParentContext(t *testing.T) {
 	if got := env.app.diffService.Touched(env.parent.ID); len(got) != 0 {
 		t.Errorf("父会话累计归因里不该有子代理的文件，实际 %v", got)
 	}
-	excluded := run.takeExcludedPaths(env.parent.ID)
+	excluded := run.TakeExcludedPaths(env.parent.ID)
 	if len(excluded) != 1 || excluded[0] != "sub.txt" {
 		t.Fatalf("子代理改过、父会话没碰过的文件应登记为待剔除，实际 %v", excluded)
 	}
@@ -553,62 +552,62 @@ func TestSubagentRunsIsolatedFromParentContext(t *testing.T) {
 // 子代理改过、但父会话在派生之前就碰过的文件不算"待剔除"——否则父会话自己的改动
 // 会从 diff 面板里消失。
 func TestDelegatedPathsKeepsParentTouched(t *testing.T) {
-	got := delegatedPaths([]string{"a.go"}, []string{"a.go", "b.go", ""})
+	got := agent.DelegatedPaths([]string{"a.go"}, []string{"a.go", "b.go", ""})
 	if len(got) != 1 || got[0] != "b.go" {
 		t.Fatalf("只该剔除父会话没碰过的，实际 %v", got)
 	}
-	if delegatedPaths(nil, nil) != nil {
+	if agent.DelegatedPaths(nil, nil) != nil {
 		t.Fatal("没有子代理改动时应返回 nil")
 	}
-	if got := delegatedPaths([]string{"a.go"}, []string{"a.go"}); len(got) != 0 {
+	if got := agent.DelegatedPaths([]string{"a.go"}, []string{"a.go"}); len(got) != 0 {
 		t.Fatalf("全都被父会话碰过时应为空，实际 %v", got)
 	}
 }
 
-// 待剔除队列按会话分组：父会话与子代理共用同一个 runControl（取消要级联），
+// 待剔除队列按会话分组：父会话与子代理共用同一个 agent.RunControl（取消要级联），
 // 若做成一个共享队列，子代理的循环会先把父会话的那份取走，而这种丢失是静默的。
 func TestExcludedPathsQueueIsPerSession(t *testing.T) {
-	run := &runControl{soft: make(chan struct{})}
-	run.noteExcludedPaths("parent", []string{"x.go"})
-	run.noteExcludedPaths("child", []string{"y.go"})
+	run := (&agent.RunRegistry{}).Begin("", "")
+	run.NoteExcludedPaths("parent", []string{"x.go"})
+	run.NoteExcludedPaths("child", []string{"y.go"})
 
-	if got := run.takeExcludedPaths("child"); len(got) != 1 || got[0] != "y.go" {
+	if got := run.TakeExcludedPaths("child"); len(got) != 1 || got[0] != "y.go" {
 		t.Fatalf("子代理的队列不该看到父会话的路径，实际 %v", got)
 	}
-	if got := run.takeExcludedPaths("parent"); len(got) != 1 || got[0] != "x.go" {
+	if got := run.TakeExcludedPaths("parent"); len(got) != 1 || got[0] != "x.go" {
 		t.Fatalf("父会话的路径应还在，实际 %v", got)
 	}
 	// 取走即清空，避免每次工具调用都重复剔除一遍
-	if got := run.takeExcludedPaths("parent"); got != nil {
+	if got := run.TakeExcludedPaths("parent"); got != nil {
 		t.Fatalf("取出后应清空，实际 %v", got)
 	}
 	// 空入参不建队列
-	run.noteExcludedPaths("parent", nil)
-	if got := run.takeExcludedPaths("parent"); got != nil {
+	run.NoteExcludedPaths("parent", nil)
+	if got := run.TakeExcludedPaths("parent"); got != nil {
 		t.Fatalf("空入参不该留下记录，实际 %v", got)
 	}
 
 	// nil 接收者安全：测试里会直接构造零值 App，那条路径不能 panic
-	var nilRun *runControl
-	nilRun.noteExcludedPaths("s", []string{"z.go"})
-	if got := nilRun.takeExcludedPaths("s"); got != nil {
+	var nilRun *agent.RunControl
+	nilRun.NoteExcludedPaths("s", []string{"z.go"})
+	if got := nilRun.TakeExcludedPaths("s"); got != nil {
 		t.Fatalf("nil 接收者应返回 nil，实际 %v", got)
 	}
 }
 
 // 派生的总名额挂在**运行**上：计划执行按步骤重建工具视图，挂在闭包里会被逐步重置。
 func TestSubagentTotalLimitPerRun(t *testing.T) {
-	run := &runControl{soft: make(chan struct{})}
+	run := (&agent.RunRegistry{}).Begin("", "")
 	for i := 0; i < subagentMaxTotal; i++ {
-		if !run.claimSubagent(subagentMaxTotal) {
+		if !run.ClaimSubagent(subagentMaxTotal) {
 			t.Fatalf("第 %d 个名额不该被拒", i+1)
 		}
 	}
-	if run.claimSubagent(subagentMaxTotal) {
+	if run.ClaimSubagent(subagentMaxTotal) {
 		t.Fatal("超过上限后应拒绝派生")
 	}
-	var nilRun *runControl
-	if nilRun.claimSubagent(subagentMaxTotal) {
+	var nilRun *agent.RunControl
+	if nilRun.ClaimSubagent(subagentMaxTotal) {
 		t.Fatal("nil 运行不该给出名额")
 	}
 }
@@ -619,12 +618,12 @@ func TestSubagentTurnLimit(t *testing.T) {
 	scripts := make([]string, 0, 40)
 	for i := 0; i < 40; i++ {
 		scripts = append(scripts, fakeChatResp(t, "", fakeCall{
-			id: fmt.Sprintf("c%d", i), name: toolListDir, args: `{}`,
+			id: fmt.Sprintf("c%d", i), name: tool.ToolListDir, args: `{}`,
 		}))
 	}
 
-	env := newSubagentTestEnv(t, dir, ModeAcceptEdits, scripts...)
-	run := env.app.runs.begin(env.parent.ID, "")
+	env := newSubagentTestEnv(t, dir, permission.ModeAcceptEdits, scripts...)
+	run := env.app.runs.Begin(env.parent.ID, "")
 	if _, err := env.app.runSubagent(run, env.parent, dir, &env.model, "一直列目录", 3); err != nil {
 		t.Fatalf("派生子代理失败: %v", err)
 	}
@@ -633,25 +632,25 @@ func TestSubagentTurnLimit(t *testing.T) {
 	}
 
 	// 超过硬上限的取值一律夹到默认轮次，而不是照单全收
-	env2 := newSubagentTestEnv(t, dir, ModeAcceptEdits, scripts...)
-	run2 := env2.app.runs.begin(env2.parent.ID, "")
+	env2 := newSubagentTestEnv(t, dir, permission.ModeAcceptEdits, scripts...)
+	run2 := env2.app.runs.Begin(env2.parent.ID, "")
 	if _, err := env2.app.runSubagent(run2, env2.parent, dir, &env2.model, "一直列目录", 999); err != nil {
 		t.Fatalf("派生子代理失败: %v", err)
 	}
-	if got := env2.llm.count(); got != subagentDefaultTurns {
-		t.Fatalf("超上限应夹到 %d 轮，实际 %d", subagentDefaultTurns, got)
+	if got := env2.llm.count(); got != agent.SubagentDefaultTurns {
+		t.Fatalf("超上限应夹到 %d 轮，实际 %d", agent.SubagentDefaultTurns, got)
 	}
 }
 
 // 取消要级联：父运行硬取消后，子代理不能自己跑下去（它的 ctx 就是父运行的）。
 func TestSubagentCancelCascade(t *testing.T) {
 	dir := newTestRepo(t)
-	env := newSubagentTestEnv(t, dir, ModeAcceptEdits, fakeChatResp(t, "不该跑到的回复"))
+	env := newSubagentTestEnv(t, dir, permission.ModeAcceptEdits, fakeChatResp(t, "不该跑到的回复"))
 	env.llm.setBlock(true) // 请求一直挂着，只有取消能让它结束
 
-	run := env.app.runs.begin(env.parent.ID, "")
+	run := env.app.runs.Begin(env.parent.ID, "")
 	type outcome struct {
-		res *SubagentResult
+		res *agent.SubagentResult
 		err error
 	}
 	done := make(chan outcome, 1)
@@ -664,7 +663,7 @@ func TestSubagentCancelCascade(t *testing.T) {
 	if !waitUntil(t, func() bool { return env.llm.count() > 0 }, 2*time.Second) {
 		t.Fatal("子代理没有发出请求，测试前提不成立")
 	}
-	run.markHard()
+	env.app.runs.StopSession(env.parent.ID, true)
 
 	select {
 	case got := <-done:
@@ -686,13 +685,13 @@ func TestSubagentCancelCascade(t *testing.T) {
 func TestSubagentDeclinedSurfacesAndAudits(t *testing.T) {
 	dir := newTestRepo(t)
 	// manual 模式下项目内的写操作也要确认；子代理无法代为确认
-	env := newSubagentTestEnv(t, dir, ModeManual,
-		fakeChatResp(t, "", fakeCall{id: "c1", name: toolWriteFile, args: `{"path":"x.txt","content":"hi"}`}),
+	env := newSubagentTestEnv(t, dir, permission.ModeManual,
+		fakeChatResp(t, "", fakeCall{id: "c1", name: tool.ToolWriteFile, args: `{"path":"x.txt","content":"hi"}`}),
 		fakeChatResp(t, "没写成功：需要用户授权"),
 	)
 
 	start := time.Now()
-	res, err := env.app.runSubagent(env.app.runs.begin(env.parent.ID, ""), env.parent, dir, &env.model, "写一个 x.txt", 0)
+	res, err := env.app.runSubagent(env.app.runs.Begin(env.parent.ID, ""), env.parent, dir, &env.model, "写一个 x.txt", 0)
 	if err != nil {
 		t.Fatalf("派生子代理失败: %v", err)
 	}
@@ -702,7 +701,7 @@ func TestSubagentDeclinedSurfacesAndAudits(t *testing.T) {
 	if len(res.Declined) == 0 {
 		t.Fatal("需要授权的操作应记进 Declined（用户要能看到它想做什么）")
 	}
-	if !strings.Contains(res.Declined[0], toolWriteFile) {
+	if !strings.Contains(res.Declined[0], tool.ToolWriteFile) {
 		t.Fatalf("Declined 里应指明是哪个工具，实际 %v", res.Declined)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "x.txt")); err == nil {
@@ -713,25 +712,25 @@ func TestSubagentDeclinedSurfacesAndAudits(t *testing.T) {
 	entries := env.app.permissionAudit.List(res.RunID)
 	found := false
 	for _, e := range entries {
-		if e.Stage == StageSubagentDeclined {
+		if e.Stage == permission.StageSubagentDeclined {
 			found = true
 		}
 	}
 	if !found {
-		t.Fatalf("应有一条 %s 的审计，实际 %+v", StageSubagentDeclined, entries)
+		t.Fatalf("应有一条 %s 的审计，实际 %+v", permission.StageSubagentDeclined, entries)
 	}
 }
 
 // 列表与详情接口：跑完的从会话文件里读、正在跑的从内存注册表读，两边合起来。
 func TestListSubagentsAndMessages(t *testing.T) {
 	dir := newTestRepo(t)
-	env := newSubagentTestEnv(t, dir, ModeAcceptEdits, fakeChatResp(t, "查完了，一切正常"))
+	env := newSubagentTestEnv(t, dir, permission.ModeAcceptEdits, fakeChatResp(t, "查完了，一切正常"))
 
 	if list, err := env.app.ListSubagents(env.parent.ID); err != nil || len(list) != 0 {
 		t.Fatalf("还没派生过时应为空，实际 %v (err=%v)", list, err)
 	}
 
-	res, err := env.app.runSubagent(env.app.runs.begin(env.parent.ID, ""), env.parent, dir, &env.model, "查一下构建", 0)
+	res, err := env.app.runSubagent(env.app.runs.Begin(env.parent.ID, ""), env.parent, dir, &env.model, "查一下构建", 0)
 	if err != nil {
 		t.Fatalf("派生子代理失败: %v", err)
 	}
@@ -755,7 +754,7 @@ func TestListSubagentsAndMessages(t *testing.T) {
 	if err != nil || len(msgs) == 0 {
 		t.Fatalf("应能取到子代理的消息流，实际 %v (err=%v)", msgs, err)
 	}
-	if msgs[0].Role != RoleUser {
+	if msgs[0].Role != store.RoleUser {
 		t.Fatalf("第一条应是任务，实际 %s", msgs[0].Role)
 	}
 	if _, err := env.app.GetSubagentMessages(env.parent.ID); err == nil {
@@ -764,14 +763,14 @@ func TestListSubagentsAndMessages(t *testing.T) {
 
 	// 应用在它跑动中被关掉：会话在、概况没写完 → 报"已中断"，
 	// 而不是继续显示"运行中"（那会让人一直等一个不会回来的东西）
-	orphan, err := env.app.sessionStore.CreateSession(SessionConfig{
+	orphan, err := env.app.sessionStore.CreateSession(store.SessionConfig{
 		Title: "子代理：半途", Project: dir, ParentID: env.parent.ID,
 	})
 	if err != nil {
 		t.Fatalf("创建孤儿子代理会话失败: %v", err)
 	}
 	list2, _ := env.app.ListSubagents(env.parent.ID)
-	var orphanInfo *SubagentInfo
+	var orphanInfo *store.SubagentInfo
 	for i := range list2 {
 		if list2[i].RunID == orphan.ID {
 			orphanInfo = &list2[i]
@@ -796,42 +795,42 @@ func TestListSubagentsAndMessages(t *testing.T) {
 // 运行中注册表：进度更新、按父会话过滤、交出去的必须是副本。
 func TestSubagentTrackerProgressAndCopies(t *testing.T) {
 	// nil 接收者安全（零值 App 的路径）
-	var nilTracker *subagentTracker
-	nilTracker.begin(&SubagentInfo{RunID: "r1"})
-	nilTracker.finish("r1")
-	if got := nilTracker.list("p"); got != nil {
+	var nilTracker *agent.SubagentTracker
+	nilTracker.Begin(&store.SubagentInfo{RunID: "r1"})
+	nilTracker.Finish("r1")
+	if got := nilTracker.List("p"); got != nil {
 		t.Fatalf("nil 注册表应返回空，实际 %v", got)
 	}
-	if got := nilTracker.get("r1"); got != nil {
+	if got := nilTracker.Get("r1"); got != nil {
 		t.Fatalf("nil 注册表应返回 nil，实际 %v", got)
 	}
 
-	tr := newSubagentTracker()
-	tr.begin(&SubagentInfo{RunID: "r1", ParentID: "p", Status: subagentStatusRunning})
-	tr.toolStart("r1", toolReadFile)
-	tr.toolStart("r1", toolGrep)
+	tr := agent.NewSubagentTracker()
+	tr.Begin(&store.SubagentInfo{RunID: "r1", ParentID: "p", Status: subagentStatusRunning})
+	tr.ToolStart("r1", tool.ToolReadFile)
+	tr.ToolStart("r1", tool.ToolGrep)
 
-	snap := tr.get("r1")
-	if snap.Step != 2 || snap.CurrentTool != toolGrep {
+	snap := tr.Get("r1")
+	if snap.Step != 2 || snap.CurrentTool != tool.ToolGrep {
 		t.Fatalf("进度应记到第 2 步且当前工具为 grep，实际 %+v", snap)
 	}
 	// 交出去的必须是副本：这份数据边跑边变，交指针会让"当时推给前端的那一份"事后跟着变
 	snap.Step = 99
-	if got := tr.get("r1"); got.Step != 2 {
+	if got := tr.Get("r1"); got.Step != 2 {
 		t.Fatalf("取到的应是副本，实际 %+v", got)
 	}
 
 	// 别的会话的在跑任务不该混进来
-	tr.begin(&SubagentInfo{RunID: "r2", ParentID: "other"})
-	if got := tr.list("p"); len(got) != 1 {
+	tr.Begin(&store.SubagentInfo{RunID: "r2", ParentID: "other"})
+	if got := tr.List("p"); len(got) != 1 {
 		t.Fatalf("只应列出本会话的，实际 %v", got)
 	}
-	tr.toolEnd("r1")
-	if got := tr.get("r1"); got.CurrentTool != "" {
+	tr.ToolEnd("r1")
+	if got := tr.Get("r1"); got.CurrentTool != "" {
 		t.Fatalf("工具跑完应清掉当前工具，实际 %q", got.CurrentTool)
 	}
-	tr.finish("r1")
-	if got := tr.get("r1"); got != nil {
+	tr.Finish("r1")
+	if got := tr.Get("r1"); got != nil {
 		t.Fatalf("跑完应摘掉，实际 %+v", got)
 	}
 }

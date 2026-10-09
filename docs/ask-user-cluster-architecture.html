@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>集群部署下的 ask_user 答复回路</title>
+<style>
+:root {
+  color-scheme: light;
+  --surface: #F7F7F8;
+  --surface-muted: #EFEFF2;
+  --text: #171717;
+  --text-muted: #52525B;
+  --border: rgba(23, 23, 23, 0.12);
+  --brand: #0FDC78;
+  --brand-text: #004D26;
+  --radius: 8px;
+  --radius-card: 12px;
+  --spacer-12: 12px;
+  --spacer-16: 16px;
+  --spacer-20: 20px;
+  --font-sans: "SF Pro Text", "PingFang SC", "Microsoft YaHei", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --text-caption: 12px/18px;
+  --text-body: 14px/20px;
+  --text-title: 16px/24px;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --surface: #171717;
+    --surface-muted: #262626;
+    --text: #E5E5E5;
+    --text-muted: #A1A1AA;
+    --border: rgba(229, 229, 229, 0.12);
+    --brand: #32F08C;
+    --brand-text: #E5FFF2;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  padding: 40px 16px;
+  background: var(--surface-muted);
+  color: var(--text);
+  font: var(--weight-regular) var(--text-body) var(--font-sans);
+  display: flex;
+  justify-content: center;
+}
+.card {
+  width: 100%;
+  max-width: 860px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  padding: var(--spacer-20);
+}
+h1 { margin: 0; font: var(--weight-medium) var(--text-title) var(--font-sans); }
+.svgWrap { margin-top: var(--spacer-16); }
+svg { width: 100%; height: auto; display: block; }
+
+.nt { font: var(--weight-medium) var(--text-body) var(--font-sans); fill: var(--text); }
+.nc { font: var(--weight-regular) var(--text-caption) var(--font-sans); fill: var(--text-muted); }
+.bl { font: var(--weight-regular) var(--text-caption) var(--font-sans); fill: var(--text-muted); }
+.capLabel { font: var(--weight-medium) var(--text-caption) var(--font-sans); fill: var(--text); }
+.edge { stroke: color-mix(in srgb, var(--text-muted) 60%, transparent); stroke-width: 1.5; fill: none; stroke-linecap: round; stroke-linejoin: round; }
+.edgeBrand { stroke: var(--brand); stroke-width: 1.7; stroke-dasharray: 8 7; fill: none; stroke-linecap: round; stroke-linejoin: round; }
+.mkN { fill: color-mix(in srgb, var(--text-muted) 72%, transparent); }
+.mkB { fill: var(--brand); }
+.nodeRect { fill: var(--surface); stroke: color-mix(in srgb, var(--border) 92%, transparent); }
+.nodeRectBrand { fill: color-mix(in srgb, var(--brand) 6%, var(--surface)); stroke: var(--brand); }
+.boundaryRect { fill: color-mix(in srgb, var(--surface) 84%, transparent); stroke: color-mix(in srgb, var(--border) 92%, transparent); stroke-dasharray: 6 5; }
+.capBg { fill: var(--surface); stroke: color-mix(in srgb, var(--border) 76%, transparent); }
+.brandText { fill: var(--brand-text); }
+.brandCap { fill: var(--brand-text); opacity: 0.78; }
+
+.legendRow {
+  margin-top: var(--spacer-12);
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--spacer-16);
+  color: var(--text-muted);
+  font: var(--weight-regular) var(--text-caption) var(--font-sans);
+}
+.legendItem { display: inline-flex; align-items: center; gap: 8px; }
+.legendSolid { width: 26px; height: 0; border-top: 2px solid color-mix(in srgb, var(--text-muted) 60%, transparent); }
+.legendDash { width: 26px; height: 0; border-top: 2px dashed var(--brand); }
+
+.notes { margin-top: var(--spacer-16); padding-top: var(--spacer-16); border-top: 1px solid var(--border); }
+.notes h2 { margin: 0 0 8px; font: var(--weight-medium) var(--text-body) var(--font-sans); }
+.notes table { border-collapse: collapse; width: 100%; font-size: 13px; }
+.notes th, .notes td { border: 1px solid var(--border); padding: 6px 10px; text-align: left; }
+.notes th { color: var(--text-muted); font-weight: 500; }
+.notes code { font-family: Consolas, "JetBrains Mono", monospace; font-size: 12px; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>集群部署下的 ask_user：pending 外置 + Pub/Sub 路由</h1>
+
+  <div class="svgWrap">
+    <svg viewBox="0 0 720 460" role="img" aria-label="前端经网关提交答复，可能在实例 B 落地，经 Redis 发布后唤醒实例 A 上阻塞的 Wait">
+      <defs>
+        <marker id="mk-n" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="8" markerHeight="8" markerUnits="userSpaceOnUse" orient="auto">
+          <path class="mkN" d="M1 1 L7 4 L1 7 Z" />
+        </marker>
+        <marker id="mk-b" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="8" markerHeight="8" markerUnits="userSpaceOnUse" orient="auto">
+          <path class="mkB" d="M1 1 L7 4 L1 7 Z" />
+        </marker>
+      </defs>
+
+      <!-- 前端（外部） -->
+      <rect class="nodeRect" x="40" y="64" width="140" height="72" rx="8" />
+      <text class="nt" x="110" y="92" text-anchor="middle">前端 Web</text>
+      <text class="nc" x="110" y="116" text-anchor="middle">弹窗 + SSE</text>
+
+      <!-- 网关 -->
+      <rect class="nodeRect" x="260" y="64" width="160" height="72" rx="8" />
+      <text class="nt" x="340" y="92" text-anchor="middle">网关 / LB</text>
+      <text class="nc" x="340" y="116" text-anchor="middle">按 sessionId 路由</text>
+
+      <!-- 集群边界 -->
+      <rect class="boundaryRect" x="60" y="190" width="600" height="230" rx="12" />
+      <text class="bl" x="84" y="216">后端集群</text>
+
+      <!-- 实例 A（焦点：工具循环所在实例） -->
+      <rect class="nodeRectBrand" x="90" y="250" width="150" height="100" rx="8" />
+      <text class="nt brandText" x="165" y="282" text-anchor="middle">实例 A</text>
+      <text class="nc brandCap" x="165" y="308" text-anchor="middle">运行工具循环</text>
+      <text class="nc brandCap" x="165" y="330" text-anchor="middle">阻塞 Wait 等答复</text>
+
+      <!-- 实例 B -->
+      <rect class="nodeRect" x="280" y="250" width="150" height="100" rx="8" />
+      <text class="nt" x="355" y="282" text-anchor="middle">实例 B</text>
+      <text class="nc" x="355" y="308" text-anchor="middle">收到 Resolve 答复</text>
+
+      <!-- Redis -->
+      <rect class="nodeRect" x="490" y="250" width="140" height="100" rx="8" />
+      <text class="nt" x="560" y="282" text-anchor="middle">Redis</text>
+      <text class="nc" x="560" y="308" text-anchor="middle">pending + TTL</text>
+      <text class="nc" x="560" y="330" text-anchor="middle">pub/sub</text>
+
+      <!-- 1 前端 -> 网关 -->
+      <path class="edge" d="M180 100 H258" marker-end="url(#mk-n)" />
+      <rect class="capBg" x="184" y="68" width="72" height="22" rx="11" />
+      <text class="capLabel" x="220" y="83" text-anchor="middle">提交答复</text>
+
+      <!-- 2 网关 -> 实例 B -->
+      <path class="edge" d="M340 136 V248" marker-end="url(#mk-n)" />
+      <rect class="capBg" x="352" y="150" width="76" height="22" rx="11" />
+      <text class="capLabel" x="390" y="165" text-anchor="middle">任意实例</text>
+
+      <!-- 3 B -> Redis -->
+      <path class="edgeBrand" d="M430 300 H488" marker-end="url(#mk-b)" />
+
+      <!-- 4 Redis -> A（唤醒 Wait） -->
+      <path class="edgeBrand" d="M560 250 V228 H165 V248" marker-end="url(#mk-b)" />
+      <rect class="capBg" x="340" y="198" width="80" height="22" rx="11" />
+      <text class="capLabel" x="380" y="213" text-anchor="middle">唤醒 Wait</text>
+
+      <!-- 5 A -> Redis（登记 pending） -->
+      <path class="edge" d="M200 350 V372 H520 V351" marker-end="url(#mk-n)" />
+      <rect class="capBg" x="315" y="382" width="98" height="22" rx="11" />
+      <text class="capLabel" x="364" y="397" text-anchor="middle">SET pending</text>
+    </svg>
+  </div>
+
+  <div class="legendRow">
+    <span class="legendItem"><span class="legendSolid"></span>常规调用</span>
+    <span class="legendItem"><span class="legendDash"></span>答复回传主路径</span>
+  </div>
+
+  <div class="notes">
+    <h2>内存态 → Redis 改造映射</h2>
+    <table>
+      <tr><th>现在（进程内 askBroker）</th><th>集群版（Redis）</th></tr>
+      <tr><td><code>pending</code> map</td><td><code>SET ask:pending:{id} &lt;req&gt; EX 600</code>（TTL=超时时间）</td></tr>
+      <tr><td>channel 投递</td><td><code>PUBLISH ask:answer:{id} &lt;answer&gt;</code></td></tr>
+      <tr><td><code>Wait</code> 的 select</td><td>本地 timer/ctx 不变，数据源换成订阅 <code>ask:answer:{id}</code></td></tr>
+      <tr><td><code>Resolve</code> 先 delete 再投</td><td><code>GETDEL</code> 原子取走 → 幂等，迟到答复自动失效</td></tr>
+      <tr><td><code>Pending(sessionID)</code> 遍历</td><td><code>GET ask:pending:{sessionId}</code></td></tr>
+      <tr><td><code>CancelSession</code></td><td><code>PUBLISH ask:cancel:{sessionId}</code>，等待方走 ctx 分支</td></tr>
+    </table>
+  </div>
+</div>
+</body>
+</html>

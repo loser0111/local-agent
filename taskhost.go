@@ -15,7 +15,7 @@ import (
 //
 // 本文件是 plugin.Host 的唯一实现，也是插件与主程序之间唯一允许的耦合点。
 // 这里只做「翻译」：把插件的能力请求翻译成主程序既有的调用
-// （wails runtime、agentRun/runToolLoop、runRegistry、EventsEmit），
+// （wails runtime、agentRun/runToolLoop、agent.RunRegistry、EventsEmit），
 // 不承载任何业务逻辑 —— 业务逻辑都在 plugin/ 子包内。
 
 // appVersion 是主程序版本号，供插件记录与兼容性判断。
@@ -223,7 +223,7 @@ func (h *appHost) RunAgent(ctx context.Context, req plugin.RunRequest) (plugin.R
 	return plugin.RunResult{}, plugin.ErrNotImplemented
 }
 
-// CancelRun 按 runID 取消一次运行（第 6 步接 runRegistry / runControl）。
+// CancelRun 按 runID 取消一次运行（第 6 步接 agent.RunRegistry / agent.RunControl）。
 func (h *appHost) CancelRun(runID string) error {
 	return plugin.ErrNotImplemented
 }

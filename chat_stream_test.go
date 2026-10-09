@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"wails-tmp/internal/llm"
 )
 
 // 标准 SSE：文本分片 + 工具调用分片 + [DONE]
@@ -31,7 +33,7 @@ func TestCallLLMStreamBasic(t *testing.T) {
 	defer srv.Close()
 
 	var got strings.Builder
-	resp, err := callLLMStream(context.Background(), srv.URL, "tok", &LLMReq{Model: "m"},
+	resp, err := llm.CallLLMStream(context.Background(), srv.URL, "tok", &llm.LLMReq{Model: "m"},
 		func(c string) { got.WriteString(c) })
 	if err != nil {
 		t.Fatal(err)
@@ -61,7 +63,7 @@ func TestCallLLMStreamToolCalls(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	resp, err := callLLMStream(context.Background(), srv.URL, "", &LLMReq{}, nil)
+	resp, err := llm.CallLLMStream(context.Background(), srv.URL, "", &llm.LLMReq{}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +78,7 @@ func TestCallLLMStreamToolCalls(t *testing.T) {
 	if tc.Function.Arguments != `{"cmd": "ls"}` {
 		t.Fatalf("arguments 分片聚合错误: %q", tc.Function.Arguments)
 	}
-	if tc.Type != ToolTypeFunction {
+	if tc.Type != llm.ToolTypeFunction {
 		t.Fatalf("type 默认值错误: %q", tc.Type)
 	}
 }
@@ -89,7 +91,7 @@ func TestCallLLMStreamBadPayload(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := callLLMStream(context.Background(), srv.URL, "", &LLMReq{}, nil)
+	_, err := llm.CallLLMStream(context.Background(), srv.URL, "", &llm.LLMReq{}, nil)
 	if err == nil || !strings.Contains(err.Error(), "流式响应格式错误") {
 		t.Fatalf("应报格式错误，得到: %v", err)
 	}
@@ -103,7 +105,7 @@ func TestCallLLMStreamErrorStatus(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := callLLMStream(context.Background(), srv.URL, "bad", &LLMReq{}, nil)
+	_, err := llm.CallLLMStream(context.Background(), srv.URL, "bad", &llm.LLMReq{}, nil)
 	if err == nil || !strings.Contains(err.Error(), "401") {
 		t.Fatalf("应报 401，得到: %v", err)
 	}

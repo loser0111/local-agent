@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"wails-tmp/internal/store"
 	"wails-tmp/memory"
 )
 
@@ -80,7 +81,7 @@ func (a *App) handleMemoryCommand(sessionID, cmd, rest string) (*ChatResult, err
 	return a.replyMemoryCommand(sessionID, reply)
 }
 
-func (a *App) forgetMemory(session *Session, target string) string {
+func (a *App) forgetMemory(session *store.Session, target string) string {
 	if strings.HasPrefix(target, "mem_") {
 		if err := a.memory.DeleteMemory(target); err != nil {
 			return "未能删除：" + err.Error()
@@ -109,7 +110,7 @@ func (a *App) forgetMemory(session *Session, target string) string {
 	return "已删除记忆 " + id
 }
 
-func (a *App) listMemoriesForSession(session *Session) string {
+func (a *App) listMemoriesForSession(session *store.Session) string {
 	slug := memoryProjectSlug(session.Project)
 	user, _ := a.memory.ListMemories(memory.ScopeUser, "")
 	proj, _ := a.memory.ListMemories(memory.ScopeProject, slug)
@@ -138,8 +139,8 @@ func writeMemoryList(sb *strings.Builder, heading string, entries []*memory.Memo
 
 func (a *App) replyMemoryCommand(sessionID, reply string) (*ChatResult, error) {
 	result := &ChatResult{Reply: reply}
-	if saved, err := a.sessionStore.AppendMessage(sessionID, Message{Role: RoleAssistant, Content: reply}); err == nil {
-		result.Messages = []Message{*saved}
+	if saved, err := a.sessionStore.AppendMessage(sessionID, store.Message{Role: store.RoleAssistant, Content: reply}); err == nil {
+		result.Messages = []store.Message{*saved}
 	}
 	return result, nil
 }

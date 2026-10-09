@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"wails-tmp/internal/task"
 	"wails-tmp/plugin"
 )
 
@@ -20,7 +21,7 @@ import (
 // 会优雅降级（通知注册失败只记录、Emit 静默返回），插件仍应正常加载 ——
 // 这本身就是「插件异常不影响主程序、主程序缺环境也不影响插件加载」的验证。
 //
-// 本用例会操作包级 desktopPluginState（插件是进程级单例），因此
+// 本用例会操作进程级插件单例（internal/task 里的 state），因此
 // 结束前必须复位，避免影响同包其他用例。
 
 func TestDesktopPluginEndToEndWithRealBootstrap(t *testing.T) {
@@ -28,14 +29,10 @@ func TestDesktopPluginEndToEndWithRealBootstrap(t *testing.T) {
 	app := &App{baseDir: dir}
 
 	// 复位单例，保证本用例从干净状态开始。
-	desktopPluginState.mu.Lock()
-	desktopPluginState.p = nil
-	desktopPluginState.mu.Unlock()
+	task.Reset()
 	t.Cleanup(func() {
 		stopDesktopPlugin()
-		desktopPluginState.mu.Lock()
-		desktopPluginState.p = nil
-		desktopPluginState.mu.Unlock()
+		task.Reset()
 	})
 
 	// 1) 真实装配。
@@ -181,9 +178,7 @@ func TestDesktopPluginEndToEndWithRealBootstrap(t *testing.T) {
 
 	// 7) 停止后再调用导出方法：应返回可读错误而不是 panic。
 	stopDesktopPlugin()
-	desktopPluginState.mu.Lock()
-	desktopPluginState.p = nil
-	desktopPluginState.mu.Unlock()
+	task.Reset()
 
 	if _, err := app.ListTasks(); err == nil {
 		t.Error("插件不可用时 ListTasks 应返回错误，供前端提示")
@@ -197,14 +192,10 @@ func TestDesktopPluginEndToEndWithRealBootstrap(t *testing.T) {
 func TestDesktopPluginRejectsInvalidTaskThroughExport(t *testing.T) {
 	dir := t.TempDir()
 	app := &App{baseDir: dir}
-	desktopPluginState.mu.Lock()
-	desktopPluginState.p = nil
-	desktopPluginState.mu.Unlock()
+	task.Reset()
 	t.Cleanup(func() {
 		stopDesktopPlugin()
-		desktopPluginState.mu.Lock()
-		desktopPluginState.p = nil
-		desktopPluginState.mu.Unlock()
+		task.Reset()
 	})
 
 	startDesktopPlugin(app)

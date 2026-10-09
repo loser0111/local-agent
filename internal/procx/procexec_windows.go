@@ -1,6 +1,7 @@
 //go:build windows
 
 package procx
+
 import (
 	"os/exec"
 	"syscall"

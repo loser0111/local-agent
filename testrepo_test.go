@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
@@ -33,4 +34,17 @@ func newTestRepo(t *testing.T) string {
 	run("add", "-A")
 	run("commit", "-qm", "init")
 	return dir
+}
+
+// cpReadFile 读工作区文件内容。
+//
+// 原先定义在 checkpoint_test.go 里，但它并不是快照包私有的东西——它被根包的
+// undo_test.go 大量使用（回退前后的内容比对）。快照测试随包迁走后，这里补一份副本。
+func cpReadFile(t *testing.T, dir, rel string) string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(dir, filepath.FromSlash(rel)))
+	if err != nil {
+		t.Fatalf("读取 %s 失败: %v", rel, err)
+	}
+	return string(data)
 }

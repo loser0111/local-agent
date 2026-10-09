@@ -7,19 +7,21 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"wails-tmp/internal/tool"
 )
 
 // newTestToolManager 构造基于临时目录的 ToolManager（内置 exec_shell）
 func newTestToolManager(t *testing.T) (*ToolManager, string) {
 	t.Helper()
 	dir := t.TempDir()
-	store := NewToolStore(filepath.Join(dir, "tools.json"))
+	store := tool.NewToolStore(filepath.Join(dir, "tools.json"))
 	return NewToolManager(store, nil), dir
 }
 
 // 模板渲染
 func TestRenderTemplate(t *testing.T) {
-	got := renderTemplate("echo {{input}} --count {{n}}", map[string]interface{}{
+	got := tool.RenderTemplate("echo {{input}} --count {{n}}", map[string]interface{}{
 		"input": "hello",
 		"n":     3,
 	})
@@ -32,23 +34,23 @@ func TestRenderTemplate(t *testing.T) {
 func TestDynamicCLIToolEndToEnd(t *testing.T) {
 	tm, _ := newTestToolManager(t)
 
-	src := &ToolSource{
+	src := &tool.ToolSource{
 		ID:          "tool_test_echo",
 		Name:        "say_hello",
 		Label:       "打招呼",
 		Description: "输出打招呼内容",
-		Kind:        SourceCLI,
+		Kind:        tool.SourceCLI,
 		Icon:        "terminal",
 		Enabled:     true,
-		Parameters:  []ToolParamConfig{{Name: "input", Description: "内容", Required: true}},
+		Parameters:  []tool.ToolParamConfig{{Name: "input", Description: "内容", Required: true}},
 		// Windows PowerShell 的 echo 是 Write-Output 别名，两平台都能执行 echo
-		CLI: &CLIConfig{Command: "echo {{input}}", Timeout: 10},
+		CLI: &tool.CLIConfig{Command: "echo {{input}}", Timeout: 10},
 	}
 	if err := tm.Store().Save(src); err != nil {
 		t.Fatalf("保存工具失败: %v", err)
 	}
 
-	view := tm.BuildView(context.Background(), BuildOptions{Enforcer: AllowAllEnforcer{}})
+	view := tm.BuildView(context.Background(), BuildOptions{Enforcer: tool.AllowAllEnforcer{}})
 
 	// list 应包含 exec_shell 和 say_hello
 	out, err := view.ExecuteTool("tool_router", map[string]interface{}{
@@ -102,14 +104,14 @@ func TestDynamicCLIToolEndToEnd(t *testing.T) {
 // 停用工具不参与装配
 func TestDisabledToolExcluded(t *testing.T) {
 	tm, _ := newTestToolManager(t)
-	src := &ToolSource{
-		ID: "tool_off", Name: "off_tool", Description: "已停用", Kind: SourceCLI, Enabled: false,
-		CLI: &CLIConfig{Command: "echo x"},
+	src := &tool.ToolSource{
+		ID: "tool_off", Name: "off_tool", Description: "已停用", Kind: tool.SourceCLI, Enabled: false,
+		CLI: &tool.CLIConfig{Command: "echo x"},
 	}
 	if err := tm.Store().Save(src); err != nil {
 		t.Fatal(err)
 	}
-	view := tm.BuildView(context.Background(), BuildOptions{Enforcer: AllowAllEnforcer{}})
+	view := tm.BuildView(context.Background(), BuildOptions{Enforcer: tool.AllowAllEnforcer{}})
 	out, _ := view.ExecuteTool("tool_router", map[string]interface{}{"action": "list"})
 	if strings.Contains(out, "off_tool") {
 		t.Fatalf("停用工具不应出现在列表中: %s", out)
@@ -119,15 +121,15 @@ func TestDisabledToolExcluded(t *testing.T) {
 // 会话白名单：只暴露白名单内的顶层工具
 func TestSessionWhitelist(t *testing.T) {
 	tm, _ := newTestToolManager(t)
-	src := &ToolSource{
-		ID: "tool_pick", Name: "picked", Description: "白名单工具", Kind: SourceCLI, Enabled: true,
-		CLI: &CLIConfig{Command: "echo pick"},
+	src := &tool.ToolSource{
+		ID: "tool_pick", Name: "picked", Description: "白名单工具", Kind: tool.SourceCLI, Enabled: true,
+		CLI: &tool.CLIConfig{Command: "echo pick"},
 	}
 	if err := tm.Store().Save(src); err != nil {
 		t.Fatal(err)
 	}
 	// 白名单只含 exec_shell，picked 不出现
-	view := tm.BuildView(context.Background(), BuildOptions{EnabledTools: []string{"exec_shell"}, Enforcer: AllowAllEnforcer{}})
+	view := tm.BuildView(context.Background(), BuildOptions{EnabledTools: []string{"exec_shell"}, Enforcer: tool.AllowAllEnforcer{}})
 	out, _ := view.ExecuteTool("tool_router", map[string]interface{}{"action": "list"})
 	if strings.Contains(out, "picked") || !strings.Contains(out, "exec_shell") {
 		t.Fatalf("白名单过滤错误: %s", out)
@@ -141,11 +143,11 @@ func TestSessionWhitelist(t *testing.T) {
 // HTTP 来源配置的模板字段能正确落盘并读回（同时验证 v2 落盘结构）
 func TestHTTPToolSourceRoundTrip(t *testing.T) {
 	tm, dir := newTestToolManager(t)
-	src := &ToolSource{
+	src := &tool.ToolSource{
 		ID: "tool_api", Name: "weather", Label: "天气", Description: "查天气",
-		Kind: SourceHTTP, Icon: "cloud", Enabled: true,
-		Parameters: []ToolParamConfig{{Name: "city", Description: "城市", Required: true}},
-		HTTP: &HTTPConfig{
+		Kind: tool.SourceHTTP, Icon: "cloud", Enabled: true,
+		Parameters: []tool.ToolParamConfig{{Name: "city", Description: "城市", Required: true}},
+		HTTP: &tool.HTTPConfig{
 			Method:  "GET",
 			URL:     "https://example.com/weather?city={{city}}",
 			Headers: map[string]string{"X-Key": "secret"},
@@ -161,20 +163,20 @@ func TestHTTPToolSourceRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var f ToolFile
+	var f tool.ToolFile
 	if err := json.Unmarshal(data, &f); err != nil {
 		t.Fatalf("落盘应为 v2 结构: %v", err)
 	}
-	if f.Version != ToolFileVersion {
-		t.Fatalf("落盘版本应为 %d，实际 %d", ToolFileVersion, f.Version)
+	if f.Version != tool.ToolFileVersion {
+		t.Fatalf("落盘版本应为 %d，实际 %d", tool.ToolFileVersion, f.Version)
 	}
-	var found *ToolSource
+	var found *tool.ToolSource
 	for _, s := range f.Sources {
 		if s.Name == "weather" {
 			found = s
 		}
 	}
-	if found == nil || found.Kind != SourceHTTP || found.HTTP == nil {
+	if found == nil || found.Kind != tool.SourceHTTP || found.HTTP == nil {
 		t.Fatalf("HTTP 来源未正确落盘: %+v", found)
 	}
 	if found.HTTP.URL != "https://example.com/weather?city={{city}}" || found.HTTP.Headers["X-Key"] != "secret" {
@@ -182,18 +184,16 @@ func TestHTTPToolSourceRoundTrip(t *testing.T) {
 	}
 
 	// 装配成功且 URL 模板渲染正确（不实际发请求，只验证字段）
-	view := tm.BuildView(context.Background(), BuildOptions{Enforcer: AllowAllEnforcer{}})
+	view := tm.BuildView(context.Background(), BuildOptions{Enforcer: tool.AllowAllEnforcer{}})
 	// 装配成功且被权限网关装饰（拆除装饰后应为 DynamicAPITool）
-	tool := view.nonMeta["weather"]
-	if tool == nil {
+	got := view.Lookup("weather")
+	if got == nil {
 		t.Fatal("API 工具未装配")
 	}
-	guarded, ok := tool.(*guardedTool)
-	if !ok {
-		t.Fatalf("装配结果应被权限网关装饰，实际类型 %T", tool)
-	}
-	if _, ok := guarded.inner.(*DynamicAPITool); !ok {
-		t.Fatalf("装饰内层应为 DynamicAPITool，实际 %T", guarded.inner)
+	// 装配期统一被权限网关装饰：拆开装饰后应回到 DynamicAPITool
+	inner := tool.Unwrap(got)
+	if _, ok := inner.(*tool.DynamicAPITool); !ok {
+		t.Fatalf("装饰内层应为 DynamicAPITool，实际 %T", inner)
 	}
 }
 
@@ -207,8 +207,8 @@ func TestBuiltinCannotDelete(t *testing.T) {
 
 // ===== 曝光策略：exec_shell 消失事故的回归防线 =====
 //
-// 背景：v2 期的 DefaultExposure 把「内置但不在 directToolOrder 里」判成 ExposureInternal，
-// 而 exec_shell 当时是 defaultSources() 里唯一这样的工具，于是它被标记为对模型不可见
+// 背景：v2 期的 tool.DefaultExposure 把「内置但不在 directToolOrder 里」判成 tool.ExposureInternal，
+// 而 exec_shell 当时是 tool.DefaultSources() 里唯一这样的工具，于是它被标记为对模型不可见
 // （list 不列出、describe/execute 当"未找到"），模型只能报"找不到 exec_shell"。
 // 下面三个测试分别守住：默认值不再产生 internal、全新安装的推导正确、存量错误值能被修复。
 //
@@ -218,34 +218,34 @@ func TestBuiltinCannotDelete(t *testing.T) {
 
 // 默认曝光绝不能把任何内置工具判成 internal
 func TestDefaultExposureNeverHidesBuiltins(t *testing.T) {
-	for _, src := range defaultSources() {
-		if got := DefaultExposure(src.Kind, src.Name); got == ExposureInternal {
+	for _, src := range tool.DefaultSources() {
+		if got := tool.DefaultExposure(src.Kind, src.Name); got == tool.ExposureInternal {
 			t.Fatalf("内置工具 %s 的默认曝光不应是 internal——那会让它对模型彻底消失", src.Name)
 		}
 	}
-	if got := DefaultExposure(SourceBuiltin, toolExecShell); got != ExposureDirect {
+	if got := tool.DefaultExposure(tool.SourceBuiltin, tool.ToolExecShell); got != tool.ExposureDirect {
 		t.Fatalf("exec_shell 默认应直出（buildBasePrompt 点名了它），实际 %q", got)
 	}
-	if got := DefaultExposure(SourceCLI, "whatever"); got != ExposureRouter {
+	if got := tool.DefaultExposure(tool.SourceCLI, "whatever"); got != tool.ExposureRouter {
 		t.Fatalf("非内置来源默认应经路由器，实际 %q", got)
 	}
 }
 
-// 全新安装（配置里没有 exposure 字段）时，运行期必须按 DefaultExposure 推断：
+// 全新安装（配置里没有 exposure 字段）时，运行期必须按 tool.DefaultExposure 推断：
 // 文件工具与 exec_shell 都直出。此前运行期对空值一律降级成 router，
 // 结果连文件工具也退回了"要先经路由器发现"。
 func TestFreshInstallExposureMatchesDefaults(t *testing.T) {
-	tm, _ := newTestToolManager(t) // 无配置文件 → defaultSources()
-	view := tm.BuildView(context.Background(), BuildOptions{Enforcer: AllowAllEnforcer{}})
+	tm, _ := newTestToolManager(t) // 无配置文件 → tool.DefaultSources()
+	view := tm.BuildView(context.Background(), BuildOptions{Enforcer: tool.AllowAllEnforcer{}})
 
 	direct := map[string]bool{}
-	for _, n := range view.direct {
+	for _, n := range view.DirectNames() {
 		direct[n] = true
 	}
-	if !direct[toolReadFile] {
-		t.Fatalf("全新安装时 read_file 应直出，实际直出名录: %v", view.direct)
+	if !direct[tool.ToolReadFile] {
+		t.Fatalf("全新安装时 read_file 应直出，实际直出名录: %v", view.DirectNames())
 	}
-	if !direct[toolExecShell] {
+	if !direct[tool.ToolExecShell] {
 		t.Fatal("exec_shell 应直出（buildBasePrompt 点名了它）")
 	}
 
@@ -266,25 +266,25 @@ func TestFreshInstallExposureMatchesDefaults(t *testing.T) {
 
 // 修复函数的作用域：只碰「内置 且 internal」的条目
 func TestRepairBuiltinExposureScope(t *testing.T) {
-	sources := []*ToolSource{
-		{ID: "exec_shell", Name: "exec_shell", Kind: SourceBuiltin, Exposure: ExposureInternal},
-		{ID: "read_file", Name: "read_file", Kind: SourceBuiltin, Exposure: ExposureRouter},
-		{ID: "hidden_cli", Name: "hidden_cli", Kind: SourceCLI, Exposure: ExposureInternal},
+	sources := []*tool.ToolSource{
+		{ID: "exec_shell", Name: "exec_shell", Kind: tool.SourceBuiltin, Exposure: tool.ExposureInternal},
+		{ID: "read_file", Name: "read_file", Kind: tool.SourceBuiltin, Exposure: tool.ExposureRouter},
+		{ID: "hidden_cli", Name: "hidden_cli", Kind: tool.SourceCLI, Exposure: tool.ExposureInternal},
 		{ID: "nil_src"},
 	}
 	sources = append(sources, nil)
 
-	fixed := repairBuiltinExposure(sources)
+	fixed := tool.RepairBuiltinExposure(sources)
 	if len(fixed) != 1 || fixed[0] != "exec_shell" {
 		t.Fatalf("只应修复「内置 + internal」的条目，实际修复: %v", fixed)
 	}
-	if sources[0].Exposure != ExposureDirect {
+	if sources[0].Exposure != tool.ExposureDirect {
 		t.Fatalf("exec_shell 应被修复为直出，实际 %q", sources[0].Exposure)
 	}
-	if sources[1].Exposure != ExposureRouter {
+	if sources[1].Exposure != tool.ExposureRouter {
 		t.Fatal("已配好的内置条目不应被改动")
 	}
-	if sources[2].Exposure != ExposureInternal {
+	if sources[2].Exposure != tool.ExposureInternal {
 		t.Fatal("非内置来源的 internal 是用户显式配置，必须保留")
 	}
 }
@@ -302,13 +302,13 @@ func TestRepairHiddenBuiltinOnLoad(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	store := NewToolStore(path)
+	store := tool.NewToolStore(path)
 
 	src, ok := store.GetByName("exec_shell")
 	if !ok {
 		t.Fatal("加载后应存在 exec_shell")
 	}
-	if src.Exposure != ExposureDirect {
+	if src.Exposure != tool.ExposureDirect {
 		t.Fatalf("被误判为 internal 的 exec_shell 应修复为直出，实际 %q", src.Exposure)
 	}
 
@@ -317,17 +317,17 @@ func TestRepairHiddenBuiltinOnLoad(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var f ToolFile
+	var f tool.ToolFile
 	if err := json.Unmarshal(raw, &f); err != nil {
 		t.Fatalf("重写后的配置应可解析: %v", err)
 	}
-	if f.Version != ToolFileVersion {
-		t.Fatalf("落盘版本应为 %d，实际 %d", ToolFileVersion, f.Version)
+	if f.Version != tool.ToolFileVersion {
+		t.Fatalf("落盘版本应为 %d，实际 %d", tool.ToolFileVersion, f.Version)
 	}
 
 	// 模型要能重新发现它
 	tm := NewToolManager(store, nil)
-	view := tm.BuildView(context.Background(), BuildOptions{Enforcer: AllowAllEnforcer{}})
+	view := tm.BuildView(context.Background(), BuildOptions{Enforcer: tool.AllowAllEnforcer{}})
 	out, err := view.ExecuteTool("tool_router", map[string]interface{}{"action": "list"})
 	if err != nil {
 		t.Fatalf("list 失败: %v", err)

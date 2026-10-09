@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"wails-tmp/internal/diff"
+	"wails-tmp/internal/snapshot"
+	"wails-tmp/internal/store"
 )
 
 // ===== P2 第 3 步：回退算法 =====
@@ -15,13 +17,13 @@ import (
 //   2. 冲突检查真的能拦住对用户手工改动的覆盖。
 
 // newUndoTestApp 最小 App：UndoDiffTurn 只需要 sessionStore + diffService
-func newUndoTestApp(t *testing.T, projectDir string) (*App, *Session) {
+func newUndoTestApp(t *testing.T, projectDir string) (*App, *store.Session) {
 	t.Helper()
 	app := &App{
-		sessionStore: NewSessionStore(filepath.Join(t.TempDir(), "sessions")),
+		sessionStore: store.NewSessionStore(filepath.Join(t.TempDir(), "sessions")),
 		diffService:  diff.NewDiffService(),
 	}
-	sess, err := app.sessionStore.CreateSession(SessionConfig{
+	sess, err := app.sessionStore.CreateSession(store.SessionConfig{
 		Title:   "t",
 		Model:   "m",
 		Project: projectDir,
@@ -33,14 +35,14 @@ func newUndoTestApp(t *testing.T, projectDir string) (*App, *Session) {
 }
 
 // beginTurn 取一轮的快照 —— **必须在改文件之前调用**，返回轮次号与快照 sha
-func beginTurn(t *testing.T, app *App, sess *Session, repo string) (int, string) {
+func beginTurn(t *testing.T, app *App, sess *store.Session, repo string) (int, string) {
 	t.Helper()
 	session, err := app.sessionStore.GetSession(sess.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	turnNo := nextDiffTurn(session)
-	cp, err := Checkpoint(repo, sess.ID, turnNo)
+	turnNo := store.NextDiffTurn(session)
+	cp, err := snapshot.Checkpoint(repo, sess.ID, turnNo)
 	if err != nil {
 		t.Fatalf("取快照失败: %v", err)
 	}
@@ -48,19 +50,19 @@ func beginTurn(t *testing.T, app *App, sess *Session, repo string) (int, string)
 }
 
 // endTurn 记录这一轮 —— **在改完文件之后调用**
-func endTurn(t *testing.T, app *App, sess *Session, repo string, wantTurn int, cp string, files []diff.DiffFile) {
+func endTurn(t *testing.T, app *App, sess *store.Session, repo string, wantTurn int, cp string, files []diff.DiffFile) {
 	t.Helper()
 	got, err := app.sessionStore.AppendDiff(sess.ID, diff.DiffTurn{
 		Files:    files,
 		Base:     cp,
-		EndState: endStateOf(repo, files),
+		EndState: snapshot.EndStateOf(repo, files),
 	}, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	// 快照 ref 的编号与 diff.DiffTurn.Turn 必须一致，否则回退会找不到快照
 	if got != wantTurn {
-		t.Fatalf("轮次编号不一致：快照用 %d，记录用 %d（两处必须走同一个 nextDiffTurn）", wantTurn, got)
+		t.Fatalf("轮次编号不一致：快照用 %d，记录用 %d（两处必须走同一个 store.NextDiffTurn）", wantTurn, got)
 	}
 }
 
@@ -270,7 +272,7 @@ func TestUndoRejectsMissingSnapshot(t *testing.T) {
 	turnNo, cp := beginTurn(t, app, sess, repo)
 	writeTestFile(t, filepath.Join(repo, "a.txt"), "agent 改过\n")
 	endTurn(t, app, sess, repo, turnNo, cp, []diff.DiffFile{{Path: "a.txt", Status: "modified"}})
-	if err := DropCheckpoint(repo, sess.ID, turnNo); err != nil {
+	if err := snapshot.DropCheckpoint(repo, sess.ID, turnNo); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := app.UndoDiffTurn(sess.ID, turnNo, false); err == nil {
