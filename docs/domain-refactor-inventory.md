@@ -169,3 +169,20 @@ local-agent/
   - wails 库内部路径（`pkg/options/options.go`、`v0.46.0/windows/dll_windows.go` 等）；
   - `docs/image-input-design.md` 中逐字引用的编译器报错 `./imageproc.go:170:11` —— 属引用原文。
 
+## G.3 步骤 8（最终扫描与收尾）
+
+- **重扫根目录**：仍为 45 个 `.go`（23 源码 + 22 测试），**无新增/改名/冲突**；逐个判定后
+  确认全部属 **App 层**（Wails 绑定 + 装配 + 宿主适配），**无遗留的域引擎源码平铺在根目录**。
+- **F.3 评估结论：app.go / chat.go 不拆分**（用户已确认）。依据：
+  1. 二者直接使用 `wailsRuntime.EventsEmit` 等 wails runtime，而 `internal/*` 有
+     「**不 import wails runtime**」的不变式 —— 迁入 `internal/*` 会破坏该不变式；
+  2. `agentrun.go` 头注释已记载上一轮的设计决策：「循环没有搬到新文件，而是留在 chat.go、
+     只把依赖来源换掉……**分层是按依赖边界达成的，不是按文件位置**」——内部循环已通过
+     `agentRun`（依赖 store/skill/tool/permission/diff/snapshot/agent/llm/media，不认识 `*App`）
+     完成解耦，文件位置不是分层依据。强行「按文件搬迁」反而违背既有设计。
+- **最终状态**：根目录仅保留 **项目级入口/配置/说明 + App 层源码**；后端域引擎全部位于
+  `internal/<domain>/`（14 个：agent diff git llm media **memstore** memory permission procx
+  skill snapshot store task tool）+ 顶层 `plugin/`（插件域）。`memory/` 顶层目录已清空。
+- **调试残留**：`_probe.py` / `_probe.log` / `lt.log` 按用户决定已删除（未跟踪文件，不入库）。
+- 结论：**平铺后端文件的按域整理到此完成**，无剩余待迁移项。
+
