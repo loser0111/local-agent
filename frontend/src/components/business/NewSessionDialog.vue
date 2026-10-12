@@ -82,6 +82,9 @@ const form = reactive({
   project: 'e:\\learn\\local-agent',
   model: '',
   permissionMode: 'manual',
+  // [新增] Thinking 配置
+  thinkingEnabled: false,
+  thinkingBudget: 5000,
 })
 
 /**
@@ -210,6 +213,37 @@ function submitForm() {
               {{ p.label }} - {{ p.desc }}
             </option>
           </select>
+        </div>
+
+        <!-- [新增] Extended Thinking 配置 -->
+        <div class="form-group thinking-config">
+          <label class="thinking-label">
+            <input type="checkbox" v-model="form.thinkingEnabled" />
+            <span>启用 Extended Thinking</span>
+          </label>
+          <p class="thinking-desc">模型会进行更深入的推理和思考</p>
+          <div v-if="form.thinkingEnabled" class="thinking-budget">
+            <label>思考预算 (Token)</label>
+            <div class="budget-input-group">
+              <input
+                type="range"
+                v-model.number="form.thinkingBudget"
+                min="1000"
+                max="30000"
+                step="1000"
+                class="budget-slider"
+              />
+              <input
+                type="number"
+                v-model.number="form.thinkingBudget"
+                min="1000"
+                max="30000"
+                step="1000"
+                class="budget-input"
+              />
+            </div>
+            <p class="budget-hint">推荐 5000-10000，更高的值表示更深入的思考</p>
+          </div>
         </div>
 
         <!-- 本会话可用工具 -->
@@ -501,5 +535,107 @@ function submitForm() {
   gap: $space-sm;
   padding: $space-lg $space-xl;
   border-top: 1px solid $color-border;
+}
+
+/* [新增] Thinking 配置样式 */
+.thinking-config {
+  background-color: rgba(139, 92, 246, 0.05);
+  border: 1px solid rgba(139, 92, 246, 0.2);
+  border-radius: $radius-md;
+  padding: $space-md;
+  margin-bottom: $space-lg;
+}
+
+.thinking-label {
+  display: flex;
+  align-items: center;
+  gap: $space-sm;
+  cursor: pointer;
+  font-weight: $font-weight-medium;
+  color: rgb(139, 92, 246);
+  margin-bottom: 0;
+
+  input[type='checkbox'] {
+    accent-color: rgb(139, 92, 246);
+  }
+}
+
+.thinking-desc {
+  font-size: $font-size-xs;
+  color: $color-text-muted;
+  margin: $space-xs 0 0;
+  margin-left: $space-xl;
+}
+
+.thinking-budget {
+  margin-top: $space-md;
+  padding-top: $space-md;
+  border-top: 1px solid rgba(139, 92, 246, 0.1);
+
+  > label {
+    font-size: $font-size-xs;
+    font-weight: $font-weight-medium;
+    display: block;
+    margin-bottom: $space-sm;
+  }
+}
+
+.budget-input-group {
+  display: flex;
+  align-items: center;
+  gap: $space-sm;
+}
+
+.budget-slider {
+  flex: 1;
+  height: 4px;
+  border-radius: 2px;
+  background: linear-gradient(to right, rgb(139, 92, 246), rgb(139, 92, 246));
+  outline: none;
+  -webkit-appearance: none;
+
+  &::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: rgb(139, 92, 246);
+    cursor: pointer;
+    box-shadow: 0 2px 4px rgba(139, 92, 246, 0.3);
+  }
+
+  &::-moz-range-thumb {
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: rgb(139, 92, 246);
+    cursor: pointer;
+    border: none;
+    box-shadow: 0 2px 4px rgba(139, 92, 246, 0.3);
+  }
+}
+
+.budget-input {
+  width: 80px;
+  padding: $space-xs $space-sm;
+  border: 1px solid rgba(139, 92, 246, 0.2);
+  border-radius: $radius-sm;
+  text-align: center;
+  font-size: $font-size-xs;
+  background-color: rgba(139, 92, 246, 0.02);
+  color: rgb(139, 92, 246);
+
+  &:focus {
+    outline: none;
+    border-color: rgb(139, 92, 246);
+    background-color: rgba(139, 92, 246, 0.05);
+  }
+}
+
+.budget-hint {
+  font-size: $font-size-xs;
+  color: $color-text-muted;
+  margin: $space-xs 0 0;
 }
 </style>

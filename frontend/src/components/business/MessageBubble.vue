@@ -15,6 +15,10 @@ const chatStore = useChatStore()
 const isUser = computed(() => props.message.role === 'user')
 const isSystem = computed(() => props.message.role === 'system')
 const hasContent = computed(() => !!(props.message.content && props.message.content.trim()))
+const hasThinking = computed(() => !!(props.message.thinking && props.message.thinking.trim()))
+
+// [新增] Thinking 块展开/折叠状态
+const thinkingExpanded = ref(false)
 
 // AI 消息按 Markdown 渲染；用户消息保持纯文本
 const renderedHtml = computed(() => renderMarkdown(props.message.content || ''))
@@ -111,6 +115,17 @@ function openPreview(id) {
       <!-- 流式等待光标 -->
       <span v-if="message.streaming && !hasContent" class="cursor">▊</span>
       <span v-else-if="message.streaming" class="cursor cursor-inline">▊</span>
+
+      <!-- [新增] Thinking 块（仅 AI 消息且存在 thinking 时显示）-->
+      <div v-if="!isUser && hasThinking" class="thinking-block">
+        <div class="thinking-header" @click="thinkingExpanded = !thinkingExpanded">
+          <span class="thinking-toggle">{{ thinkingExpanded ? '▼' : '▶' }}</span>
+          <span class="thinking-label">💭 思考过程</span>
+        </div>
+        <div v-if="thinkingExpanded" class="thinking-content">
+          <div class="thinking-text">{{ message.thinking }}</div>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -288,6 +303,76 @@ function openPreview(id) {
 .system-text {
   font-size: $font-size-xs;
   color: $color-text-muted;
+}
+
+/* ===== Thinking 块样式 [新增] ===== */
+.thinking-block {
+  margin-bottom: $space-md;
+  background-color: rgba(139, 92, 246, 0.05);
+  border: 1px solid rgba(139, 92, 246, 0.2);
+  border-left: 3px solid rgb(139, 92, 246);
+  border-radius: $radius-md;
+  overflow: hidden;
+}
+
+.thinking-header {
+  padding: $space-md;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: $space-sm;
+  user-select: none;
+  transition: background-color 0.2s ease;
+
+  &:hover {
+    background-color: rgba(139, 92, 246, 0.08);
+  }
+}
+
+.thinking-toggle {
+  display: inline-block;
+  width: 16px;
+  text-align: center;
+  font-size: 12px;
+  color: rgb(139, 92, 246);
+  transition: transform 0.2s ease;
+}
+
+.thinking-label {
+  font-weight: $font-weight-semibold;
+  font-size: $font-size-sm;
+  color: rgb(139, 92, 246);
+}
+
+.thinking-content {
+  padding: $space-md;
+  padding-top: 0;
+  background-color: rgba(139, 92, 246, 0.02);
+  border-top: 1px solid rgba(139, 92, 246, 0.1);
+  animation: slideDown 0.3s ease;
+}
+
+.thinking-text {
+  font-size: $font-size-sm;
+  line-height: $line-height-lg;
+  color: $color-text-primary;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: 'JetBrains Mono', 'Consolas', 'Courier New', monospace;
+  background-color: rgba(139, 92, 246, 0.03);
+  padding: $space-md;
+  border-radius: $radius-sm;
+}
+
+@keyframes slideDown {
+  from {
+    opacity: 0;
+    max-height: 0;
+  }
+  to {
+    opacity: 1;
+    max-height: 1000px;
+  }
 }
 
 /* ===== Markdown 正文样式（IDEA Dracula Dark 配色）===== */
