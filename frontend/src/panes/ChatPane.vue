@@ -6,7 +6,7 @@ import { usePaneStore } from '@/stores/pane'
 import { useDiffStore } from '@/stores/diff'
 import { useSettingStore } from '@/stores/setting'
 import { usePlanStore } from '@/stores/plan'
-import { appendMessage, appendConversation, chat, stopChat, getContextStat, onDiffUpdate, saveAttachment, fetchImageURL, getAttachmentDataURL } from '@/api/session'
+import { appendMessage, appendConversation, chat, stopChat, getContextStat, saveAttachment, fetchImageURL, getAttachmentDataURL } from '@/api/session'
 import { fetchPendingInteraction } from '@/api/interaction'
 import { DEFAULT_VIEW_MODE } from '@/types'
 import { usePermissionStore } from '@/stores/permissions'
@@ -113,15 +113,13 @@ function requestCompact() {
 }
 const plan = computed(() => planStore.plan)
 
-// 订阅后端 diff 实时推送（有文件改动时刷新差异数据）
-let offDiff = null
+// diff:update 的消费已收口到 diff store 的进程级常驻订阅（见 stores/diff.js），
+// 不再绑 ChatPane 生命周期：切走界面也不会丢事件。
 onMounted(() => {
-  offDiff = onDiffUpdate((payload) => diffStore.applyUpdate(payload))
   // 「/技能名」补全需要技能清单；加载失败不影响正常聊天
   skillsStore.load().catch(() => {})
 })
 onUnmounted(() => {
-  if (offDiff) offDiff()
   stopInteractionPolling()
   // 还没发出去的图片预览用的是 object URL，组件销毁时要还回去，否则这一份内存不释放
   clearPendingFiles()
@@ -765,7 +763,7 @@ async function sendMessage() {
     try {
       const changed = await diffStore.load(sid)
       // 后台自动打开：收起状态下不强行铺开（图标出现在窄条上）
-      if (changed > 0) paneStore.openPaneBackground(sid, 'diff')
+      if (changed > 0) paneStore.openPaneBackground(sid, 'diff', true)
     } catch (diffErr) {
       console.warn('加载 diff 失败:', diffErr)
     }
@@ -1232,6 +1230,18 @@ function openDiff() {
   display: flex;
   gap: $space-md;
   padding: 6px $space-lg;
+  animation: msg-in 0.3s ease;
+}
+
+@keyframes msg-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 .process-row-body {
@@ -1277,14 +1287,20 @@ function openDiff() {
   text-align: center;
 
   .welcome-icon {
-    font-size: 48px;
+    font-size: 56px;
     margin-bottom: $space-lg;
+    filter: drop-shadow(0 2px 8px rgb(var(--color-primary-rgb) / 0.3));
+    animation: welcome-float 3s ease-in-out infinite;
   }
 
   h2 {
     font-size: $font-size-xl;
     font-weight: $font-weight-bold;
     margin-bottom: $space-sm;
+    background: linear-gradient(135deg, $color-text-primary 0%, $color-text-secondary 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
   }
 
   p {
@@ -1294,11 +1310,21 @@ function openDiff() {
   }
 }
 
+@keyframes welcome-float {
+  0%, 100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-6px);
+  }
+}
+
 .quick-actions {
   display: flex;
   flex-wrap: wrap;
   gap: $space-sm;
   justify-content: center;
+  max-width: 480px;
 }
 
 .quick-btn {
@@ -1308,18 +1334,25 @@ function openDiff() {
   border: 1px solid $color-border;
   border-radius: $radius-md;
   color: $color-text-primary;
-  transition: all $transition-fast;
+  transition: all $transition-normal;
 
   &:hover {
     border-color: $color-primary;
     background-color: rgb(var(--color-primary-rgb) / 0.1);
+    box-shadow: $glow-primary;
+    transform: translateY(-1px);
+  }
+
+  &:active {
+    transform: translateY(0);
   }
 }
 
 .prompt-box {
   position: relative;
   border-top: 1px solid $color-border;
-  background-color: $color-bg-secondary;
+  background: $glass-bg;
+  backdrop-filter: blur($glass-blur);
   padding: $space-md;
 }
 
@@ -1586,5 +1619,13 @@ function openDiff() {
 
 .send-btn {
   min-width: 64px;
+
+  &:not(:disabled):hover {
+    box-shadow: $glow-primary;
+  }
+
+  &:not(:disabled):active {
+    transform: scale(0.97);
+  }
 }
 </style>

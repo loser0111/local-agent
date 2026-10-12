@@ -153,6 +153,7 @@ function openPreview(id) {
 
 .avatar-assistant {
   background-color: $color-info;
+  box-shadow: 0 0 0 1px rgb(var(--color-info-rgb) / 0.2);
 }
 
 .message-body {
@@ -266,6 +267,7 @@ function openPreview(id) {
 .cursor {
   color: $color-primary;
   animation: blink 1s step-end infinite;
+  text-shadow: $glow-primary;
 }
 
 .cursor-inline {

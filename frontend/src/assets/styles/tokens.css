@@ -91,6 +91,21 @@
 
   /* 弹窗遮罩 */
   --color-overlay: rgb(0 0 0 / 0.55);
+
+  /* ===== 视觉增强 token ===== */
+  /* 顶栏微渐变底色：给 TopBar 一点深度感而不是纯色平铺 */
+  --gradient-topbar: linear-gradient(180deg, #2b2d3a 0%, #282a36 100%);
+  /* 侧边栏微渐变底色 */
+  --gradient-sidebar: linear-gradient(180deg, #232430 0%, #21222c 100%);
+  /* 主色发光阴影：运行中/焦点态的柔和光晕 */
+  --glow-primary: 0 0 12px rgb(189 147 249 / 0.35);
+  /* 成功色发光 */
+  --glow-success: 0 0 8px rgb(80 250 123 / 0.3);
+  /* 玻璃态毛玻璃：弹窗/浮层叠加效果 */
+  --glass-bg: rgb(40 42 54 / 0.85);
+  --glass-blur: 12px;
+  /* 面板切换过渡时长 */
+  --transition-pane: 0.2s ease;
 }
 
 /* ===== 浅色主题 =====
@@ -160,4 +175,13 @@
   --shadow-lg: 0 8px 24px rgb(16 18 32 / 0.14);
 
   --color-overlay: rgb(16 18 32 / 0.35);
+
+  /* ===== 视觉增强 token ===== */
+  --gradient-topbar: linear-gradient(180deg, #fafafd 0%, #ffffff 100%);
+  --gradient-sidebar: linear-gradient(180deg, #f0f0f5 0%, #f4f4f8 100%);
+  --glow-primary: 0 0 12px rgb(124 58 237 / 0.2);
+  --glow-success: 0 0 8px rgb(21 128 61 / 0.2);
+  --glass-bg: rgb(255 255 255 / 0.88);
+  --glass-blur: 12px;
+  --transition-pane: 0.2s ease;
 }

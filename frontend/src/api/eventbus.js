@@ -29,6 +29,9 @@ const chatSubs = new Map()
 // "B 的 run 序号比 A 大"完全正常，用一个全局最大值会把 A 的事件全判成陈旧。
 const latestRunBySession = new Map()
 
+// 进程级常驻，三条通道都只在这里 EventsOn 一次，之后永不解绑。
+// （diff:update 也被放在这里注册：它不绑任何组件生命周期，避免"切走界面/组件销毁
+//  时连根拔掉订阅、后台运行的 diff 事件无人接收"——曾导致改了文件面板却没动静。）
 let started = false
 
 function isWails() {
@@ -119,6 +122,7 @@ function ensureStarted() {
   if (started || !isWails()) return
   started = true
   EventsOn('chat:event', dispatchChat)
+  EventsOn('diff:update', dispatchDiff)
 }
 
 /**
@@ -155,6 +159,37 @@ export function belongsTo(ev, sessionId) {
 /** 测试与排障用：当前有哪些会话挂着聊天订阅 */
 export function activeChatSubscriptions() {
   return [...chatSubs.keys()]
+}
+
+// ===== diff:update 通道（常驻订阅，见 ensureStarted）=====
+// 与 chat:event 相同：进程级只 EventsOn 一次，回调分发给所有已注册的消费者。
+// 不绑组件生命周期（ChatPane mount/unmount），切走界面也不会丢事件。
+
+const diffConsumers = new Set()
+
+function dispatchDiff(payload) {
+  if (!payload || !payload.diff) return
+  for (const fn of diffConsumers) {
+    try {
+      fn(payload)
+    } catch (e) {
+      console.error('[事件总线] diff:update 消费异常:', e)
+    }
+  }
+}
+
+/**
+ * 订阅 diff:update 事件（payload: { diff, turn, sessionId, runId }）。
+ * 进程级常驻注册，永不因调用方销毁而连根摘除；返回的退订函数只退自己这一份。
+ * @param {(payload: object) => void} cb
+ * @returns {() => void}
+ */
+export function onDiffUpdated(cb) {
+  ensureStarted()
+  diffConsumers.add(cb)
+  return () => {
+    diffConsumers.delete(cb)
+  }
 }
 
 /** 测试用：清空内部状态（进程级常驻，生产代码不该调用） */

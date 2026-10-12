@@ -625,7 +625,7 @@ onMounted(() => {
   height: $topbar-height;
   padding: 0 $space-xl;
   border-bottom: 1px solid $color-border;
-  background-color: $color-bg-secondary;
+  background: $gradient-topbar;
 
   h2 {
     font-size: $font-size-lg;
@@ -644,6 +644,7 @@ onMounted(() => {
   border-right: 1px solid $color-border;
   padding: $space-lg 0;
   flex-shrink: 0;
+  background: $gradient-sidebar;
 }
 
 .nav-item {
@@ -657,12 +658,14 @@ onMounted(() => {
   &:hover {
     background-color: $color-bg-tertiary;
     color: $color-text-primary;
+    transform: translateX(2px);
   }
 
   &.active {
     color: $color-primary;
     border-left-color: $color-primary;
     background-color: rgb(var(--color-primary-rgb) / 0.08);
+    box-shadow: $glow-primary;
   }
 }
 
@@ -915,7 +918,8 @@ input[type='range'] {
 }
 
 .modal-content {
-  background-color: $color-bg-secondary;
+  background-color: $glass-bg;
+  backdrop-filter: blur($glass-blur);
   border: 1px solid $color-border;
   border-radius: $radius-md;
   padding: $space-xl;
@@ -923,6 +927,18 @@ input[type='range'] {
   max-width: 90vw;
   max-height: 85vh;
   overflow-y: auto;
+  animation: modal-in 0.2s ease;
+}
+
+@keyframes modal-in {
+  from {
+    opacity: 0;
+    transform: scale(0.96) translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
 }
 
 .modal-header {

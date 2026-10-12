@@ -54,6 +54,11 @@ type Message struct {
 	// 这里存的是**引用**（ID/尺寸/媒体类型/相对路径），字节躺在附件目录里。
 	// 会话文件因此保持轻量——它是每次追加消息都要整体重写的那份数据。
 	Attachments []media.Attachment `json:"attachments,omitempty"`
+
+	// [新增] 模型生成的思考过程（仅当 role=assistant 且启用 thinking 时）
+	// 这是一个只读字段，不会被修改或重新处理
+	// 不参与请求构建，仅作历史记录供 UI 展示
+	Thinking string `json:"thinking,omitempty"`
 }
 
 // Conversation 单轮对话记录（用户提问 + AI 回答），借鉴 01agent
@@ -144,6 +149,10 @@ type Session struct {
 	// 用**指针**而不是值：统计上线前的会话文件里没有这个字段，nil 表示"这个会话没有统计数据"，
 	// 界面据此显示空态而不是一排 0——值类型无法区分"没数据"与"数据恰好为 0"。
 	UsageTotals *UsageTotals `json:"usageTotals,omitempty"`
+
+	// [新增] Thinking 相关配置
+	ThinkingEnabled bool `json:"thinkingEnabled,omitempty"` // 是否启用 extended thinking
+	ThinkingBudget  int  `json:"thinkingBudget,omitempty"`  // thinking token 预算（如 5000）
 }
 
 // SessionConfig 创建会话时的配置
@@ -161,6 +170,10 @@ type SessionConfig struct {
 	EnabledSkills  []string `json:"enabledSkills"` // 本会话可用的技能 ID 白名单（空=全部已启用技能）
 	// 会话配置
 	ParentID string `json:"parentId,omitempty"` // 非空=子代理会话（不出现在会话列表里）
+
+	// Thinking 相关配置
+	ThinkingEnabled bool `json:"thinkingEnabled,omitempty"` // 是否启用 extended thinking
+	ThinkingBudget  int  `json:"thinkingBudget,omitempty"`  // thinking token 预算（如 5000）
 }
 
 // SessionPatch 会话部分字段更新（指针为 nil 表示不更新）
@@ -171,6 +184,10 @@ type SessionPatch struct {
 	ViewMode       *string `json:"viewMode,omitempty"`
 	Status         *string `json:"status,omitempty"`
 	Project        *string `json:"project,omitempty"`
+
+	// Thinking 相关配置更新
+	ThinkingEnabled *bool `json:"thinkingEnabled,omitempty"`
+	ThinkingBudget  *int  `json:"thinkingBudget,omitempty"`
 }
 
 // SessionStore 会话存储：每个会话一个 JSON 文件

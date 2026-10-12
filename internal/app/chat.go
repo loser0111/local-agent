@@ -33,6 +33,10 @@ type ChatResult struct {
 
 	// Context 本轮结束时的上下文用量（前端据此显示用量指示；/compact 的提示也用它）
 	Context *agent.ContextStat `json:"context,omitempty"`
+
+	// Thinking 模型生成的思考过程（仅当启用 extended thinking 时）
+	// 这是只读的历史记录，不参与后续请求构建
+	Thinking string `json:"thinking,omitempty"`
 }
 
 // ===== 常量 =====
@@ -339,6 +343,18 @@ func countImages(messages []llm.LLMMessage) int {
 		n += len(m.Images)
 	}
 	return n
+}
+
+// buildThinkingConfig 从会话配置构建 thinking 参数
+// 仅当 thinking 在会话中启用且预算 > 0 时才返回有效的配置，否则返回 nil
+func buildThinkingConfig(session *store.Session) *llm.LLMThinking {
+	if session == nil || !session.ThinkingEnabled || session.ThinkingBudget <= 0 {
+		return nil
+	}
+	return &llm.LLMThinking{
+		Type:         "enabled",
+		BudgetTokens: session.ThinkingBudget,
+	}
 }
 
 // buildLLMMessages 从历史消息构造 LLM messages 数组
@@ -737,6 +753,8 @@ func runToolLoop(ar *agentRun) *ChatResult {
 			Temperature: 1.0,
 			Stream:      useStream,
 			Tools:       tools,
+			// [新增] 传递 thinking 配置（如果启用）
+			Thinking: buildThinkingConfig(session),
 		}
 
 		// 流式与非流式在聚合后返回结构相同，主循环无需分叉
@@ -924,6 +942,8 @@ func runToolLoop(ar *agentRun) *ChatResult {
 				Role:      store.RoleAssistant,
 				Content:   choice.Message.Content, // LLM 可能返回空内容
 				ToolCalls: executedToolCalls,
+				// [新增] 保存 thinking 内容（仅当启用 thinking 时）
+				Thinking: resp.Thinking,
 			}
 			savedAssistant, err := ar.Store.AppendMessage(sessionID, assistantMsg)
 			if err != nil {
@@ -982,6 +1002,8 @@ func runToolLoop(ar *agentRun) *ChatResult {
 		finalMsg := store.Message{
 			Role:    store.RoleAssistant,
 			Content: choice.Message.Content,
+			// [新增] 保存 thinking 内容（仅当启用 thinking 时）
+			Thinking: resp.Thinking,
 		}
 		savedFinal, err := ar.Store.AppendMessage(sessionID, finalMsg)
 		if err != nil {
@@ -1021,6 +1043,8 @@ func runToolLoop(ar *agentRun) *ChatResult {
 			Messages:  persistedMsgs,
 			Diff:      diffFiles,
 			Context:   ctxStat,
+			// [新增] 包含 thinking 内容
+			Thinking: resp.Thinking,
 		}
 
 		// 推送完成事件
