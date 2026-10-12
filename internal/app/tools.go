@@ -38,11 +38,16 @@ func (tm *ToolManager) Store() *tool.ToolStore { return tm.store }
 
 // BuildOptions 装配工具视图的会话级参数
 type BuildOptions struct {
-	EnabledTools  []string            // 会话工具白名单；为空表示全部已启用工具
-	EnabledSkills []string            // 会话技能白名单；为空表示全部已启用技能
-	ProjectDir    string              // 会话工作区目录：工具的工作目录，也是权限判定的边界
-	SessionID     string              // 会话 ID（文件改动的归因记录按会话隔离）
-	Changes       *tool.FileChangeLog // 文件改动记录；为 nil 时不记录
+	EnabledTools  []string // 会话工具白名单；为空表示全部已启用工具
+	EnabledSkills []string // 会话技能白名单；为空表示全部已启用技能
+	// AllowedTools 本次运行额外施加的工具名允许集合（来自技能/角色的 allowed-tools）。
+	// 非空时与会话白名单**取交集**：声明之外的工具既不进 registry（模型看不到），
+	// 也不进直出名录，因此经 tool_router 也无法发现或执行。
+	// 为空表示不额外收窄——这是默认，也是改动前的行为。
+	AllowedTools []string
+	ProjectDir   string              // 会话工作区目录：工具的工作目录，也是权限判定的边界
+	SessionID    string              // 会话 ID（文件改动的归因记录按会话隔离）
+	Changes      *tool.FileChangeLog // 文件改动记录；为 nil 时不记录
 	// Attachments 附件存储（read_image 用它把工作区里的图片存成会话附件）。
 	// 为 nil 时 read_image **不注册**——没有地方存图，注册出来只会每次调用都失败。
 	Attachments *media.AttachmentStore
@@ -62,6 +67,10 @@ type BuildOptions struct {
 	MemoryProject string
 	IgnoreMemory  bool
 	OnMemoryTouch func([]string)
+	// Todos 待办清单的读写（todo 工具）；为 nil 时不注册该工具。
+	// OnTodoChange 在清单变化后回调（推给前端面板），可为 nil。
+	Todos        tool.TodoStore
+	OnTodoChange tool.TodoEmit
 }
 
 // buildContext 装配期传给内置工具构造函数的上下文
@@ -72,6 +81,7 @@ type buildContext struct {
 	// spawner 派生代理的回路；为 nil 时 spawn_agent 不注册（子代理因此无法再派生）
 	spawner func(ctx context.Context, task string, maxTurns int) (*agent.SubagentResult, error)
 	memory  memory.ToolContext
+	todo    tool.TodoToolContext
 }
 
 // newBuiltinTool 构造内置工具。
@@ -118,6 +128,16 @@ func newBuiltinTool(src *tool.ToolSource, bc buildContext) (tool.ToolInterface, 
 		return memory.NewSaveTool(bc.memory), true
 	case toolMemoryForget:
 		return memory.NewForgetTool(bc.memory), true
+	case tool.ToolTodo:
+		// 没有清单存储就不注册：注册出来只会每次调用都报错，白耗模型一轮
+		// （与 read_image 缺附件、spawn_agent 缺 spawner 同一条约定）。
+		if bc.todo.Store == nil || strings.TrimSpace(bc.todo.SessionID) == "" {
+			return nil, false
+		}
+		return tool.NewTodoTool(bc.todo), true
+	case tool.ToolWebSearch:
+		// 联网搜索无外部依赖（引擎与超时都在工具内部固定），永远可注册。
+		return tool.NewWebSearchTool(), true
 	default:
 		return nil, false
 	}
@@ -169,6 +189,11 @@ func (tm *ToolManager) BuildView(ctx context.Context, opts BuildOptions) *tool.S
 			Source:  opts.SessionID,
 			Ignore:  opts.IgnoreMemory,
 			OnTouch: opts.OnMemoryTouch,
+		},
+		todo: tool.TodoToolContext{
+			Store:     opts.Todos,
+			SessionID: opts.SessionID,
+			OnChange:  opts.OnTodoChange,
 		},
 	}
 	// exposure：工具名 → 暴露策略（直出 / 经路由器 / 不可见）
@@ -288,6 +313,40 @@ func (tm *ToolManager) BuildView(ctx context.Context, opts BuildOptions) *tool.S
 		}
 	}
 
+	// 技能/角色的 allowed-tools：在会话白名单之上再收窄一次（#4）。
+	//
+	// 收窄点选在这里，而不是逐来源过滤，有两个原因：
+	//   - 判据是"声明的名字在本次装配里有没有对应工具"，只有装配出完整 registry
+	//     才谈得上判定，也只有这样才能实现 FilterNames 的兜底语义（声明全是外部
+	//     生态的名字如 Read/Bash 时退回"不额外收窄"，而不是把技能锁死到零工具）；
+	//   - 直出（direct）与经 tool_router 发现是同一份 registry 与 exposure，一处
+	//     收窄即两条路径全覆盖——不存在"直出被挡、路由器还能绕进去"的缺口。
+	//
+	// 必须早于统一装饰与 NewMetaTool：前者要遍历 registry，后者持有同一个 map。
+	if allow := tool.NewAllowList(opts.AllowedTools); !allow.Empty() {
+		names := make([]string, 0, len(registry))
+		for n := range registry {
+			names = append(names, n)
+		}
+		if kept := allow.FilterNames(names); kept == nil {
+			fmt.Printf("[ToolManager] allowed-tools %v 未命中任何已装配工具，已放弃收窄（请检查声明里的工具名）\n", allow.Raw())
+		} else {
+			keep := make(map[string]bool, len(kept))
+			for _, n := range kept {
+				keep[n] = true
+			}
+			for n := range registry {
+				if keep[n] {
+					continue
+				}
+				delete(registry, n)
+				delete(typeMap, n)
+				delete(exposure, n)
+				delete(hidden, n)
+			}
+		}
+	}
+
 	// 统一装饰（必须在 NewMetaTool 之前：路由器持有的是同一个 map）
 	enforcer := opts.Enforcer
 	if enforcer == nil {
@@ -299,9 +358,18 @@ func (tm *ToolManager) BuildView(ctx context.Context, opts BuildOptions) *tool.S
 		registry[name] = tool.NewGuardedTool(t, enforcer)
 	}
 
+	// 路由器必须持有**收窄后**的 registry；registry 为空时不装配它——一个能 list/describe
+	// 却什么都执行不了的路由器只会白耗模型一轮。
+	// 注：allowed-tools 收窄本身不会造成空 registry（FilterNames 未命中时会放弃收窄），
+	// 这里防的是"会话白名单把工具滤空"这一类既有情形。
+	var meta *tool.MetaTool
+	if len(registry) > 0 {
+		meta = tool.NewMetaTool(registry, typeMap, hidden)
+	}
+
 	return tool.NewSessionView(
 		registry,
-		tool.NewMetaTool(registry, typeMap, hidden),
+		meta,
 		tool.DirectToolNames(exposure),
 		images,
 	)

@@ -187,6 +187,31 @@ func DefaultSources() []*ToolSource {
 				{Name: "max_turns", Description: "可选：子代理最多跑几轮"},
 			},
 		},
+		{
+			ID: ToolTodo, Name: ToolTodo, Label: "待办清单",
+			Description: "主会话的待办清单：长任务里先列出步骤，做完一项就勾掉一项，随时可增删改。" +
+				"清单会显示在侧边面板，也是你自己的进度记录（上下文被压缩后仍看得到）。",
+			Kind: SourceBuiltin, Icon: "list-todo", Enabled: true, Builtin: true,
+			Parameters: []ToolParamConfig{
+				{Name: "action", Description: "add / update / remove / list / clear", Required: true},
+				{Name: "text", Description: "action=add 时的待办内容"},
+				{Name: "id", Description: "action=update/remove 时的待办 id"},
+				{Name: "status", Description: "action=update 时的状态：pending / in_progress / done"},
+			},
+		},
+		{
+			// 名字用常量：newBuiltinTool 按 src.Name 分派（case tool.ToolWebSearch），
+			// 两处一旦不一致，工具就会"注册了但认不出来"。
+			ID: ToolWebSearch, Name: ToolWebSearch, Label: "联网搜索",
+			Description: "用关键词检索互联网公开网页，返回标题、URL 与摘要。" +
+				"适合查超出训练数据的最新信息（新闻、版本号、报错、价格等）；不适合查本地代码或文件。",
+			Kind: SourceBuiltin, Icon: "globe", Enabled: true, Builtin: true,
+			Parameters: []ToolParamConfig{
+				{Name: "query", Description: "搜索关键词", Required: true},
+				{Name: "max_results", Description: "返回条数，默认 5，最多 10"},
+				{Name: "site", Description: "可选：限定域名，如 docs.python.org"},
+			},
+		},
 	}
 }
 

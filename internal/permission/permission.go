@@ -879,6 +879,10 @@ var readOnlyTools = map[string]bool{
 	"memory_search": true,
 	"memory_save":   true,
 	"memory_forget": true,
+	// todo 只读写本会话的清单文件，不碰工作区、不执行命令：它是模型自己的草稿纸，
+	// 弹权限窗只会让"列个清单"这件无害的事变得很烦。清单本身对用户是可见的
+	// （面板实时显示 + 事件推送），不构成"偷偷做事"。
+	"todo": true,
 }
 
 // isReadOnlySubject 判定主体是否只读。

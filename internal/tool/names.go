@@ -23,6 +23,14 @@ const (
 	ToolMemorySearch = "memory_search"
 	ToolMemorySave   = "memory_save"
 	ToolMemoryForget = "memory_forget"
+	// ToolTodo 主会话的待办清单：模型用它在长任务里自跟踪多步进度。
+	// 与 plan（规划-审批-执行的重流程）刻意分开——todo 是轻量、可随时改的草稿纸，
+	// 不涉及人工审批，也不落 git。
+	ToolTodo = "todo"
+
+	// ToolWebSearch 联网搜索：内置、直出。做成内置而不是 cli/http 来源的原因见
+	// websearchtool.go 顶部说明（模板替换不转义 + 响应不裁剪两个坑）。
+	ToolWebSearch = "web_search"
 )
 
 // DefaultReadLimit read_file 默认返回行数（defaultSources 的参数说明与实现共用）
@@ -49,4 +57,14 @@ var DirectToolOrder = []string{
 	ToolSpawnAgent,
 	// 记忆工具直出：buildBasePrompt 点名 memory_search / memory_save / memory_forget。
 	ToolMemorySearch, ToolMemorySave, ToolMemoryForget,
+	// todo 直出：buildBasePrompt 点名了它（长任务里"先列出清单、做完一项勾一项"）。
+	// 它只有一个很短的参数表，直出的 prompt 代价极小，而经路由器发现要多耗一轮——
+	// 而"该建清单时模型却先花一轮去 list/describe"恰恰会削弱这个工具的意义。
+	ToolTodo,
+	// web_search 直出：buildBasePrompt 点名了它（"需要最新/实时信息时用 web_search"）。
+	// 它的判据与其它直出工具一致——提示词提到的工具必须在工具列表里有 schema，
+	// 否则模型只能先花一轮去 tool_router 里 list/describe，甚至照着名字瞎猜参数。
+	// 参数表很短（query / max_results / site），直出的 prompt 代价很小；
+	// 而"想联网却先花一轮发现工具"会明显削弱这个工具的用处。
+	ToolWebSearch,
 }

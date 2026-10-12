@@ -8,6 +8,7 @@ import {
   Eye,
   FileCode,
   FileDiff,
+  ListChecks,
   ListTodo,
   PanelRight,
   Terminal,
@@ -24,6 +25,7 @@ import PlanPane from '@/panes/PlanPane.vue'
 import TasksPane from '@/panes/TasksPane.vue'
 import SubagentPane from '@/panes/SubagentPane.vue'
 import PreviewPane from '@/panes/PreviewPane.vue'
+import TodoPane from '@/panes/TodoPane.vue'
 
 const sessionStore = useSessionStore()
 const paneStore = usePaneStore()
@@ -86,6 +88,8 @@ const PANE_ICONS = {
   tasks: ListTodo,
   subagent: Bot,
   preview: Eye,
+  // todo 与 tasks 图标刻意区分：tasks 是"定时任务"（ListTodo），todo 是待办清单（ListChecks）
+  todo: ListChecks,
 }
 
 function paneIcon(pane) {
@@ -126,6 +130,7 @@ const paneComponents = {
   tasks: TasksPane,
   subagent: SubagentPane,
   preview: PreviewPane,
+  todo: TodoPane,
 }
 </script>
 

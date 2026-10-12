@@ -78,7 +78,7 @@
 
 /**
  * 面板类型
- * @typedef {'chat'|'diff'|'terminal'|'file-editor'|'plan'|'tasks'|'subagent'|'preview'} PaneType
+ * @typedef {'chat'|'diff'|'terminal'|'file-editor'|'plan'|'tasks'|'subagent'|'preview'|'todo'} PaneType
  */
 
 /**
@@ -362,4 +362,5 @@ export const PANE_TITLES = {
   tasks: 'Tasks',
   subagent: 'Subagents',
   preview: 'Preview',
+  todo: 'Todo',
 }

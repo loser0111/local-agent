@@ -131,6 +131,7 @@ export async function executePlan(sessionId, planId, useStream, handlers = {}) {
       onReplyDelta: handlers.onReplyDelta,
       onToolCallStart: handlers.onToolCallStart,
       onToolCallEnd: handlers.onToolCallEnd,
+      onTodoUpdate: handlers.onTodoUpdate,
     })
     try {
       return await ExecutePlan(planId, !!useStream)

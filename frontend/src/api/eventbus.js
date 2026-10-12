@@ -94,6 +94,11 @@ function dispatchChat(ev) {
     case 'plan_update':
       h.onPlanUpdate?.(ev.plan, ev)
       break
+    // 待办清单已变化（事件携带全量清单）。与 plan_update 同属"面板级"事件：
+    // 不依附某一轮，前端按 sessionId 归位到对应会话的桶里。
+    case 'todo_update':
+      h.onTodoUpdate?.(ev.todos, ev)
+      break
     // 自动摘要压缩刚生效：用量会立刻下降。这是设计内行为，但用户只看到数字掉了一半，
     // 不解释一句就会以为对话被截断了。
     case 'context_compacted':
@@ -133,7 +138,7 @@ function ensureStarted() {
  *
  * @param {string} sessionId
  * @param {object} handlers 见 dispatchChat 的 switch：onReplyDelta / onToolCallStart /
- *   onToolCallEnd / onPlanUpdate / onContextCompacted / onUsage / onCancelled
+ *   onToolCallEnd / onPlanUpdate / onTodoUpdate / onContextCompacted / onUsage / onCancelled
  * @returns {() => void}
  */
 export function subscribeChat(sessionId, handlers = {}) {

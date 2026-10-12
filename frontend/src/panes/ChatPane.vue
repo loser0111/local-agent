@@ -6,6 +6,7 @@ import { usePaneStore } from '@/stores/pane'
 import { useDiffStore } from '@/stores/diff'
 import { useSettingStore } from '@/stores/setting'
 import { usePlanStore } from '@/stores/plan'
+import { useTodoStore } from '@/stores/todo'
 import { appendMessage, appendConversation, chat, stopChat, getContextStat, saveAttachment, fetchImageURL, getAttachmentDataURL } from '@/api/session'
 import { fetchPendingInteraction } from '@/api/interaction'
 import { DEFAULT_VIEW_MODE } from '@/types'
@@ -25,6 +26,7 @@ const paneStore = usePaneStore()
 const diffStore = useDiffStore()
 const settingStore = useSettingStore()
 const planStore = usePlanStore()
+const todoStore = useTodoStore()
 const permissionStore = usePermissionStore()
 const askStore = useAskStore()
 const skillsStore = useSkillsStore()
@@ -619,6 +621,7 @@ async function sendMessage() {
         stream: false, // 规划器固定非流式；免计划直答取完整回复
         plan: true,
         onPlanUpdate: (p) => planStore.applyUpdate(sid, p),
+        onTodoUpdate: (items) => todoStore.setTodos(sid, items),
       })
       updateContextStat(sid, result?.context)
       if (result?.plan) {
@@ -676,6 +679,10 @@ async function sendMessage() {
         // 独立的上下文里，只有结论会回到聊天），不打开面板用户就完全看不到它在做什么。
         // 同样走后台打开：右侧收起时不强行铺开，图标会出现在窄条上。
         if (tc?.name === 'spawn_agent') paneStore.openPaneBackground(sid, 'subagent')
+        // todo 工具第一次被调用时打开待办面板：清单是"长任务做到哪了"的对外窗口，
+        // 模型一建清单用户就该看得到（否则清单只存在于模型与上下文里）。
+        // 同样不强行铺开——收起时面板以图标出现在窄条上，也是一种可见的提示。
+        if (tc?.name === 'todo') paneStore.openPaneBackground(sid, 'todo')
       },
       onToolCallEnd: (tc) => {
         chatStore.updateToolCall(sid, localMsg.id, tc.id, {
@@ -711,6 +718,7 @@ async function sendMessage() {
       onUsage: (ev) => {
         chatStore.setUsage(sid, ev)
       },
+      onTodoUpdate: (items) => todoStore.setTodos(sid, items),
     })
     updateContextStat(sid, result?.context)
 
@@ -975,6 +983,12 @@ function openDiff() {
     paneStore.openPane(sessionId.value, 'diff')
   }
 }
+
+function openTodo() {
+  if (sessionId.value) {
+    paneStore.openPane(sessionId.value, 'todo')
+  }
+}
 </script>
 
 <template>
@@ -1117,6 +1131,20 @@ function openDiff() {
             <path d="M5 7h6M5 10h4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" />
           </svg>
           计划
+        </button>
+        <button
+          class="tool-btn todo-btn"
+          :class="{ active: todoStore.todosOf(sessionId).length > 0 }"
+          :disabled="!sessionId"
+          title="待办清单：模型在多步骤任务里列出的步骤与进度"
+          @click="openTodo"
+        >
+          <svg width="15" height="15" viewBox="0 0 16 16" fill="none">
+            <path d="M3 4.5l1.2 1.2L6.5 3.4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" />
+            <path d="M3 9.5l1.2 1.2 2.3-2.3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" />
+            <path d="M9 5h4M9 10h4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" />
+          </svg>
+          待办
         </button>
         <button
           class="tool-btn"

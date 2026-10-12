@@ -1993,6 +1993,26 @@ export namespace store {
 	        this.rollingGuardBlocks = source["rollingGuardBlocks"];
 	    }
 	}
+	export class TodoItem {
+	    id: string;
+	    text: string;
+	    status: string;
+	    createdAt?: number;
+	    updatedAt?: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new TodoItem(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.text = source["text"];
+	        this.status = source["status"];
+	        this.createdAt = source["createdAt"];
+	        this.updatedAt = source["updatedAt"];
+	    }
+	}
 	export class UsageTotals {
 	    turns: number;
 	    inputUncached: number;
@@ -2088,6 +2108,7 @@ export namespace store {
 	    parentId?: string;
 	    subagent?: SubagentInfo;
 	    usageTotals?: UsageTotals;
+	    todos?: TodoItem[];
 	    thinkingEnabled?: boolean;
 	    thinkingBudget?: number;
 	
@@ -2125,6 +2146,7 @@ export namespace store {
 	        this.parentId = source["parentId"];
 	        this.subagent = this.convertValues(source["subagent"], SubagentInfo);
 	        this.usageTotals = this.convertValues(source["usageTotals"], UsageTotals);
+	        this.todos = this.convertValues(source["todos"], TodoItem);
 	        this.thinkingEnabled = source["thinkingEnabled"];
 	        this.thinkingBudget = source["thinkingBudget"];
 	    }
@@ -2205,6 +2227,7 @@ export namespace store {
 	        this.thinkingBudget = source["thinkingBudget"];
 	    }
 	}
+	
 	
 	export class TokenUsage {
 	    inputUncached: number;

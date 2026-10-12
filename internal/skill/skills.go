@@ -642,7 +642,8 @@ func (t *ReadSkillTool) Execute(ctx context.Context, args map[string]interface{}
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("# 技能：%s\n技能目录：%s\n", m.Name, m.Dir))
 	if len(m.AllowedTools) > 0 {
-		// 标准字段，当前仅作提示：本项目尚未把它接入权限网关做硬约束
+		// 显式 /技能名 调用时这已经是硬约束（BuildView 据此收窄工具视图，见 BuildOptions.AllowedTools）；
+		// 经 read_skill 按需加载时仍是声明——那一步尚未接入，措辞不能含糊。
 		sb.WriteString(fmt.Sprintf("该技能声明使用的工具：%s\n", strings.Join(m.AllowedTools, ", ")))
 	}
 	sb.WriteString("\n")
