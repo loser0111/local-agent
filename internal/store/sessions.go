@@ -148,15 +148,19 @@ type Session struct {
 
 // SessionConfig 创建会话时的配置
 type SessionConfig struct {
-	Title          string   `json:"title"`
-	Project        string   `json:"project"`
-	Model          string   `json:"model"`
+	Title string `json:"title"`
+	// 项目地址
+	Project string `json:"project"`
+	// 模型配置
+	Model string `json:"model"`
+	// 权限管理
 	PermissionMode string   `json:"permissionMode"`
 	ViewMode       string   `json:"viewMode"` // 视图模式：控制工具调用过程的展示粒度
 	Environment    string   `json:"environment"`
-	EnabledTools   []string `json:"enabledTools"`       // 本会话可用的工具 ID 白名单（空=全部已启用工具）
-	EnabledSkills  []string `json:"enabledSkills"`      // 本会话可用的技能 ID 白名单（空=全部已启用技能）
-	ParentID       string   `json:"parentId,omitempty"` // 非空=子代理会话（不出现在会话列表里）
+	EnabledTools   []string `json:"enabledTools"`  // 本会话可用的工具 ID 白名单（空=全部已启用工具）
+	EnabledSkills  []string `json:"enabledSkills"` // 本会话可用的技能 ID 白名单（空=全部已启用技能）
+	// 会话配置
+	ParentID string `json:"parentId,omitempty"` // 非空=子代理会话（不出现在会话列表里）
 }
 
 // SessionPatch 会话部分字段更新（指针为 nil 表示不更新）

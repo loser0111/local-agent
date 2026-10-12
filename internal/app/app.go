@@ -10,7 +10,6 @@ import (
 	"wails-tmp/internal/agent"
 	"wails-tmp/internal/diff"
 
-	wailsRuntime "github.com/wailsapp/wails/v2/pkg/runtime"
 	"wails-tmp/internal/llm"
 	"wails-tmp/internal/media"
 	"wails-tmp/internal/memstore"
@@ -19,6 +18,8 @@ import (
 	"wails-tmp/internal/snapshot"
 	"wails-tmp/internal/store"
 	"wails-tmp/internal/tool"
+
+	wailsRuntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
 // App struct
@@ -97,23 +98,31 @@ func (a *App) Startup(ctx context.Context) {
 		fmt.Printf("[App] 获取数据目录失败: %v\n", err)
 		baseDir = "."
 	}
+
 	// 初始化模型存储：~/.local-agent/models.json
 	a.modelStore = store.NewModelStore(filepath.Join(baseDir, "models.json"))
+
 	// 初始化会话存储：~/.local-agent/sessions/*.json
 	a.sessionStore = store.NewSessionStore(filepath.Join(baseDir, "sessions"))
+
 	// 初始化附件存储：~/.local-agent/attachments/（图片字节，与会话 JSON 分离）
 	a.attachments = media.NewAttachmentStore(filepath.Join(baseDir, "attachments"))
+
 	// 初始化技能存储：~/.local-agent/skills/（文件夹 + SKILL.md）
 	a.skillStore = skill.NewSkillStore(filepath.Join(baseDir, "skills"))
 	a.skillInstall = skill.NewSkillInstaller(a.skillStore)
 	a.skillStore.EnsureDefaultSkill() // 首次运行写入示例技能
+
 	// 初始化工具配置存储与工具管理器（~/.local-agent/tools.json）
 	a.toolStore = tool.NewToolStore(filepath.Join(baseDir, "tools.json"))
 	a.toolManager = NewToolManager(a.toolStore, a.skillStore)
+
 	// 初始化差异服务（基于 git 快照计算工作区 diff）
 	a.diffService = diff.NewDiffService()
+
 	// 初始化计划存储：~/.local-agent/plans/（重启时 running 计划自动置为失败）
 	a.planStore = store.NewPlanStore(filepath.Join(baseDir, "plans"))
+
 	// 初始化权限管理（授权存储 / 审计 / 授权询问回路）与文件改动归因
 	a.baseDir = baseDir
 	a.runs = &agent.RunRegistry{}
@@ -121,20 +130,26 @@ func (a *App) Startup(ctx context.Context) {
 	a.subagents = agent.NewSubagentTracker()
 	a.ensurePermissionState()
 	a.fileChanges = tool.NewFileChangeLog(500)
+
 	// 初始化长期记忆：~/.local-agent/memory/（失败不阻断启动）
 	if store, err := memstore.NewMemoryStore(filepath.Join(baseDir, "memory"), memstore.MemoryConfig{}); err != nil {
 		fmt.Printf("[App] 初始化记忆库失败: %v\n", err)
 	} else {
 		a.memory = store
 	}
+
 	// 初始化上下文压缩策略：~/.local-agent/context.json（不存在则全用内置默认值）
 	a.contextPrefs = store.NewContextPrefsStore(filepath.Join(baseDir, "context.json"))
+
 	// 估算校准系数：不存在 = 还没观测过，一律按 1.0（纯字符估算）
 	a.tokenCalib = llm.NewCalibStore(filepath.Join(baseDir, "token-calib.json"))
+
 	// 看图能力自检结论：不存在 = 还没测过（"没测过"与"测过且未通过"必须区分）
 	a.visionVerdicts = store.NewVisionVerdictStore(filepath.Join(baseDir, "vision-check.json"))
+
 	// 提示缓存偏好：不存在 = 关闭（失败方向是"更保守"，不是"更激进"）
 	a.promptCachePrefs = store.NewPromptCachePrefsStore(filepath.Join(baseDir, "prompt-cache.json"))
+
 	// 各会话最近一次用量（内存态排障视图）
 	a.usageLog = &usageLog{}
 }

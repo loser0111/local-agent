@@ -38,7 +38,7 @@ type ChatResult struct {
 // ===== 常量 =====
 
 const (
-	MaxChatTurns = 50
+	MaxChatTurns = 200
 
 	SystemPrompt = "你是一个智能助手，可以调用工具来帮助用户解决问题。"
 )

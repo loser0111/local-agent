@@ -915,12 +915,28 @@ const (
 	ModeAcceptEdits Mode = "acceptEdits" // 文件编辑类自动放行、命令仍需确认
 	ModePlan        Mode = "plan"        // 只读探索：写操作直接拒绝
 	ModeAuto        Mode = "auto"        // 仅项目目录内的写操作自动放行，越界一律询问
+
+	ModeAlwaysAllow  Mode = "alwaysAllow"  // 表示总是同意，agent获取系统的完全控制权限
+	ModeAskUser      Mode = "askUser"      // 表示当需要编辑文件或者是运行命令的时候需要询问用户
+	ModeAutoApproval Mode = "autoApproval" // 表示需要模型自动判断是否需要审批，是否存在风险
+
 )
 
 // ValidMode 校验模式取值
 func ValidMode(m Mode) bool {
+	if ValidModeV2(m) {
+		return true
+	}
 	switch m {
 	case ModeManual, ModeAcceptEdits, ModePlan, ModeAuto:
+		return true
+	default:
+		return false
+	}
+}
+func ValidModeV2(m Mode) bool {
+	switch m {
+	case ModeAlwaysAllow, ModeAskUser, ModeAutoApproval:
 		return true
 	default:
 		return false
