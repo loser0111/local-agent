@@ -158,6 +158,10 @@ export function GetSessionPlan(arg1) {
   return window['go']['app']['App']['GetSessionPlan'](arg1);
 }
 
+export function GetSessionTodos(arg1) {
+  return window['go']['app']['App']['GetSessionTodos'](arg1);
+}
+
 export function GetSkill(arg1) {
   return window['go']['app']['App']['GetSkill'](arg1);
 }

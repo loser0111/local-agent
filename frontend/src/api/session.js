@@ -212,7 +212,7 @@ export async function updateSession(id, patch) {
  * 后端会持久化所有中间消息（assistant+tool_calls, tool结果, 最终回复）
  * @param {string} sessionId
  * @param {string} query
- * @param {{stream?:boolean, plan?:boolean, onReplyDelta?:Function, onToolCallStart?:Function, onToolCallEnd?:Function, onPlanUpdate?:Function, }} callbacks
+ * @param {{stream?:boolean, plan?:boolean, onReplyDelta?:Function, onToolCallStart?:Function, onToolCallEnd?:Function, onPlanUpdate?:Function, onTodoUpdate?:Function}} callbacks
  * @returns {Promise<{reply:string, toolCalls?:array, messages?:array, plan?:object, error?:string}>}
  */
 export async function chat(
@@ -225,6 +225,7 @@ export async function chat(
     onToolCallStart,
     onToolCallEnd,
     onPlanUpdate,
+    onTodoUpdate,
     onCancelled,
     onContextCompacted,
     onUsage,
@@ -241,6 +242,7 @@ export async function chat(
       onToolCallStart,
       onToolCallEnd,
       onPlanUpdate,
+      onTodoUpdate,
       onContextCompacted,
       onUsage,
       onCancelled,

@@ -190,6 +190,7 @@ export namespace app {
 	    cancelled?: boolean;
 	    cancelKind?: string;
 	    context?: agent.ContextStat;
+	    thinking?: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new ChatResult(source);
@@ -206,6 +207,7 @@ export namespace app {
 	        this.cancelled = source["cancelled"];
 	        this.cancelKind = source["cancelKind"];
 	        this.context = this.convertValues(source["context"], agent.ContextStat);
+	        this.thinking = source["thinking"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -1844,6 +1846,7 @@ export namespace store {
 	    toolCallId?: string;
 	    createdAt: number;
 	    attachments?: media.Attachment[];
+	    thinking?: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new Message(source);
@@ -1858,6 +1861,7 @@ export namespace store {
 	        this.toolCallId = source["toolCallId"];
 	        this.createdAt = source["createdAt"];
 	        this.attachments = this.convertValues(source["attachments"], media.Attachment);
+	        this.thinking = source["thinking"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -1989,6 +1993,26 @@ export namespace store {
 	        this.rollingGuardBlocks = source["rollingGuardBlocks"];
 	    }
 	}
+	export class TodoItem {
+	    id: string;
+	    text: string;
+	    status: string;
+	    createdAt?: number;
+	    updatedAt?: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new TodoItem(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.text = source["text"];
+	        this.status = source["status"];
+	        this.createdAt = source["createdAt"];
+	        this.updatedAt = source["updatedAt"];
+	    }
+	}
 	export class UsageTotals {
 	    turns: number;
 	    inputUncached: number;
@@ -2084,6 +2108,9 @@ export namespace store {
 	    parentId?: string;
 	    subagent?: SubagentInfo;
 	    usageTotals?: UsageTotals;
+	    todos?: TodoItem[];
+	    thinkingEnabled?: boolean;
+	    thinkingBudget?: number;
 	
 	    static createFrom(source: any = {}) {
 	        return new Session(source);
@@ -2119,6 +2146,9 @@ export namespace store {
 	        this.parentId = source["parentId"];
 	        this.subagent = this.convertValues(source["subagent"], SubagentInfo);
 	        this.usageTotals = this.convertValues(source["usageTotals"], UsageTotals);
+	        this.todos = this.convertValues(source["todos"], TodoItem);
+	        this.thinkingEnabled = source["thinkingEnabled"];
+	        this.thinkingBudget = source["thinkingBudget"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -2149,6 +2179,8 @@ export namespace store {
 	    enabledTools: string[];
 	    enabledSkills: string[];
 	    parentId?: string;
+	    thinkingEnabled?: boolean;
+	    thinkingBudget?: number;
 	
 	    static createFrom(source: any = {}) {
 	        return new SessionConfig(source);
@@ -2165,6 +2197,8 @@ export namespace store {
 	        this.enabledTools = source["enabledTools"];
 	        this.enabledSkills = source["enabledSkills"];
 	        this.parentId = source["parentId"];
+	        this.thinkingEnabled = source["thinkingEnabled"];
+	        this.thinkingBudget = source["thinkingBudget"];
 	    }
 	}
 	export class SessionPatch {
@@ -2174,6 +2208,8 @@ export namespace store {
 	    viewMode?: string;
 	    status?: string;
 	    project?: string;
+	    thinkingEnabled?: boolean;
+	    thinkingBudget?: number;
 	
 	    static createFrom(source: any = {}) {
 	        return new SessionPatch(source);
@@ -2187,8 +2223,11 @@ export namespace store {
 	        this.viewMode = source["viewMode"];
 	        this.status = source["status"];
 	        this.project = source["project"];
+	        this.thinkingEnabled = source["thinkingEnabled"];
+	        this.thinkingBudget = source["thinkingBudget"];
 	    }
 	}
+	
 	
 	export class TokenUsage {
 	    inputUncached: number;

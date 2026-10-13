@@ -183,8 +183,11 @@ func (r *appRecorder) FlushStream() (func(string), func()) {
 //
 // 工具视图、权限网关、提问回路都在这里装配——这三样是子代理唯一需要与主会话不同的地方，
 // 所以装配点必须留在调用方（子代理会走另一个构造函数，最终交给同一个 runToolLoop）。
+//
+// allowedTools 是本轮生效的技能/角色声明的工具白名单（见 buildBasePromptWithSkill）；
+// 为空表示不额外收窄。
 func (a *App) newMainAgentRun(run *agent.RunControl, session *store.Session, dir, systemPrompt string,
-	model *store.Model, useStream, compact bool) *agentRun {
+	allowedTools []string, model *store.Model, useStream, compact bool) *agentRun {
 
 	sessionID, runID, planID := "", "", ""
 	if run != nil {
@@ -197,11 +200,13 @@ func (a *App) newMainAgentRun(run *agent.RunControl, session *store.Session, dir
 	toolView := a.toolManager.BuildView(context.Background(), BuildOptions{
 		EnabledTools:  session.EnabledTools,
 		EnabledSkills: session.EnabledSkills,
-		ProjectDir:    dir,
-		SessionID:     sessionID,
-		Changes:       a.fileChanges,
-		Attachments:   a.attachments,
-		Enforcer:      toolEnforcer{a.newPermissionEnforcer(session, dir)},
+		// 本轮显式调用的技能所声明的工具白名单（#4）：装配期据此收窄工具视图
+		AllowedTools: allowedTools,
+		ProjectDir:   dir,
+		SessionID:    sessionID,
+		Changes:      a.fileChanges,
+		Attachments:  a.attachments,
+		Enforcer:     toolEnforcer{a.newPermissionEnforcer(session, dir)},
 		// ask_user 的回路：绑定当前会话（阻塞等待用户作答后把结果回填给模型）
 		Ask: func(ctx context.Context, req agent.AskRequest) (agent.AskAnswer, error) {
 			return a.askUser(ctx, sessionID, req)
@@ -217,6 +222,9 @@ func (a *App) newMainAgentRun(run *agent.RunControl, session *store.Session, dir
 		OnMemoryTouch: func(ids []string) {
 			_ = a.sessionStore.AddSurfacedMemoryIDs(sessionID, ids)
 		},
+		// todo：清单存会话文件（落盘，重启后仍看得到），变化后推给前端面板
+		Todos:        a.sessionStore,
+		OnTodoChange: a.emitTodo,
 	})
 
 	return &agentRun{

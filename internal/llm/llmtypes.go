@@ -152,6 +152,20 @@ type LLMToolDef struct {
 	Parameters  json.RawMessage `json:"parameters"`
 }
 
+// ===== [新增] Extended Thinking 支持 =====
+
+// LLMThinking 表示 extended thinking 的启用与参数配置
+// 支持 Anthropic 的 thinking 参数。OpenAI o1 会通过 include_thinking 单独处理。
+type LLMThinking struct {
+	Type         string `json:"type"`          // 固定值 "enabled"
+	BudgetTokens int    `json:"budget_tokens"` // 预留给 thinking 的 token 数
+}
+
+// IsThinkingEnabled 判断是否启用了 thinking
+func (t *LLMThinking) IsThinkingEnabled() bool {
+	return t != nil && t.Type == "enabled" && t.BudgetTokens > 0
+}
+
 // LLMReq LLM 请求
 type LLMReq struct {
 	Model       string       `json:"model"`
@@ -159,6 +173,14 @@ type LLMReq struct {
 	Temperature float64      `json:"temperature"`
 	Stream      bool         `json:"stream"`
 	Tools       []LLMTool    `json:"tools,omitempty"`
+
+	// [新增] Extended thinking 配置
+	// Anthropic thinking 参数
+	Thinking *LLMThinking `json:"thinking,omitempty"`
+
+	// OpenAI o1 thinking 标记（include_thinking 参数）
+	// 注：这里仅用于标记，实际的 include_thinking 会在 openai.go 中处理
+	IncludeThinking *bool `json:"include_thinking,omitempty"`
 }
 
 // LLMResp LLM 响应
@@ -271,6 +293,11 @@ type LLMResp struct {
 	// Usage 用量。OpenAI 兼容响应直接映射进来；Anthropic 在适配器里映射。
 	// 部分网关的流式响应不带 usage，此时保持零值——估算会退回上一锚点+增量。
 	Usage LLMUsage `json:"usage"`
+
+	// [新增] 模型生成的思考过程内容（从响应中提取）
+	// 仅在启用 thinking 且模型返回时有值
+	// 这个字段不会被发送回给模型，仅作历史记录
+	Thinking string `json:"thinking,omitempty"`
 }
 
 // LLMChoice LLM 选择项

@@ -144,6 +144,15 @@ type anthropicReq struct {
 	Tools       []anthropicTool    `json:"tools,omitempty"`
 	Temperature float64            `json:"temperature,omitempty"`
 	Stream      bool               `json:"stream,omitempty"`
+
+	// [新增] extended thinking 参数
+	Thinking *anthropicThinking `json:"thinking,omitempty"`
+}
+
+// [新增] anthropicThinking Anthropic API 的 thinking 参数
+type anthropicThinking struct {
+	Type         string `json:"type"`
+	BudgetTokens int    `json:"budget_tokens"`
 }
 
 type anthropicMessage struct {
@@ -351,6 +360,7 @@ func ToAnthropicRequest(req *LLMReq) *anthropicReq {
 		Temperature: req.Temperature,
 		Stream:      req.Stream,
 		Tools:       toAnthropicTools(req.Tools),
+		Thinking:    toAnthropicThinking(req.Thinking), // [新增]
 	}
 
 	var systemParts []string
@@ -472,6 +482,17 @@ func rawJSONObject(s string) json.RawMessage {
 	return b
 }
 
+// [新增] toAnthropicThinking 将通用 thinking 配置转换为 Anthropic 格式
+func toAnthropicThinking(t *LLMThinking) *anthropicThinking {
+	if !t.IsThinkingEnabled() {
+		return nil
+	}
+	return &anthropicThinking{
+		Type:         "enabled",
+		BudgetTokens: t.BudgetTokens,
+	}
+}
+
 func toAnthropicTools(tools []LLMTool) []anthropicTool {
 	if len(tools) == 0 {
 		return nil
@@ -528,10 +549,14 @@ func fromAnthropicResponse(r *anthropicResp) *LLMResp {
 	msg := LLMMessage{Role: store.RoleAssistant}
 	var text strings.Builder
 	var calls []LLMToolCall
+	var thinkingText string // [新增] 收集 thinking 内容
+
 	for _, b := range r.Content {
 		switch b.Type {
 		case "text":
 			text.WriteString(b.Text)
+		case "thinking": // [新增] 处理 thinking 块
+			thinkingText = b.Text
 		case "tool_use":
 			args := "{}"
 			if len(b.Input) > 0 {
@@ -555,9 +580,10 @@ func fromAnthropicResponse(r *anthropicResp) *LLMResp {
 		finish = FinishReasonToolCalls
 	}
 	return &LLMResp{
-		ID:     r.ID,
-		Model:  r.Model,
-		Object: "chat.completion",
+		ID:       r.ID,
+		Model:    r.Model,
+		Object:   "chat.completion",
+		Thinking: thinkingText, // [新增] 思考内容
 		Choices: []LLMChoice{{
 			FinishReason: finish,
 			Message:      msg,

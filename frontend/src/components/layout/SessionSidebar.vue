@@ -281,7 +281,7 @@ async function handleDelete(e, id) {
 
 <style scoped lang="scss">
 .session-sidebar {
-  background-color: $color-bg-secondary;
+  background: $gradient-sidebar;
   border-right: 1px solid $color-border;
   display: flex;
   flex-direction: column;
@@ -390,6 +390,7 @@ async function handleDelete(e, id) {
 
   &.active {
     background-color: rgb(var(--color-primary-rgb) / 0.15);
+    box-shadow: inset 2px 0 0 $color-primary;
   }
 }
 

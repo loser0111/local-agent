@@ -26,7 +26,11 @@ onMounted(() => {
 </script>
 
 <template>
-  <RouterView />
+  <router-view v-slot="{ Component }">
+    <transition name="slide-fade" mode="out-in">
+      <component :is="Component" />
+    </transition>
+  </router-view>
 
   <!-- 授权 / 提问弹窗：与上面的 onUserInteraction 收口在同一层。
        它们原先挂在 ChatPane 上，而 ChatPane 只在工作区渲染 —— 在设置页时

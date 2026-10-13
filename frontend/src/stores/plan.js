@@ -3,6 +3,7 @@ import { ref, computed } from 'vue'
 import { getPlan, savePlan, executePlan, cancelPlan, reopenPlan } from '@/api/plan'
 import { useChatStore } from '@/stores/chat'
 import { useSessionStore } from '@/stores/session'
+import { useTodoStore } from '@/stores/todo'
 
 /**
  * 计划 Store —— 每个会话各占一个桶
@@ -14,6 +15,7 @@ import { useSessionStore } from '@/stores/session'
  */
 export const usePlanStore = defineStore('plan', () => {
   const sessionStore = useSessionStore()
+  const todoStore = useTodoStore()
 
   // sessionId -> Plan / boolean
   const planBySession = ref({})
@@ -166,6 +168,8 @@ export const usePlanStore = defineStore('plan', () => {
             })
           }
         },
+        // 计划执行期间模型也可能用 todo 工具跟踪步骤：清单同样要落到对应会话的桶里
+        onTodoUpdate: (items) => todoStore.setTodos(sessionId, items),
       })
 
       finalizePlaceholder(null)

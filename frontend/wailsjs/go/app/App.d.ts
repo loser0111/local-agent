@@ -91,6 +91,8 @@ export function GetSession(arg1:string):Promise<store.Session>;
 
 export function GetSessionPlan(arg1:string):Promise<store.Plan>;
 
+export function GetSessionTodos(arg1:string):Promise<Array<store.TodoItem>>;
+
 export function GetSkill(arg1:string):Promise<skill.SkillDetail>;
 
 export function GetSubagentMessages(arg1:string):Promise<Array<store.Message>>;

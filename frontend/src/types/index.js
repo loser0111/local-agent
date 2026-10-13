@@ -15,6 +15,8 @@
  * @property {string} model
  * @property {string} permissionMode
  * @property {string[]} openPanes
+ * @property {boolean} [thinkingEnabled] 是否启用 extended thinking
+ * @property {number} [thinkingBudget] thinking token 预算
  */
 
 /**
@@ -71,11 +73,12 @@
  * @property {Attachment[]} [attachments] 本条消息携带的图片
  * @property {number} createdAt
  * @property {boolean} [streaming]
+ * @property {string} [thinking] 模型生成的思考过程（仅 assistant 角色）
  */
 
 /**
  * 面板类型
- * @typedef {'chat'|'diff'|'terminal'|'file-editor'|'plan'|'tasks'|'subagent'|'preview'} PaneType
+ * @typedef {'chat'|'diff'|'terminal'|'file-editor'|'plan'|'tasks'|'subagent'|'preview'|'todo'} PaneType
  */
 
 /**
@@ -359,4 +362,5 @@ export const PANE_TITLES = {
   tasks: 'Tasks',
   subagent: 'Subagents',
   preview: 'Preview',
+  todo: 'Todo',
 }

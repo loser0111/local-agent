@@ -54,6 +54,11 @@ type Message struct {
 	// 这里存的是**引用**（ID/尺寸/媒体类型/相对路径），字节躺在附件目录里。
 	// 会话文件因此保持轻量——它是每次追加消息都要整体重写的那份数据。
 	Attachments []media.Attachment `json:"attachments,omitempty"`
+
+	// [新增] 模型生成的思考过程（仅当 role=assistant 且启用 thinking 时）
+	// 这是一个只读字段，不会被修改或重新处理
+	// 不参与请求构建，仅作历史记录供 UI 展示
+	Thinking string `json:"thinking,omitempty"`
 }
 
 // Conversation 单轮对话记录（用户提问 + AI 回答），借鉴 01agent
@@ -144,19 +149,67 @@ type Session struct {
 	// 用**指针**而不是值：统计上线前的会话文件里没有这个字段，nil 表示"这个会话没有统计数据"，
 	// 界面据此显示空态而不是一排 0——值类型无法区分"没数据"与"数据恰好为 0"。
 	UsageTotals *UsageTotals `json:"usageTotals,omitempty"`
+
+	// Todos 主会话的待办清单（todo 工具维护）。落盘而不是只放内存：
+	// 清单是"长任务做到哪了"的记录，重启后要能接着看；上下文被压缩后它也是
+	// 模型重建进度的依据。子代理会话不用它（父会话的清单才是用户关心的那份）。
+	Todos []TodoItem `json:"todos,omitempty"`
+
+	// [新增] Thinking 相关配置
+	ThinkingEnabled bool `json:"thinkingEnabled,omitempty"` // 是否启用 extended thinking
+	ThinkingBudget  int  `json:"thinkingBudget,omitempty"`  // thinking token 预算（如 5000）
+}
+
+// TodoItem 待办清单的一项。
+//
+// ID 由服务端生成并保证在会话内唯一：模型只需要回传 id 就能改状态，
+// 不必（也不该）靠"第几项"这种位置来定位——清单随时可能被增删。
+type TodoItem struct {
+	ID     string `json:"id"`
+	Text   string `json:"text"`
+	Status string `json:"status"` // pending / in_progress / done
+	// CreatedAt / UpdatedAt 便于界面排序与"最近改过什么"，Unix 毫秒。
+	CreatedAt int64 `json:"createdAt,omitempty"`
+	UpdatedAt int64 `json:"updatedAt,omitempty"`
+}
+
+// 待办状态取值。与 plan 的步骤状态（StepPending/...）刻意分开命名：
+// 两者语义相近但生命周期完全不同（todo 不参与审批、不落 git）。
+const (
+	TodoPending    = "pending"
+	TodoInProgress = "in_progress"
+	TodoDone       = "done"
+)
+
+// ValidTodoStatus 校验状态取值
+func ValidTodoStatus(s string) bool {
+	switch s {
+	case TodoPending, TodoInProgress, TodoDone:
+		return true
+	default:
+		return false
+	}
 }
 
 // SessionConfig 创建会话时的配置
 type SessionConfig struct {
-	Title          string   `json:"title"`
-	Project        string   `json:"project"`
-	Model          string   `json:"model"`
+	Title string `json:"title"`
+	// 项目地址
+	Project string `json:"project"`
+	// 模型配置
+	Model string `json:"model"`
+	// 权限管理
 	PermissionMode string   `json:"permissionMode"`
 	ViewMode       string   `json:"viewMode"` // 视图模式：控制工具调用过程的展示粒度
 	Environment    string   `json:"environment"`
-	EnabledTools   []string `json:"enabledTools"`       // 本会话可用的工具 ID 白名单（空=全部已启用工具）
-	EnabledSkills  []string `json:"enabledSkills"`      // 本会话可用的技能 ID 白名单（空=全部已启用技能）
-	ParentID       string   `json:"parentId,omitempty"` // 非空=子代理会话（不出现在会话列表里）
+	EnabledTools   []string `json:"enabledTools"`  // 本会话可用的工具 ID 白名单（空=全部已启用工具）
+	EnabledSkills  []string `json:"enabledSkills"` // 本会话可用的技能 ID 白名单（空=全部已启用技能）
+	// 会话配置
+	ParentID string `json:"parentId,omitempty"` // 非空=子代理会话（不出现在会话列表里）
+
+	// Thinking 相关配置
+	ThinkingEnabled bool `json:"thinkingEnabled,omitempty"` // 是否启用 extended thinking
+	ThinkingBudget  int  `json:"thinkingBudget,omitempty"`  // thinking token 预算（如 5000）
 }
 
 // SessionPatch 会话部分字段更新（指针为 nil 表示不更新）
@@ -167,6 +220,10 @@ type SessionPatch struct {
 	ViewMode       *string `json:"viewMode,omitempty"`
 	Status         *string `json:"status,omitempty"`
 	Project        *string `json:"project,omitempty"`
+
+	// Thinking 相关配置更新
+	ThinkingEnabled *bool `json:"thinkingEnabled,omitempty"`
+	ThinkingBudget  *int  `json:"thinkingBudget,omitempty"`
 }
 
 // SessionStore 会话存储：每个会话一个 JSON 文件
@@ -493,6 +550,131 @@ func (s *SessionStore) SetIgnoreMemory(id string, ignore bool) error {
 	}
 	session.IgnoreMemory = ignore
 	return s.saveSession(session)
+}
+
+// ===== 待办清单（todo 工具）=====
+
+// Todos 读取本会话的待办清单（返回副本，调用方改它不影响存储）。
+func (s *SessionStore) Todos(id string) ([]TodoItem, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	session, err := s.loadSession(id)
+	if err != nil {
+		return nil, err
+	}
+	return append([]TodoItem(nil), session.Todos...), nil
+}
+
+// AddTodo 追加一项待办，返回新项。
+//
+// 加锁跨"读—改—写"整段：待办是模型在同一轮里可能连续调用多次的工具，
+// 只锁单次读写会让两次 add 互相覆盖（后写的那次把前一次的项丢掉）。
+func (s *SessionStore) AddTodo(id, text string) (TodoItem, error) {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return TodoItem{}, fmt.Errorf("待办内容不能为空")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	session, err := s.loadSession(id)
+	if err != nil {
+		return TodoItem{}, err
+	}
+	now := time.Now().UnixMilli()
+	item := TodoItem{
+		ID:        generateTodoID(),
+		Text:      text,
+		Status:    TodoPending,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	session.Todos = append(session.Todos, item)
+	if err := s.saveSession(session); err != nil {
+		return TodoItem{}, err
+	}
+	return item, nil
+}
+
+// UpdateTodo 改一项待办的文本与/或状态（text / status 为空表示不改该字段）。
+func (s *SessionStore) UpdateTodo(id, todoID, text, status string) (TodoItem, error) {
+	status = strings.TrimSpace(status)
+	if status != "" && !ValidTodoStatus(status) {
+		return TodoItem{}, fmt.Errorf("未知的待办状态: %s（可选 %s / %s / %s）", status, TodoPending, TodoInProgress, TodoDone)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	session, err := s.loadSession(id)
+	if err != nil {
+		return TodoItem{}, err
+	}
+	idx := indexOfTodo(session.Todos, todoID)
+	if idx < 0 {
+		return TodoItem{}, fmt.Errorf("未找到待办: %s", todoID)
+	}
+	item := &session.Todos[idx]
+	if t := strings.TrimSpace(text); t != "" {
+		item.Text = t
+	}
+	if status != "" {
+		item.Status = status
+	}
+	item.UpdatedAt = time.Now().UnixMilli()
+	if err := s.saveSession(session); err != nil {
+		return TodoItem{}, err
+	}
+	return *item, nil
+}
+
+// RemoveTodo 删除一项待办，返回被删掉的项。
+func (s *SessionStore) RemoveTodo(id, todoID string) (TodoItem, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	session, err := s.loadSession(id)
+	if err != nil {
+		return TodoItem{}, err
+	}
+	idx := indexOfTodo(session.Todos, todoID)
+	if idx < 0 {
+		return TodoItem{}, fmt.Errorf("未找到待办: %s", todoID)
+	}
+	removed := session.Todos[idx]
+	session.Todos = append(session.Todos[:idx], session.Todos[idx+1:]...)
+	if err := s.saveSession(session); err != nil {
+		return TodoItem{}, err
+	}
+	return removed, nil
+}
+
+// ClearTodos 清空清单，返回被清掉的条数。
+func (s *SessionStore) ClearTodos(id string) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	session, err := s.loadSession(id)
+	if err != nil {
+		return 0, err
+	}
+	n := len(session.Todos)
+	session.Todos = nil
+	if err := s.saveSession(session); err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
+func indexOfTodo(items []TodoItem, todoID string) int {
+	for i := range items {
+		if items[i].ID == todoID {
+			return i
+		}
+	}
+	return -1
+}
+
+// generateTodoID 生成待办 id。短前缀便于模型在正文里引用，也便于人工辨认。
+func generateTodoID() string {
+	random := make([]byte, 3)
+	_, _ = rand.Read(random)
+	return "todo-" + hex.EncodeToString(random)
 }
 
 // AddSurfacedMemoryIDs 记下本会话已注入/读过正文的记忆，避免下一圈再灌一遍。

@@ -57,15 +57,19 @@ export const usePaneStore = defineStore('pane', () => {
   /**
    * 后台自动打开面板（一轮跑完有文件改动、派生了子代理、生成了计划）
    *
-   * 与 openPane 的唯一区别：**不改变用户的收起状态**。收起后这些面板会以图标出现在窄条上
+   * 与 openPane 的唯一区别：默认**不改变用户的收起状态**。收起后这些面板会以图标出现在窄条上
    * ——"有新东西打开了"是看得见的，但不该因为一轮后台运行就把右侧强行铺开。
+   *
+   * expand=true 时例外：调用方认为"必须有可见内容"（例如 AI 实际改动了文件、diff 面板这次
+   * 真的装了东西），就把右侧铺开，避免出现"改了文件但右侧仍收着、界面看着像没反应"。
    */
-  function openPaneBackground(sessionId, paneType) {
+  function openPaneBackground(sessionId, paneType, expand = false) {
     const panes = getPanes(sessionId)
     if (!panes.includes(paneType)) {
       panes.push(paneType)
     }
     activePaneMap.value[sessionId] = paneType
+    if (expand) setSecondaryCollapsed(sessionId, false)
   }
 
   function closePane(sessionId, paneType) {

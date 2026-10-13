@@ -60,8 +60,8 @@ ol {
 }
 
 ::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
+  width: 6px;
+  height: 6px;
 }
 
 ::-webkit-scrollbar-track {
@@ -69,8 +69,10 @@ ol {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: $color-border-light;
-  border-radius: 4px;
+  background: $color-border;
+  border-radius: 3px;
+  transition: background $transition-fast;
+
   &:hover {
     background: $color-text-muted;
   }
@@ -138,9 +140,11 @@ ol {
     color: #fff;
     &:hover {
       background-color: $color-primary-hover;
+      box-shadow: $glow-primary;
     }
     &:active {
       background-color: $color-primary-active;
+      transform: scale(0.98);
     }
   }
 
@@ -260,6 +264,115 @@ body.is-resizing * {
   outline: 2px solid $color-primary;
   outline-offset: 1px;
   border-radius: $radius-sm;
+}
+
+// ===== 通用过渡动画工具类 =====
+// 面板/路由切换时使用：Vue <transition> 的 class 名与这些对应
+.fade-enter-active,
+.fade-leave-active {
+  transition: opacity 0.18s ease;
+}
+.fade-enter-from,
+.fade-leave-to {
+  opacity: 0;
+}
+
+.slide-fade-enter-active {
+  transition: all 0.22s ease;
+}
+.slide-fade-leave-active {
+  transition: all 0.18s ease;
+}
+.slide-fade-enter-from {
+  opacity: 0;
+  transform: translateX(12px);
+}
+.slide-fade-leave-to {
+  opacity: 0;
+  transform: translateX(-12px);
+}
+
+// 弹窗缩放过渡
+.zoom-fade-enter-active,
+.zoom-fade-leave-active {
+  transition: all 0.18s ease;
+}
+.zoom-fade-enter-from,
+.zoom-fade-leave-to {
+  opacity: 0;
+  transform: scale(0.96);
+}
+
+// ===== 骨架屏通用样式 =====
+.skeleton {
+  position: relative;
+  overflow: hidden;
+  background-color: $color-bg-tertiary;
+
+  &::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(
+      90deg,
+      transparent 0%,
+      rgb(255 255 255 / 0.06) 50%,
+      transparent 100%
+    );
+    animation: skeleton-shimmer 1.4s ease-in-out infinite;
+  }
+}
+
+@keyframes skeleton-shimmer {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(100%);
+  }
+}
+
+// 骨架条/骨架块的常用尺寸
+.skeleton-line {
+  height: 12px;
+  border-radius: $radius-sm;
+  @extend .skeleton;
+}
+
+.skeleton-block {
+  border-radius: $radius-md;
+  @extend .skeleton;
+}
+
+// ===== 空状态通用样式 =====
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  padding: $space-2xl;
+  text-align: center;
+
+  .empty-icon {
+    font-size: 48px;
+    margin-bottom: $space-lg;
+    opacity: 0.6;
+  }
+
+  .empty-title {
+    font-size: $font-size-lg;
+    font-weight: $font-weight-semibold;
+    color: $color-text-secondary;
+    margin-bottom: $space-sm;
+  }
+
+  .empty-desc {
+    font-size: $font-size-sm;
+    color: $color-text-muted;
+    max-width: 320px;
+    line-height: $line-height-md;
+  }
 }
 
 // 尊重系统的「减少动态效果」偏好

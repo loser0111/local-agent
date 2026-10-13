@@ -146,7 +146,7 @@ function goSettings() {
   align-items: center;
   justify-content: space-between;
   padding: 0 $space-md;
-  background-color: $color-bg-secondary;
+  background: $gradient-topbar;
   border-bottom: 1px solid $color-border;
   flex-shrink: 0;
   z-index: 10;
@@ -163,6 +163,8 @@ function goSettings() {
   font-size: $font-size-md;
   font-weight: $font-weight-bold;
   color: $color-primary;
+  text-shadow: $glow-primary;
+  letter-spacing: 0.5px;
 }
 
 .sep {

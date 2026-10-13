@@ -33,12 +33,16 @@ type ChatResult struct {
 
 	// Context 本轮结束时的上下文用量（前端据此显示用量指示；/compact 的提示也用它）
 	Context *agent.ContextStat `json:"context,omitempty"`
+
+	// Thinking 模型生成的思考过程（仅当启用 extended thinking 时）
+	// 这是只读的历史记录，不参与后续请求构建
+	Thinking string `json:"thinking,omitempty"`
 }
 
 // ===== 常量 =====
 
 const (
-	MaxChatTurns = 50
+	MaxChatTurns = 200
 
 	SystemPrompt = "你是一个智能助手，可以调用工具来帮助用户解决问题。"
 )
@@ -146,6 +150,9 @@ type ChatEvent struct {
 	// 上下文用量是"还剩多少空间"，token 用量是"已经花了多少"，
 	// 两者跟着同一轮请求产生，但刷新时机与消费方不同（指示器 vs 明细弹窗）。
 	Usage *UsageEvent `json:"usage,omitempty"`
+	// Todos 待办清单全量（type=todo_update）。todo 工具每次改动清单后推送一次，
+	// 前端整表替换——清单很短，全量推送省掉了增量同步的状态漂移问题。
+	Todos []store.TodoItem `json:"todos,omitempty"`
 }
 
 // 事件类型常量（前端按同名分支分发）
@@ -163,6 +170,9 @@ const (
 	// ChatEventUsage 一轮模型调用的 token 用量已产生（事件携带本轮与会话累计）。
 	// 前端据此就地刷新用量明细弹窗，不必等这一轮结束的 ChatResult 回来。
 	ChatEventUsage = "usage"
+	// ChatEventTodoUpdate 待办清单已变化（事件携带全量清单）。
+	// 与 plan_update 一样是"面板级"事件：它不依附某一轮，因此前端要按 sessionId 归位。
+	ChatEventTodoUpdate = "todo_update"
 )
 
 // emitChatEvent 向前端推送一个聊天事件（无 Wails 上下文时静默跳过）。
@@ -341,6 +351,18 @@ func countImages(messages []llm.LLMMessage) int {
 	return n
 }
 
+// buildThinkingConfig 从会话配置构建 thinking 参数
+// 仅当 thinking 在会话中启用且预算 > 0 时才返回有效的配置，否则返回 nil
+func buildThinkingConfig(session *store.Session) *llm.LLMThinking {
+	if session == nil || !session.ThinkingEnabled || session.ThinkingBudget <= 0 {
+		return nil
+	}
+	return &llm.LLMThinking{
+		Type:         "enabled",
+		BudgetTokens: session.ThinkingBudget,
+	}
+}
+
 // buildLLMMessages 从历史消息构造 LLM messages 数组
 // 正确重建消息序列：assistant(tool_calls) → tool(tool_call_id) → assistant(最终回复)
 // systemPrompt 由调用方拼接（基础人设 + L1 技能清单 + 强制注入正文）
@@ -447,7 +469,7 @@ func (a *App) executeChat(sessionID, query string, useStream bool) *ChatResult {
 		return &ChatResult{Error: fmt.Sprintf("获取模型配置失败: %v", err)}
 	}
 	dir, _ := a.resolveProjectDir(sessionID)
-	prompt, err := a.buildBasePromptWithSkill(session, dir, query)
+	prompt, allowedTools, err := a.buildBasePromptWithSkill(session, dir, query)
 	if err != nil {
 		return &ChatResult{Error: err.Error()}
 	}
@@ -459,7 +481,7 @@ func (a *App) executeChat(sessionID, query string, useStream bool) *ChatResult {
 		return &ChatResult{Error: berr.Error()}
 	}
 	defer a.runs.End(run)
-	return runToolLoop(a.newMainAgentRun(run, session, dir, prompt, &model, useStream, false))
+	return runToolLoop(a.newMainAgentRun(run, session, dir, prompt, allowedTools, &model, useStream, false))
 }
 
 // buildBasePrompt 组装基础系统提示词：基础人设 + 工作区说明 + 技能上下文（L1 清单 / 强制注入正文）
@@ -493,6 +515,9 @@ func (a *App) buildBasePrompt(session *store.Session, dir string) string {
 		"另外，如果你收到一条本该带图的消息却看不到任何图像内容，就如实说「我这边没有收到图像内容」，" +
 		"**不要编造原因**（例如猜用户发的是链接、或说图太大）；用户可以用 /vision 自检模型能不能看图。\n" +
 		"exec_shell 留给构建、测试、git 等真正的命令；不要用它做 cat / sed -i / echo > 这类文件读写。\n" +
+		"需要**训练数据之外的最新信息**（新闻、版本号、依赖现状、报错信息、价格等）时用 web_search 联网检索：" +
+		"它返回标题、URL 与摘要；要细读某条结果，再用 exec_shell 的 curl 取全文。" +
+		"查本地代码或文件**不要**联网，用 grep / glob / read_file。\n" +
 		"遇到会产生大量中间过程、且与当前主线关系不大的任务（把一个模块摸清楚、独立调研一个问题），" +
 		"可以用 spawn_agent 派一个子代理去做：它有自己独立的上下文，你只收到一份结论，" +
 		"那些中间过程不会占用你的上下文。一两步就能做完的事不必派。"
@@ -512,7 +537,10 @@ func (a *App) buildBasePrompt(session *store.Session, dir string) string {
 		"5. 上面「工具使用偏好」里已点名的工具都可直接调用，不必先经 tool_router 去 list / describe；" +
 		"只有不确定有哪些工具、或不确定某工具的完整参数时，才用 tool_router 发现。\n" +
 		"跨会话偏好与项目事实用 memory_search 查阅、memory_save 写入、memory_forget 删除；" +
-		"不要用 write_file 去改记忆目录。"
+		"不要用 write_file 去改记忆目录。\n" +
+		"6. 多步骤、要跨多轮、或者需要让用户看到进度的任务，先用 todo 工具把步骤列成清单，" +
+		"做完一项就把它标成 done（面板上会实时显示）。清单很短、随时可改，别为了走流程硬建；" +
+		"一步就能做完的事不要建清单。上下文被压缩后，清单是你重建进度的依据。"
 
 	if a.skillStore != nil {
 		enabled := a.enabledSkillsForSession(session)
@@ -532,27 +560,32 @@ func (a *App) buildBasePrompt(session *store.Session, dir string) string {
 // 用户在消息开头写 /技能名 时，该技能正文直接进入本轮 system prompt：
 // 是否使用该技能由用户决定，不再经模型路由（这正是 disable-model-invocation 的语义）。
 // 未命中技能时按普通消息处理（例如消息其实是一条以 / 开头的路径）。
-func (a *App) buildBasePromptWithSkill(session *store.Session, dir, query string) (string, error) {
+//
+// 第二个返回值是该技能的 allowed-tools（未命中技能时为 nil）。它由调用方送进
+// BuildOptions.AllowedTools，让声明变成**真的约束**——只把白名单写进提示词而不收窄
+// 工具视图的话，模型仍能调用声明之外的工具，技能/角色就只是一段没有约束力的文字。
+func (a *App) buildBasePromptWithSkill(session *store.Session, dir, query string) (string, []string, error) {
 	prompt := a.buildBasePrompt(session, dir)
 	if a.skillStore == nil {
-		return a.attachMemoryRecall(session, query, prompt), nil
+		return a.attachMemoryRecall(session, query, prompt), nil, nil
 	}
 	res := a.skillStore.ResolveSkillCommand(query)
 	if res.Reason != "" {
-		return "", fmt.Errorf("%s", res.Reason)
+		return "", nil, fmt.Errorf("%s", res.Reason)
 	}
 	if !res.Ok || res.Skill == nil {
-		return a.attachMemoryRecall(session, query, prompt), nil
+		return a.attachMemoryRecall(session, query, prompt), nil, nil
 	}
 	// 会话白名单同样约束显式调用：本会话没开放的技能不该被 /名称 绕过
 	if !a.skillAllowedInSession(session, res.Skill.ID) {
-		return "", fmt.Errorf("技能 %s 未在本会话的可用技能中", res.Skill.ID)
+		return "", nil, fmt.Errorf("技能 %s 未在本会话的可用技能中", res.Skill.ID)
 	}
 	body, err := a.skillStore.LoadBody(res.Skill.ID)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
-	return a.attachMemoryRecall(session, query, prompt+skill.BuildExplicitSkillBlock(res.Skill, body)), nil
+	return a.attachMemoryRecall(session, query, prompt+skill.BuildExplicitSkillBlock(res.Skill, body)),
+		res.Skill.AllowedTools, nil
 }
 
 // skillAllowedInSession 会话技能白名单是否放行该技能（白名单为空=全部放行）
@@ -737,6 +770,8 @@ func runToolLoop(ar *agentRun) *ChatResult {
 			Temperature: 1.0,
 			Stream:      useStream,
 			Tools:       tools,
+			// [新增] 传递 thinking 配置（如果启用）
+			Thinking: buildThinkingConfig(session),
 		}
 
 		// 流式与非流式在聚合后返回结构相同，主循环无需分叉
@@ -924,6 +959,8 @@ func runToolLoop(ar *agentRun) *ChatResult {
 				Role:      store.RoleAssistant,
 				Content:   choice.Message.Content, // LLM 可能返回空内容
 				ToolCalls: executedToolCalls,
+				// [新增] 保存 thinking 内容（仅当启用 thinking 时）
+				Thinking: resp.Thinking,
 			}
 			savedAssistant, err := ar.Store.AppendMessage(sessionID, assistantMsg)
 			if err != nil {
@@ -982,6 +1019,8 @@ func runToolLoop(ar *agentRun) *ChatResult {
 		finalMsg := store.Message{
 			Role:    store.RoleAssistant,
 			Content: choice.Message.Content,
+			// [新增] 保存 thinking 内容（仅当启用 thinking 时）
+			Thinking: resp.Thinking,
 		}
 		savedFinal, err := ar.Store.AppendMessage(sessionID, finalMsg)
 		if err != nil {
@@ -1021,6 +1060,8 @@ func runToolLoop(ar *agentRun) *ChatResult {
 			Messages:  persistedMsgs,
 			Diff:      diffFiles,
 			Context:   ctxStat,
+			// [新增] 包含 thinking 内容
+			Thinking: resp.Thinking,
 		}
 
 		// 推送完成事件
@@ -1116,11 +1157,11 @@ func (a *App) ChatPlan(sessionID, query string, useStream bool) *ChatResult {
 
 	// 4. 平凡请求免计划（G8）：走普通工具循环直答
 	if !d.NeedPlan {
-		prompt, err := a.buildBasePromptWithSkill(session, dir, query)
+		prompt, allowedTools, err := a.buildBasePromptWithSkill(session, dir, query)
 		if err != nil {
 			return &ChatResult{Error: err.Error()}
 		}
-		return runToolLoop(a.newMainAgentRun(run, session, dir, prompt, &model, useStream, false))
+		return runToolLoop(a.newMainAgentRun(run, session, dir, prompt, allowedTools, &model, useStream, false))
 	}
 
 	// 5. 组装计划并落盘（待审核状态）
@@ -1260,7 +1301,9 @@ func (a *App) executePlan(planID string, useStream bool) (result *ChatResult) {
 		}
 
 		sys := store.BuildPlanSystemPrompt(a.attachMemoryRecall(session, store.BuildPlanStepQuery(plan, step), basePrompt), plan, step)
-		res := runToolLoop(a.newMainAgentRun(run, session, dir, sys, &model, useStream, true /*compact*/))
+		// 计划步骤不带技能声明：步骤是规划器产出的文本，没有对应的 allowed-tools，
+		// 因此这里传 nil（不额外收窄）。将来若给 PlanStep 加 Role 字段，就落在这里。
+		res := runToolLoop(a.newMainAgentRun(run, session, dir, sys, nil, &model, useStream, true /*compact*/))
 
 		// 步骤中途取消：按本步实际结果落状态，计划置 cancelled
 		if checkCancel() {

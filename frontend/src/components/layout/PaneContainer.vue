@@ -8,6 +8,7 @@ import {
   Eye,
   FileCode,
   FileDiff,
+  ListChecks,
   ListTodo,
   PanelRight,
   Terminal,
@@ -24,6 +25,7 @@ import PlanPane from '@/panes/PlanPane.vue'
 import TasksPane from '@/panes/TasksPane.vue'
 import SubagentPane from '@/panes/SubagentPane.vue'
 import PreviewPane from '@/panes/PreviewPane.vue'
+import TodoPane from '@/panes/TodoPane.vue'
 
 const sessionStore = useSessionStore()
 const paneStore = usePaneStore()
@@ -86,6 +88,8 @@ const PANE_ICONS = {
   tasks: ListTodo,
   subagent: Bot,
   preview: Eye,
+  // todo 与 tasks 图标刻意区分：tasks 是"定时任务"（ListTodo），todo 是待办清单（ListChecks）
+  todo: ListChecks,
 }
 
 function paneIcon(pane) {
@@ -99,8 +103,10 @@ const chatWidth = ref(CHAT_DEFAULT)
 
 // 收起右侧时聊天区自己铺满：chatWidth（百分比或像素）此时已经没有意义，
 // 继续用 `0 0 X%` 会在右边留下一条空白。
+// 同理，没有右侧面板时也要铺满——否则 60% 宽度限制会在右边留出一片空白，
+// 用户看到的就是"有个无法折叠/关闭的空区域"。
 const chatStyle = computed(() =>
-  collapsed.value ? { flex: '1 1 auto' } : { flex: '0 0 ' + chatWidth.value }
+  collapsed.value || !hasSecondary.value ? { flex: '1 1 auto' } : { flex: '0 0 ' + chatWidth.value }
 )
 
 function onChatDrag(dx) {
@@ -124,6 +130,7 @@ const paneComponents = {
   tasks: TasksPane,
   subagent: SubagentPane,
   preview: PreviewPane,
+  todo: TodoPane,
 }
 </script>
 
@@ -218,7 +225,7 @@ const paneComponents = {
 .pane-tabs {
   display: flex;
   height: $pane-header-height;
-  background-color: $color-bg-secondary;
+  background: $gradient-topbar;
   border-bottom: 1px solid $color-border;
   padding: 0 $space-xs;
   flex-shrink: 0;
@@ -336,5 +343,21 @@ const paneComponents = {
   flex: 1;
   min-height: 0;
   overflow: hidden;
+}
+
+// 面板切换过渡：content 区域用淡入淡出
+.secondary-content > * {
+  animation: pane-fade-in 0.2s ease;
+}
+
+@keyframes pane-fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 </style>

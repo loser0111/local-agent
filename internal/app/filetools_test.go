@@ -11,6 +11,7 @@ import (
 
 	"wails-tmp/internal/agent"
 	"wails-tmp/internal/media"
+	"wails-tmp/internal/store"
 	"wails-tmp/internal/tool"
 )
 
@@ -57,6 +58,9 @@ func TestFileToolsAssembledAndDirectExposed(t *testing.T) {
 		SpawnAgent: func(context.Context, string, int) (*agent.SubagentResult, error) {
 			return &agent.SubagentResult{}, nil
 		},
+		// todo 同理：它要有清单存储才注册（没存储就存不下清单），
+		// 不给这一项，下面的"名录全员可见"断言会因为"没装上"而失败。
+		Todos: store.NewSessionStore(t.TempDir()),
 	})
 
 	// 直出名录里的工具 + tool_router 都必须真的出现在发给模型的定义里。
@@ -117,6 +121,8 @@ func TestDirectToolsCarryRequiredParams(t *testing.T) {
 		SpawnAgent: func(context.Context, string, int) (*agent.SubagentResult, error) {
 			return &agent.SubagentResult{}, nil
 		},
+		// todo 同理：没有清单存储就不注册，不给它这一项，下面的逐项断言会报"没直出"
+		Todos: store.NewSessionStore(t.TempDir()),
 	})
 
 	want := map[string][]string{
@@ -130,6 +136,10 @@ func TestDirectToolsCarryRequiredParams(t *testing.T) {
 		toolMemorySearch:   {"query"},
 		toolMemorySave:     {"content"},
 		toolMemoryForget:   {"target"},
+		// todo 只有 action 必填（text / id / status 视 action 而定，由工具自己校验）
+		tool.ToolTodo: {"action"},
+		// web_search 只有 query 必填（max_results / site 都是可选的收窄项）
+		tool.ToolWebSearch: {"query"},
 	}
 	got := map[string][]string{}
 	for _, d := range view.GetToolsForLLM() {
