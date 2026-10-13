@@ -201,19 +201,29 @@ func OfficialToMCPConfig(s OfficialMCPServer) (*MCPConfig, string) {
 
 // NormalizeMCPType 归一官方 type 取值：http/streamable-http 统一成 streamable-http；
 // 空值时按"有 command 且无 url"判为 stdio，否则按 HTTP。
+//
+// 未知的非空取值（例如 "websocket"）**原样保留**，交给 Validate 报"不支持的 type"。
+// 不能在这里悄悄归成 streamable-http：那会让用户写错的 type 变成一个"能存下、却永远
+// 连不上"的配置，把"填错了"伪装成"连不上"，是排障时最难查的一类。报错比静默纠正诚实。
 func NormalizeMCPType(t, rawURL, command string) string {
-	switch strings.ToLower(strings.TrimSpace(t)) {
+	trimmed := strings.TrimSpace(t)
+	switch strings.ToLower(trimmed) {
 	case "streamable-http", "streamablehttp", "http":
 		return "streamable-http"
 	case "sse":
 		return "sse"
 	case "stdio":
 		return "stdio"
+	case "":
+		// 空值：按形状推断（官方片段里 stdio 常省略 type）
+		if strings.TrimSpace(command) != "" && strings.TrimSpace(rawURL) == "" {
+			return "stdio"
+		}
+		return "streamable-http"
+	default:
+		// 未知取值：保留原样，让 Validate 如实报错
+		return trimmed
 	}
-	if strings.TrimSpace(command) != "" && strings.TrimSpace(rawURL) == "" {
-		return "stdio"
-	}
-	return "streamable-http"
 }
 
 // DescribeMCPConfig 生成给界面/模型看的来源描述（说明接入方式与目标地址）

@@ -989,6 +989,12 @@ function openTodo() {
     paneStore.openPane(sessionId.value, 'todo')
   }
 }
+
+function openTasks() {
+  if (sessionId.value) {
+    paneStore.openPane(sessionId.value, 'tasks')
+  }
+}
 </script>
 
 <template>
@@ -1145,6 +1151,18 @@ function openTodo() {
             <path d="M9 5h4M9 10h4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" />
           </svg>
           待办
+        </button>
+        <button
+          class="tool-btn"
+          :disabled="!sessionId"
+          title="定时任务：一次性提醒、间隔执行、计划任务（Reminder / Interval / Cron）"
+          @click="openTasks"
+        >
+          <svg width="15" height="15" viewBox="0 0 16 16" fill="none">
+            <circle cx="8" cy="8" r="6" stroke="currentColor" stroke-width="1.3" />
+            <path d="M8 4.5V8l2.5 1.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" />
+          </svg>
+          任务
         </button>
         <button
           class="tool-btn"

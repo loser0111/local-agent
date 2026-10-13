@@ -22,7 +22,7 @@ const toolAskUser = tool.ToolAskUser
 // askUser 向前端推送提问并阻塞等待用户作答
 func (a *App) askUser(ctx context.Context, sessionID string, req agent.AskRequest) (agent.AskAnswer, error) {
 	a.ensurePermissionState()
-	if a.ctx == nil {
+	if !a.HasUI() {
 		return agent.AskAnswer{}, fmt.Errorf("界面尚未就绪，无法向用户提问")
 	}
 	id, ch := a.askBroker.Register(sessionID, req)

@@ -689,7 +689,9 @@ func TestEmptyCommandFailsFastWithoutAsking(t *testing.T) {
 	for i, args := range cases {
 		app := &App{}
 		app.ensurePermissionState()
-		app.ctx = context.Background() // 让"要不要问用户"这条路径可见（否则会因无界面提前失败）
+		// 模拟界面存在（否则会因无界面提前失败）。不伪造 Wails ctx：
+		// 伪造的 ctx 会让 EventsEmit log.Fatal，整个测试进程 os.Exit(1)。
+		app.emit = func(string, ...interface{}) {}
 		e := app.bindEnforcer("s1", permission.ModeManual)
 
 		start := time.Now()
@@ -711,7 +713,7 @@ func TestEmptyCommandFailsFastWithoutAsking(t *testing.T) {
 	// 对照：有内容但引号不闭合 → 仍应询问（fail closed）
 	app := &App{}
 	app.ensurePermissionState()
-	app.ctx = context.Background()
+	app.emit = func(string, ...interface{}) {}
 	e := app.bindEnforcer("s1", permission.ModeManual)
 	done := make(chan error, 1)
 	go func() {
@@ -738,7 +740,7 @@ func TestEmptyCommandFailsFastWithoutAsking(t *testing.T) {
 func TestGetPendingInteraction(t *testing.T) {
 	app := &App{}
 	app.ensurePermissionState()
-	app.ctx = context.Background()
+	app.emit = func(string, ...interface{}) {}
 
 	if p := app.GetPendingInteraction("s1"); p != nil {
 		t.Fatalf("没有挂起请求时应返回 nil，实际 %+v", p)

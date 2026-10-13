@@ -10,8 +10,6 @@ import (
 	"wails-tmp/internal/media"
 	"wails-tmp/internal/store"
 	"wails-tmp/internal/tool"
-
-	wailsRuntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
 // ===== 一次运行的依赖封装（P3 第 1 步：纯重构）=====
@@ -159,10 +157,10 @@ func (r *appRecorder) Emit(ev ChatEvent) {
 
 // EmitDiff 推送差异更新
 func (r *appRecorder) EmitDiff(files []diff.DiffFile, turn int) {
-	if r == nil || r.app == nil || r.app.ctx == nil {
+	if r == nil || r.app == nil || !r.app.HasUI() {
 		return
 	}
-	wailsRuntime.EventsEmit(r.app.ctx, "diff:update", ChatEvent{
+	r.app.eventsEmit("diff:update", ChatEvent{
 		Type:      "diff_update",
 		SessionID: r.sessionID,
 		RunID:     r.runID,

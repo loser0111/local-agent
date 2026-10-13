@@ -24,7 +24,11 @@ import (
 
 // App struct
 type App struct {
-	ctx          context.Context
+	ctx context.Context
+	// emit 事件发射器。生产路径为 nil，实际走 Wails runtime 的 EventsEmit；
+	// 测试可注入一个记录器来断言"发了什么事件"，同时避开 Wails 对伪造 ctx 的
+	// log.Fatal（进程级退出，recover 拦不住）。详见 eventsEmit。
+	emit         func(name string, data ...interface{})
 	modelStore   *store.ModelStore
 	sessionStore *store.SessionStore
 	toolStore    *tool.ToolStore
@@ -81,6 +85,37 @@ type App struct {
 	// 内存态，与 reqLog 同一个定位：它是排障视图，不是审计日志——
 	// 需要看的时候通常就是刚跑完那次，而落盘会让每轮都多一次写 I/O。
 	usageLog *usageLog
+}
+
+// HasUI 当前是否有可应答 / 可推送事件的界面。
+//
+// 判据是"能发事件"而非"有 Wails ctx"：生产路径靠 a.ctx，测试可注入 a.emit
+// 来模拟界面存在，而不必伪造一个会让 Wails log.Fatal 的 ctx。
+// 无头运行（定时任务、子代理）两者皆无，返回 false，调用方据此快进失败而非白等超时。
+func (a *App) HasUI() bool {
+	return a != nil && (a.ctx != nil || a.emit != nil)
+}
+
+// eventsEmit 统一的 Wails 事件发射出口。
+//
+// 为什么要这一层：
+//  1. Wails 的 EventsEmit 在收到非生命周期 ctx 时会 log.Fatal（os.Exit(1)）——
+//     进程级退出，任何 recover 都拦不住。此前测试靠 app.ctx = context.Background()
+//     伪造界面，一旦走到 emit 就整个测试进程挂掉（表现是"包 FAIL 却没有任何 --- FAIL"）。
+//     有了这层，测试注入 a.emit 就能安全验证事件路径。
+//  2. 让事件发射可测：测试可以记录"发了哪些事件"并断言，而不必起一个真窗口。
+func (a *App) eventsEmit(name string, data ...interface{}) {
+	if a == nil {
+		return
+	}
+	if a.emit != nil {
+		a.emit(name, data...)
+		return
+	}
+	if a.ctx == nil {
+		return
+	}
+	wailsRuntime.EventsEmit(a.ctx, name, data...)
 }
 
 // NewApp creates a new App application struct

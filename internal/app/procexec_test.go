@@ -102,7 +102,7 @@ func spawnScanBodies(src string) []spawnBody {
 // 所有 internal/ 下的调用点，而"检查工具自己失效"比缺陷本身更难发现。因此这里改为递归
 // 枚举所有含 .go 的目录，并断言目录数（单目录即说明递归退化了）。
 func TestEverySpawnHidesConsoleWindow(t *testing.T) {
-	dirs, err := goPackageDirs(".")
+	dirs, err := goPackageDirs(moduleRoot(t))
 	if err != nil {
 		t.Fatalf("枚举包目录失败: %v", err)
 	}
@@ -155,6 +155,29 @@ func TestEverySpawnHidesConsoleWindow(t *testing.T) {
 	if sites < knownSpawnSites {
 		t.Fatalf("只扫到 %d 个 spawn 点，少于已知的 %d 个——判定规则或源码结构变了，先确认再改这个数字",
 			sites, knownSpawnSites)
+	}
+}
+
+// moduleRoot 返回模块根目录（含 go.mod 的那一层）。
+//
+// 为什么不能用 "."：本包在拆包后位于 internal/app，而 "." 指的是**本包目录**，
+// 于是"递归扫描整个模块"会静默退化成"只扫 internal/app"——恰好是这段代码自己
+// 在注释里警告过的漏检形态。用运行时定位到 go.mod 所在目录，拆到哪一层都不会退化。
+func moduleRoot(t *testing.T) string {
+	t.Helper()
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("取当前目录失败: %v", err)
+	}
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			t.Fatalf("从 %s 向上未找到 go.mod", dir)
+		}
+		dir = parent
 	}
 }
 

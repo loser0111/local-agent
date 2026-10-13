@@ -67,8 +67,9 @@ func makeTestPNG(t *testing.T, w, h int) []byte {
 // 迁包会让"根包失败名单与基线逐条一致"这个验收口径失去可比性。
 func TestImageTokensFollowPixelCountNotBytes(t *testing.T) {
 	// Anthropic 口径：(宽 × 高) / 750，向上取整
-	if got := agent.ImageTokens(1568, 1568); got != 3278 {
-		t.Errorf("1568×1568 应约 3278 token，实际 %d", got)
+	// 1568×1568 / 750 = 3278.059… → 向上取整得 3279
+	if got := agent.ImageTokens(1568, 1568); got != 3279 {
+		t.Errorf("1568×1568 应约 3279 token，实际 %d", got)
 	}
 	if got := agent.ImageTokens(0, 0); got != 0 {
 		t.Errorf("缺尺寸时不应凭空计费，实际 %d", got)

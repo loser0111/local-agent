@@ -256,14 +256,14 @@ func (h *appHost) notifyRunEvent(ev plugin.RunEvent) {
 // 契约守卫：插件只允许往 task:event 上推，防止误用 chat:event / diff:update
 // 造成前端监听串台。
 func (h *appHost) Emit(name string, payload any) {
-	if h.app == nil || h.app.ctx == nil {
+	if h.app == nil || !h.app.HasUI() {
 		return
 	}
 	if name != plugin.EventChannel {
 		fmt.Printf("[desktop-plugin] 拒绝非插件通道的事件: %s\n", name)
 		return
 	}
-	wailsRuntime.EventsEmit(h.app.ctx, name, payload)
+	h.app.eventsEmit(name, payload)
 }
 
 // BaseDir 返回本地数据目录（~/.local-agent）。

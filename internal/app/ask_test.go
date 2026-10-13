@@ -73,7 +73,7 @@ func TestAskUserAssembledAndAllowed(t *testing.T) {
 // 界面未就绪时必须立刻返回错误，而不是让工具调用白等 10 分钟超时
 func TestAskUserWithoutUIFailsFast(t *testing.T) {
 	app := &App{}
-	app.ensurePermissionState() // 只初始化回路，不设 a.ctx（模拟界面未就绪）
+	app.ensurePermissionState() // 只初始化回路，不设界面（模拟界面未就绪）
 
 	start := time.Now()
 	_, err := app.askUser(context.Background(), "s1", agent.AskRequest{Questions: []agent.AskQuestion{{Question: "q"}}})
@@ -92,7 +92,7 @@ func TestAskUserWithoutUIFailsFast(t *testing.T) {
 func TestCancelAskUser(t *testing.T) {
 	app := &App{}
 	app.ensurePermissionState()
-	app.ctx = context.Background() // 仅用于让 askUser 不因缺少界面而提前返回
+	app.emit = func(string, ...interface{}) {} // 模拟界面存在，避免伪造 Wails ctx（见 eventsEmit 说明）
 
 	if err := app.CancelAskUser("s1"); err == nil {
 		t.Fatal("没有挂起提问时应报错")

@@ -13,8 +13,6 @@ import (
 	"wails-tmp/internal/skill"
 	"wails-tmp/internal/snapshot"
 	"wails-tmp/internal/store"
-
-	wailsRuntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
 // ChatResult 对话结果（返回给前端）
@@ -63,11 +61,11 @@ func (a *App) startDeltaFlusher(sessionID, runID string) (enqueue func(string), 
 		defer ticker.Stop()
 
 		flush := func() {
-			if sb.Len() == 0 || a.ctx == nil {
+			if sb.Len() == 0 || !a.HasUI() {
 				sb.Reset()
 				return
 			}
-			wailsRuntime.EventsEmit(a.ctx, "chat:event", ChatEvent{
+			a.eventsEmit("chat:event", ChatEvent{
 				Type:      "reply_delta",
 				SessionID: sessionID,
 				RunID:     runID,
@@ -181,7 +179,7 @@ const (
 // 运行期事件走 runRecorder（见 agentrun.go），两条路都收敛到这几行。
 // 改成强制传参是刻意的：多会话并行下，"这条事件属于谁"没有默认值可猜。
 func (a *App) emitChatEvent(sessionID, runID string, ev ChatEvent) {
-	if a.ctx == nil {
+	if !a.HasUI() {
 		return
 	}
 	if ev.SessionID == "" {
@@ -190,7 +188,7 @@ func (a *App) emitChatEvent(sessionID, runID string, ev ChatEvent) {
 	if ev.RunID == "" {
 		ev.RunID = runID
 	}
-	wailsRuntime.EventsEmit(a.ctx, "chat:event", ev)
+	a.eventsEmit("chat:event", ev)
 }
 
 // EventUserInteraction 需要用户交互的阻塞式请求（授权 / 提问）专用事件名。
@@ -212,14 +210,14 @@ const EventUserInteraction = "user:interaction"
 // 归属同样在这里盖章：前端要据此决定"这个弹窗是不是当前会话的"，
 // 并把它记到对应会话的挂起表里（后台会话的请求只出列表标记，不弹窗）。
 func (a *App) emitInteraction(sessionID string, ev ChatEvent) {
-	if a.ctx == nil {
+	if !a.HasUI() {
 		return
 	}
 	if ev.SessionID == "" {
 		ev.SessionID = sessionID
 	}
-	wailsRuntime.EventsEmit(a.ctx, EventUserInteraction, ev)
-	wailsRuntime.EventsEmit(a.ctx, "chat:event", ev) // 兼容旧前端产物
+	a.eventsEmit(EventUserInteraction, ev)
+	a.eventsEmit("chat:event", ev) // 兼容旧前端产物
 	// 打一行日志：下次界面没弹出时，看控制台就能判断是"后端没发"还是"前端没收到"
 	fmt.Printf("[交互] 已推送 %s，等待界面应答（若弹窗没出现，请确认前端产物与二进制来自同一次构建）\n", ev.Type)
 }
@@ -1087,10 +1085,10 @@ func runToolLoop(ar *agentRun) *ChatResult {
 // 归属直接取自计划本身（plan.SessionID）：调用点分布很广（规划、执行、取消、异常收尾），
 // 让它们各自记住"这条计划属于哪个会话"是多余的，计划里本来就写着。
 func (a *App) emitPlanUpdate(plan *store.Plan, stepIndex int) {
-	if a.ctx == nil || plan == nil {
+	if plan == nil || !a.HasUI() {
 		return
 	}
-	wailsRuntime.EventsEmit(a.ctx, "chat:event", ChatEvent{
+	a.eventsEmit("chat:event", ChatEvent{
 		Type:      "plan_update",
 		SessionID: plan.SessionID,
 		Plan:      plan,

@@ -7,8 +7,6 @@ import (
 	"wails-tmp/internal/agent"
 	"wails-tmp/internal/diff"
 	"wails-tmp/internal/store"
-
-	wailsRuntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
 // ===== 子代理的进度推送与查询（App 侧）=====
@@ -75,10 +73,10 @@ func (a *App) emitSubagentProgress(runID string) {
 // emitSubagentEvent 推一条子代理概况事件。
 // 与 chat:event 分开走一条通道，两边的消费方互不干扰（见 subagentRecorder 的说明）。
 func (a *App) emitSubagentEvent(info store.SubagentInfo) {
-	if a == nil || a.ctx == nil {
+	if a == nil || !a.HasUI() {
 		return
 	}
-	wailsRuntime.EventsEmit(a.ctx, "subagent:event", info)
+	a.eventsEmit("subagent:event", info)
 }
 
 // ===== 查询接口（绑定给前端）=====

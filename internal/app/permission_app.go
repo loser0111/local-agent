@@ -42,7 +42,7 @@ type appResponder struct{ app *App }
 
 // Available 当前是否有可应答的界面。没有 Wails 运行时上下文（无头运行 / 自动化测试）
 // 就答不上话，此时网关会直接按拒绝处理，而不是白等一个超时周期。
-func (r appResponder) Available() bool { return r.app != nil && r.app.ctx != nil }
+func (r appResponder) Available() bool { return r.app.HasUI() }
 
 // Emit 把授权请求推给前端
 func (r appResponder) Emit(req permission.Request) { r.app.emitPermissionRequest(req) }
