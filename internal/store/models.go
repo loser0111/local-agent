@@ -197,18 +197,16 @@ func (ms *ModelStore) UpdateModel(name string, newModel Model) error {
 	}
 
 	old := ms.models[idx]
-	ms.models[idx] = Model{
-		Name:     newName,
-		Alias:    newModel.Alias,
-		ModelID:  newModel.ModelID,
-		APIKey:   newModel.APIKey,
-		URL:      newModel.URL,
-		Protocol: newModel.Protocol,
-	}
+	// 以 newModel 为主体覆盖，只对需要特殊处理的字段做修正。
+	// 不要逐字段手写重建：那样每新增一个 Model 字段都得记得同步，
+	// 漏掉就会像 ContextWindow 一样"编辑保存后静默丢值"。
+	updated := newModel
+	updated.Name = newName
 	// 若 APIKey 为空，表示前端未修改（脱敏后回填的占位值），保留旧值
-	if ms.models[idx].APIKey == "" {
-		ms.models[idx].APIKey = old.APIKey
+	if updated.APIKey == "" {
+		updated.APIKey = old.APIKey
 	}
+	ms.models[idx] = updated
 
 	if err := ms.save(); err != nil {
 		ms.models[idx] = old

@@ -76,6 +76,38 @@ func TestApp_UpdateModelRename(t *testing.T) {
 	}
 }
 
+func TestApp_UpdateModelContextWindow(t *testing.T) {
+	dir := t.TempDir()
+	app := &App{
+		modelStore:   store.NewModelStore(filepath.Join(dir, "models.json")),
+		sessionStore: store.NewSessionStore(filepath.Join(dir, "sessions")),
+	}
+
+	if err := app.modelStore.AddModel(store.Model{Name: "model-a", APIKey: "sk-123"}); err != nil {
+		t.Fatalf("添加模型失败: %v", err)
+	}
+
+	// 模拟前端编辑保存（Settings.vue 提交 contextWindow: Number(v) || 0）
+	if err := app.UpdateModel("model-a", store.Model{
+		Name: "model-a", Alias: "A", APIKey: "", URL: "https://api.example.com",
+		Protocol: "openai", ContextWindow: 1000000,
+	}); err != nil {
+		t.Fatalf("更新模型失败: %v", err)
+	}
+
+	got, err := app.modelStore.GetModelFull("model-a")
+	if err != nil {
+		t.Fatalf("GetModelFull 失败: %v", err)
+	}
+	if got.ContextWindow != 1000000 {
+		t.Fatalf("App.UpdateModel 后 ContextWindow 应为 1000000，实际: %d", got.ContextWindow)
+	}
+	// APIKey 传空应保留旧值（脱敏回填场景）
+	if got.APIKey != "sk-123" {
+		t.Fatalf("APIKey 应保留旧值，实际: %s", got.APIKey)
+	}
+}
+
 func TestApp_TestModelConnection_Validation(t *testing.T) {
 	app := &App{}
 

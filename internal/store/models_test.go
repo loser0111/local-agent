@@ -179,6 +179,68 @@ func TestModelStore_UpdatePreservesAPIKey(t *testing.T) {
 	}
 }
 
+// 回归测试：UpdateModel 过去用逐字段重建覆盖模型，漏掉了 ContextWindow，
+// 导致界面上修改"上下文窗口"保存后静默丢失（写回零值 0）。
+func TestModelStore_UpdatePreservesContextWindow(t *testing.T) {
+	tmpDir := t.TempDir()
+	storePath := filepath.Join(tmpDir, "models.json")
+	store := NewModelStore(storePath)
+
+	if err := store.AddModel(Model{Name: "m1", APIKey: "sk-secret"}); err != nil {
+		t.Fatalf("添加失败: %v", err)
+	}
+
+	// 编辑保存：填上上下文窗口
+	if err := store.UpdateModel("m1", Model{
+		Name: "m1", Alias: "updated", APIKey: "sk-secret", ContextWindow: 1000000,
+	}); err != nil {
+		t.Fatalf("更新失败: %v", err)
+	}
+
+	got, err := store.GetModelFull("m1")
+	if err != nil {
+		t.Fatalf("GetModelFull 失败: %v", err)
+	}
+	if got.ContextWindow != 1000000 {
+		t.Fatalf("ContextWindow 应被更新为 1000000，实际: %d", got.ContextWindow)
+	}
+
+	// 重新加载，确认已落盘（而非只留在内存）
+	reloaded := NewModelStore(storePath)
+	got2, err := reloaded.GetModelFull("m1")
+	if err != nil {
+		t.Fatalf("重新加载后 GetModelFull 失败: %v", err)
+	}
+	if got2.ContextWindow != 1000000 {
+		t.Fatalf("ContextWindow 持久化失败，实际: %d", got2.ContextWindow)
+	}
+}
+
+// 回归测试：改名（走重建路径）时同样不能丢 ContextWindow。
+func TestModelStore_UpdateRenamePreservesContextWindow(t *testing.T) {
+	tmpDir := t.TempDir()
+	storePath := filepath.Join(tmpDir, "models.json")
+	store := NewModelStore(storePath)
+
+	if err := store.AddModel(Model{Name: "old", APIKey: "sk-secret", ContextWindow: 200000}); err != nil {
+		t.Fatalf("添加失败: %v", err)
+	}
+
+	if err := store.UpdateModel("old", Model{
+		Name: "new", APIKey: "sk-secret", ContextWindow: 200000,
+	}); err != nil {
+		t.Fatalf("改名失败: %v", err)
+	}
+
+	got, err := store.GetModelFull("new")
+	if err != nil {
+		t.Fatalf("GetModelFull 失败: %v", err)
+	}
+	if got.ContextWindow != 200000 {
+		t.Fatalf("改名后 ContextWindow 应为 200000，实际: %d", got.ContextWindow)
+	}
+}
+
 func TestMaskAPIKey(t *testing.T) {
 	tests := []struct {
 		input    string
