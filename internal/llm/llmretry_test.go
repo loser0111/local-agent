@@ -213,7 +213,7 @@ func TestStreamRetriesBeforeFirstChunk(t *testing.T) {
 	req := testReq()
 	req.Stream = true
 	if _, err := CallLLMStreamForModelWith(context.Background(), testModel(srv.URL), req,
-		func(s string) { got.WriteString(s) }, fastPolicy(3)); err != nil {
+		func(s string) { got.WriteString(s) }, nil, fastPolicy(3)); err != nil {
 		t.Fatalf("流在吐内容之前失败，应当重试: %v", err)
 	}
 	if got.String() != "hello" {
@@ -243,7 +243,7 @@ func TestStreamNoRetryAfterChunkEmitted(t *testing.T) {
 	req := testReq()
 	req.Stream = true
 	_, err := CallLLMStreamForModelWith(context.Background(), testModel(srv.URL), req,
-		func(s string) { got.WriteString(s) }, fastPolicy(3))
+		func(s string) { got.WriteString(s) }, nil, fastPolicy(3))
 	if err == nil {
 		t.Fatal("流内错误帧应当让本次调用失败")
 	}
@@ -277,7 +277,7 @@ func TestStreamErrorFrameRetried(t *testing.T) {
 	req := testReq()
 	req.Stream = true
 	if _, err := CallLLMStreamForModelWith(context.Background(), testModel(srv.URL), req,
-		func(s string) { got.WriteString(s) }, fastPolicy(3)); err != nil {
+		func(s string) { got.WriteString(s) }, nil, fastPolicy(3)); err != nil {
 		t.Fatalf("流内限流应当被重试: %v", err)
 	}
 	if got.String() != "recovered" {

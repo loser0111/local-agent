@@ -56,9 +56,16 @@ type Message struct {
 	Attachments []media.Attachment `json:"attachments,omitempty"`
 
 	// [新增] 模型生成的思考过程（仅当 role=assistant 且启用 thinking 时）
-	// 这是一个只读字段，不会被修改或重新处理
-	// 不参与请求构建，仅作历史记录供 UI 展示
+	// 这是只读字段，不会被修改或重新处理，仅作历史记录供 UI 展示。
 	Thinking string `json:"thinking,omitempty"`
+
+	// ThinkingSignature 思考块签名（Anthropic 协议）。
+	//
+	// 为什么必须存：启用 thinking 且这一轮带工具调用时，下一次请求要把上一轮的
+	// thinking 块**连同签名**回传（Anthropic 的硬性要求，缺了直接 400
+	// "thinking.thinking: Field required"）。签名是服务端生成的校验值，无法自行构造，
+	// 只能从响应里取回并原样保存。非 Anthropic 协议（OpenAI 系）没有签名，留空。
+	ThinkingSignature string `json:"thinkingSignature,omitempty"`
 }
 
 // Conversation 单轮对话记录（用户提问 + AI 回答），借鉴 01agent
@@ -264,6 +271,11 @@ func (s *SessionStore) CreateSession(config SessionConfig) (*Session, error) {
 		EnabledTools:   config.EnabledTools,
 		EnabledSkills:  config.EnabledSkills,
 		ParentID:       config.ParentID,
+		// extended thinking 配置：前端在「新建会话」里选好后经 SessionConfig 传进来，
+		// 这里必须落到 Session 上。此前漏了这两行，于是 buildThinkingConfig 永远读到
+		// 零值、thinking 参数永远不发——配置项在界面上点了却毫无效果（静默失效）。
+		ThinkingEnabled: config.ThinkingEnabled,
+		ThinkingBudget:  config.ThinkingBudget,
 	}
 	if session.Title == "" {
 		session.Title = "新会话"
@@ -795,6 +807,14 @@ func (s *SessionStore) UpdateSession(id string, patch SessionPatch) (*Session, e
 	}
 	if patch.Project != nil {
 		session.Project = *patch.Project
+	}
+	// thinking 配置：指针字段，nil 表示"本次不改"（与 bool/int 零值区分开）。
+	// 关掉 thinking 时前端会把 budget 置空/0，所以两者要各自独立判断，不能合并成一个条件。
+	if patch.ThinkingEnabled != nil {
+		session.ThinkingEnabled = *patch.ThinkingEnabled
+	}
+	if patch.ThinkingBudget != nil {
+		session.ThinkingBudget = *patch.ThinkingBudget
 	}
 	session.EndAt = time.Now().UnixMilli()
 

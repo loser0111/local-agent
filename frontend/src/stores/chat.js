@@ -269,6 +269,18 @@ export const useChatStore = defineStore('chat', () => {
     if (msg) msg.content += chunk
   }
 
+  /**
+   * 把思考分片追加到某会话的某条消息上。
+   *
+   * 与 appendStreamContent 分开（写的是 thinking 而不是 content）：思考与正文在界面上
+   * 是两个区域，且带工具调用时一轮里会有多段思考，合并会让它们全部糊进回答里。
+   * 初始为 undefined 时按空串起步。
+   */
+  function appendStreamThinking(sessionId, messageId, chunk) {
+    const msg = messagesOf(sessionId).find((m) => m.id === messageId)
+    if (msg) msg.thinking = (msg.thinking || '') + chunk
+  }
+
   /** 往某会话的某条消息上挂一个工具调用卡片 */
   function addToolCall(sessionId, messageId, toolCall) {
     const msg = messagesOf(sessionId).find((m) => m.id === messageId)
@@ -355,6 +367,7 @@ export const useChatStore = defineStore('chat', () => {
     addLocalMessage,
     updateLocalMessage,
     appendStreamContent,
+    appendStreamThinking,
     addToolCall,
     updateToolCall,
     replacePlaceholder,

@@ -17,8 +17,26 @@ const isSystem = computed(() => props.message.role === 'system')
 const hasContent = computed(() => !!(props.message.content && props.message.content.trim()))
 const hasThinking = computed(() => !!(props.message.thinking && props.message.thinking.trim()))
 
-// [新增] Thinking 块展开/折叠状态
-const thinkingExpanded = ref(false)
+// 思考块展开/折叠。
+//
+// 策略与工具过程块（ToolProcess.vue）一致：**流式期间默认展开、结束后自动折叠**，
+// 用户手动点过之后就不再自动跟随。理由：
+//   - 生成中展开：模型"想"的这段时间里界面上必须有东西在动，否则用户以为卡住了；
+//   - 结束后折叠：思考通常比正文长好几倍，留着展开会把回答顶到屏幕外。
+const thinkingUserToggled = ref(false)
+const thinkingExpanded = ref(!!props.message.streaming)
+
+watch(
+  () => props.message.streaming,
+  (streaming) => {
+    if (!thinkingUserToggled.value) thinkingExpanded.value = !!streaming
+  }
+)
+
+function toggleThinking() {
+  thinkingUserToggled.value = true
+  thinkingExpanded.value = !thinkingExpanded.value
+}
 
 // AI 消息按 Markdown 渲染；用户消息保持纯文本
 const renderedHtml = computed(() => renderMarkdown(props.message.content || ''))
@@ -104,6 +122,20 @@ function openPreview(id) {
         </div>
       </div>
 
+      <!-- Thinking 块（仅 AI 消息且存在 thinking 时显示）。
+           必须排在正文**之前**：思考是"怎么得出答案"的过程，阅读顺序上先于答案；
+           放在下方会让用户先读到结论、再回头看过程，与 Claude / DeepSeek 的惯例相反。 -->
+      <div v-if="!isUser && hasThinking" class="thinking-block" :class="{ 'thinking-live': message.streaming }">
+        <div class="thinking-header" @click="toggleThinking">
+          <span class="thinking-toggle">{{ thinkingExpanded ? '▼' : '▶' }}</span>
+          <span class="thinking-label">💭 思考过程</span>
+          <span v-if="message.streaming" class="thinking-live-hint">思考中…</span>
+        </div>
+        <div v-if="thinkingExpanded" class="thinking-content">
+          <div class="thinking-text">{{ message.thinking }}</div>
+        </div>
+      </div>
+
       <!-- 用户消息：纯文本展示 -->
       <div v-if="isUser && hasContent" class="message-content">
         <pre class="content-text">{{ message.content }}</pre>
@@ -115,17 +147,6 @@ function openPreview(id) {
       <!-- 流式等待光标 -->
       <span v-if="message.streaming && !hasContent" class="cursor">▊</span>
       <span v-else-if="message.streaming" class="cursor cursor-inline">▊</span>
-
-      <!-- [新增] Thinking 块（仅 AI 消息且存在 thinking 时显示）-->
-      <div v-if="!isUser && hasThinking" class="thinking-block">
-        <div class="thinking-header" @click="thinkingExpanded = !thinkingExpanded">
-          <span class="thinking-toggle">{{ thinkingExpanded ? '▼' : '▶' }}</span>
-          <span class="thinking-label">💭 思考过程</span>
-        </div>
-        <div v-if="thinkingExpanded" class="thinking-content">
-          <div class="thinking-text">{{ message.thinking }}</div>
-        </div>
-      </div>
     </div>
   </div>
 
@@ -342,6 +363,28 @@ function openPreview(id) {
   font-weight: $font-weight-semibold;
   font-size: $font-size-sm;
   color: rgb(139, 92, 246);
+}
+
+/* 流式进行中的提示：让"模型正在想"这件事看得见 */
+.thinking-live-hint {
+  font-size: $font-size-xs;
+  color: $color-text-muted;
+  animation: thinkingPulse 1.4s ease-in-out infinite;
+}
+
+.thinking-live {
+  border-left-color: rgb(139, 92, 246);
+  box-shadow: 0 0 0 1px rgba(139, 92, 246, 0.15);
+}
+
+@keyframes thinkingPulse {
+  0%,
+  100% {
+    opacity: 0.45;
+  }
+  50% {
+    opacity: 1;
+  }
 }
 
 .thinking-content {

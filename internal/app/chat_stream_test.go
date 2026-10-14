@@ -34,7 +34,7 @@ func TestCallLLMStreamBasic(t *testing.T) {
 
 	var got strings.Builder
 	resp, err := llm.CallLLMStream(context.Background(), srv.URL, "tok", &llm.LLMReq{Model: "m"},
-		func(c string) { got.WriteString(c) })
+		func(c string) { got.WriteString(c) }, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,7 +63,7 @@ func TestCallLLMStreamToolCalls(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	resp, err := llm.CallLLMStream(context.Background(), srv.URL, "", &llm.LLMReq{}, nil)
+	resp, err := llm.CallLLMStream(context.Background(), srv.URL, "", &llm.LLMReq{}, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,7 +91,7 @@ func TestCallLLMStreamBadPayload(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := llm.CallLLMStream(context.Background(), srv.URL, "", &llm.LLMReq{}, nil)
+	_, err := llm.CallLLMStream(context.Background(), srv.URL, "", &llm.LLMReq{}, nil, nil)
 	if err == nil || !strings.Contains(err.Error(), "流式响应格式错误") {
 		t.Fatalf("应报格式错误，得到: %v", err)
 	}
@@ -105,7 +105,7 @@ func TestCallLLMStreamErrorStatus(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := llm.CallLLMStream(context.Background(), srv.URL, "bad", &llm.LLMReq{}, nil)
+	_, err := llm.CallLLMStream(context.Background(), srv.URL, "bad", &llm.LLMReq{}, nil, nil)
 	if err == nil || !strings.Contains(err.Error(), "401") {
 		t.Fatalf("应报 401，得到: %v", err)
 	}
@@ -114,9 +114,34 @@ func TestCallLLMStreamErrorStatus(t *testing.T) {
 // 节流推送器：首片立即、后续合并
 func TestStartDeltaFlusher(t *testing.T) {
 	app := &App{} // ctx=nil 时不实际 emit，但节流/关闭逻辑应正常退出
-	enqueue, shutdown := app.startDeltaFlusher("s1", "run_1_1")
+	enqueue, shutdown := app.startDeltaFlusher("s1", "run_1_1", func(chunk string) ChatEvent {
+		return ChatEvent{Type: ChatEventReplyDelta, Reply: chunk}
+	})
 	enqueue("a")
 	enqueue("b")
 	shutdown() // 不死锁即通过
 	time.Sleep(5 * time.Millisecond)
+}
+
+// 思考分片走独立通道：正文与思考各一条 flusher，互不干扰，一次 shutdown 收尾两条。
+func TestFlushStreamSplitsContentAndThinking(t *testing.T) {
+	rec := &appRecorder{app: &App{}, sessionID: "s1", runID: "run_1_1"}
+	content, thinking, shutdown := rec.FlushStream()
+	if content == nil || thinking == nil || shutdown == nil {
+		t.Fatal("FlushStream 必须返回正文/思考两条通道与一个 shutdown")
+	}
+	content("正文")
+	thinking("思考")
+	shutdown() // 两条都要收尾，否则残片卡在缓冲里（不死锁即通过）
+	time.Sleep(5 * time.Millisecond)
+}
+
+// 子代理 recorder 的 FlushStream 也必须给出三条非 nil 返回值：
+// 调用方是同一段主循环代码，返回 nil 会在流式路径上直接 panic。
+func TestSubagentFlushStreamIsNoop(t *testing.T) {
+	rec := &subagentRecorder{app: &App{}, runID: "run_1_1"}
+	content, thinking, shutdown := rec.FlushStream()
+	content("a")
+	thinking("b")
+	shutdown()
 }

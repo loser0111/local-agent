@@ -212,7 +212,7 @@ export async function updateSession(id, patch) {
  * 后端会持久化所有中间消息（assistant+tool_calls, tool结果, 最终回复）
  * @param {string} sessionId
  * @param {string} query
- * @param {{stream?:boolean, plan?:boolean, onReplyDelta?:Function, onToolCallStart?:Function, onToolCallEnd?:Function, onPlanUpdate?:Function, onTodoUpdate?:Function}} callbacks
+ * @param {{stream?:boolean, plan?:boolean, onReplyDelta?:Function, onThinkingDelta?:Function, onToolCallStart?:Function, onToolCallEnd?:Function, onPlanUpdate?:Function, onTodoUpdate?:Function}} callbacks
  * @returns {Promise<{reply:string, toolCalls?:array, messages?:array, plan?:object, error?:string}>}
  */
 export async function chat(
@@ -222,6 +222,7 @@ export async function chat(
     stream = true,
     plan = false,
     onReplyDelta,
+    onThinkingDelta,
     onToolCallStart,
     onToolCallEnd,
     onPlanUpdate,
@@ -229,6 +230,7 @@ export async function chat(
     onCancelled,
     onContextCompacted,
     onUsage,
+    onError,
   } = {}
 ) {
   if (isWails()) {
@@ -239,6 +241,7 @@ export async function chat(
     // 现在统一由 api/eventbus.js 做进程级单订阅 + 按 sessionId 路由，详见那里的说明。
     const off = subscribeChat(sessionId, {
       onReplyDelta,
+      onThinkingDelta,
       onToolCallStart,
       onToolCallEnd,
       onPlanUpdate,
@@ -246,6 +249,7 @@ export async function chat(
       onContextCompacted,
       onUsage,
       onCancelled,
+      onError,
     })
 
     try {
@@ -301,6 +305,16 @@ export async function chat(
 
   const reply = `这是浏览器开发模式的模拟回复。\n\n你说的是："${query}"\n\n在 Wails 桌面环境中，这里会返回真正的 LLM 回复。`
 
+  // 模拟思考分片：与正文分片一样逐段回调（真实环境里来自 thinking_delta 事件）。
+  // 没有它，浏览器开发模式下思考块永远是空的，改前端时没法验证渲染。
+  const mockThinking = `先理解用户问的是「${(query || '').slice(0, 20)}」，\n再组织一段回复。`
+  if (stream && onThinkingDelta) {
+    for (const c of mockThinking.match(/[\s\S]{1,4}/g) || [mockThinking]) {
+      onThinkingDelta(c)
+      await new Promise((r) => setTimeout(r, 20))
+    }
+  }
+
   // 模拟 SSE：把回复切成小分片逐段回调
   if (stream && onReplyDelta) {
     const chunks = reply.match(/[\s\S]{1,6}/g) || [reply]
@@ -337,6 +351,7 @@ export async function chat(
         id: `msg-${now}-3`,
         role: 'assistant',
         content: reply,
+        thinking: mockThinking,
         createdAt: now + 1,
       },
     ],

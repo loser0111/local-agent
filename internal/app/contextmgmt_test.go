@@ -246,7 +246,7 @@ func TestAnthropicStreamCapturesUsage(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	resp, err := llm.CallAnthropicStream(context.Background(), srv.URL, "tok", &llm.LLMReq{Model: "m"}, func(string) {})
+	resp, err := llm.CallAnthropicStream(context.Background(), srv.URL, "tok", &llm.LLMReq{Model: "m"}, func(string) {}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

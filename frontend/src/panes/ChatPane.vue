@@ -673,6 +673,11 @@ async function sendMessage() {
       onReplyDelta: (chunk) => {
         chatStore.appendStreamContent(sid, localMsg.id, chunk)
       },
+      // 思考分片：边生成边写进占位消息的 thinking 字段，由 MessageBubble 实时渲染。
+      // 后端同时会在整轮结束时用持久化消息替换占位（含完整 thinking），两者一致。
+      onThinkingDelta: (chunk) => {
+        chatStore.appendStreamThinking(sid, localMsg.id, chunk)
+      },
       onToolCallStart: (tc) => {
         chatStore.addToolCall(sid, localMsg.id, tc)
         // 派生子代理时自动打开子代理面板：子代理的中间过程不在聊天流里（它跑在自己
@@ -710,6 +715,11 @@ async function sendMessage() {
       },
       // 被用户停止：立刻收尾流式气泡，否则它会一直停在"正在输入"
       onCancelled: () => {
+        chatStore.updateLocalMessage(sid, localMsg.id, { streaming: false })
+      },
+      // 本轮以错误结束（如模型返回空回复）：同样立刻收尾流式气泡，
+      // 否则它会一直转圈。可读原因同时经 result.error 落成一条错误消息（见下方第 6 步）。
+      onError: () => {
         chatStore.updateLocalMessage(sid, localMsg.id, { streaming: false })
       },
       // 本轮 token 用量已产生：推进 store，供「用量明细」弹窗与缓存状态点使用。

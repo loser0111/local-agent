@@ -54,8 +54,8 @@ func (r *subagentRecorder) Emit(ev ChatEvent) {
 func (r *subagentRecorder) EmitDiff([]diff.DiffFile, int) {}
 
 // FlushStream 子代理不流式，返回空实现即可
-func (r *subagentRecorder) FlushStream() (func(string), func()) {
-	return func(string) {}, func() {}
+func (r *subagentRecorder) FlushStream() (func(string), func(string), func()) {
+	return func(string) {}, func(string) {}, func() {}
 }
 
 // emitSubagentProgress 把某子代理的最新进度推给前端（SubagentPane 订阅 subagent:event）

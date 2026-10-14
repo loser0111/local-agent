@@ -85,6 +85,11 @@ function dispatchChat(ev) {
     case 'reply_delta':
       h.onReplyDelta?.(ev.reply, ev)
       break
+    // 思考分片。与 reply_delta 同属流式增量，但落在界面的另一个区域（思考块），
+    // 因此走独立回调：合并到 onReplyDelta 会让思考文字直接混进回答气泡。
+    case 'thinking_delta':
+      h.onThinkingDelta?.(ev.thinking, ev)
+      break
     case 'tool_call_start':
       h.onToolCallStart?.(ev.toolCall, ev)
       break
@@ -115,6 +120,11 @@ function dispatchChat(ev) {
     case 'cancelled':
       h.onCancelled?.(ev.error, ev)
       break
+    // 本轮以错误结束（如模型返回空回复）。与 cancelled 同理：必须立刻收尾流式气泡，
+    // 否则它会永远停在"正在输入"——而这条错误的正文同时经 ChatResult.error 返回。
+    case 'error':
+      h.onError?.(ev.error, ev)
+      break
     // 授权请求 / 模型提问走独立的 user:interaction 通道（由 App.vue 统一订阅），
     // 不在这里分发 —— 否则计划执行等入口会漏（详见 api/interaction.js 的说明）
     default:
@@ -137,8 +147,9 @@ function ensureStarted() {
  * 所以按 sessionId 路由是无歧义的。返回退订函数，**只退自己这一份**。
  *
  * @param {string} sessionId
- * @param {object} handlers 见 dispatchChat 的 switch：onReplyDelta / onToolCallStart /
- *   onToolCallEnd / onPlanUpdate / onTodoUpdate / onContextCompacted / onUsage / onCancelled
+ * @param {object} handlers 见 dispatchChat 的 switch：onReplyDelta / onThinkingDelta /
+ *   onToolCallStart / onToolCallEnd / onPlanUpdate / onTodoUpdate / onContextCompacted /
+ *   onUsage / onCancelled
  * @returns {() => void}
  */
 export function subscribeChat(sessionId, handlers = {}) {

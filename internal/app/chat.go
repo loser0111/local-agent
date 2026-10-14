@@ -45,13 +45,17 @@ const (
 	SystemPrompt = "你是一个智能助手，可以调用工具来帮助用户解决问题。"
 )
 
-// startDeltaFlusher 启动文本分片节流推送器：
+// startDeltaFlusher 启动分片节流推送器：
 // 首个分片立即推送，之后 50ms 或累计 ≥20 字符合并推送一次，避免高频 IPC。
 // 返回的 enqueue 非阻塞入队；调用方在流结束后调 shutdown 等待残余分片发完。
 //
 // sessionID / runID 必须由调用方给出：这条 goroutine 是**脱离调用栈**推送的，
 // 它发出去的分片同样是"某次运行的输出"，前端要靠归属把它贴到正确的会话上。
-func (a *App) startDeltaFlusher(sessionID, runID string) (enqueue func(string), shutdown func()) {
+//
+// build 负责把一段合并后的文本装成事件。正文（reply_delta）与思考（thinking_delta）
+// 共用这一套节流/关闭逻辑——两者的推送节奏完全一样，只是落在事件的哪个字段上不同；
+// 复制一份出来只会让"50ms 或 20 字"这种参数有两个地方要改。
+func (a *App) startDeltaFlusher(sessionID, runID string, build func(chunk string) ChatEvent) (enqueue func(string), shutdown func()) {
 	ch := make(chan string, 256)
 	done := make(chan struct{})
 
@@ -65,12 +69,10 @@ func (a *App) startDeltaFlusher(sessionID, runID string) (enqueue func(string), 
 				sb.Reset()
 				return
 			}
-			a.eventsEmit("chat:event", ChatEvent{
-				Type:      "reply_delta",
-				SessionID: sessionID,
-				RunID:     runID,
-				Reply:     sb.String(),
-			})
+			ev := build(sb.String())
+			ev.SessionID = sessionID
+			ev.RunID = runID
+			a.eventsEmit("chat:event", ev)
 			sb.Reset()
 		}
 
@@ -121,11 +123,17 @@ func (a *App) startDeltaFlusher(sessionID, runID string) (enqueue func(string), 
 // （外加运行期的 runRecorder 实现），三者的签名都**强制**要求传会话 ID——
 // 漏传是编译错误，而不是运行期的静默串台。
 type ChatEvent struct {
-	Type      string          `json:"type"` // tool_call_start / tool_call_end / reply_delta / done / error / diff_update / plan_update / permission_request / ask_user
+	Type      string          `json:"type"` // tool_call_start / tool_call_end / reply_delta / thinking_delta / done / error / diff_update / plan_update / permission_request / ask_user
 	SessionID string          `json:"sessionId,omitempty"`
 	RunID     string          `json:"runId,omitempty"`
 	ToolCall  *store.ToolCall `json:"toolCall,omitempty"`
 	Reply     string          `json:"reply,omitempty"`
+	// Thinking 思考分片（type=thinking_delta）。
+	//
+	// 与 Reply 分开走同一个事件类型、同一个字段名不同：思考与正文在界面上是两个区域，
+	// 且模型可能"先想、再答、再想"（带工具调用时每轮各有一段思考），
+	// 混进 Reply 会让思考文字直接出现在回答气泡里。
+	Thinking  string          `json:"thinking,omitempty"`
 	Error     string          `json:"error,omitempty"`
 	Diff      []diff.DiffFile `json:"diff,omitempty"`      // diff_update 事件携带的差异文件
 	Turn      int             `json:"turn,omitempty"`      // diff 所属轮次
@@ -158,10 +166,16 @@ const (
 	ChatEventToolCallStart = "tool_call_start"
 	ChatEventToolCallEnd   = "tool_call_end"
 	ChatEventReplyDelta    = "reply_delta"
+	// ChatEventThinkingDelta 思考过程分片。与 reply_delta 一样是流式增量，
+	// 但落在界面的另一个区域（思考块），前端必须分开消费。
+	ChatEventThinkingDelta = "thinking_delta"
 	ChatEventPermission    = "permission_request"
 	// ChatEventCancelled 本轮被用户停止（软取消或硬取消）。前端据此把流式气泡
 	// 收尾成"已停止"，而不是留着它永远转圈。
 	ChatEventCancelled = "cancelled"
+	// ChatEventError 本轮以错误结束（如模型返回空回复）。事件携带可读原因，
+	// 前端据此把流式气泡收尾成错误，而不是停在"正在输入"或留一条空回复。
+	ChatEventError = "error"
 	// ChatEventContextCompacted 自动摘要压缩已生效（事件携带压缩结果与新的用量）。
 	// 前端用它弹一次提示：用量下降是压缩造成的，原文仍在会话记录里。
 	ChatEventContextCompacted = "context_compacted"
@@ -405,6 +419,14 @@ func buildLLMMessages(history []store.Message, systemPrompt string, loader image
 				toolNames[tc.ID] = tc.Name
 			}
 			m.ToolCalls = calls
+		}
+		// assistant 消息的 thinking 块回传：启用 thinking 且该轮带工具调用时，
+		// Anthropic 要求把上一轮的 thinking 连同签名放回请求里，否则 400。
+		// 只在"这一轮确实带工具调用"时回传——纯文本回复的 thinking 回传无意义，
+		// 还会白白把思考正文算进输入 token。
+		if msg.Role == store.RoleAssistant && len(msg.ToolCalls) > 0 && msg.ThinkingSignature != "" {
+			m.Thinking = msg.Thinking
+			m.ThinkingSignature = msg.ThinkingSignature
 		}
 
 		if msg.Role == store.RoleTool {
@@ -696,6 +718,10 @@ func runToolLoop(ar *agentRun) *ChatResult {
 	var anchor *agent.TokenAnchor
 	var ctxStat *agent.ContextStat
 	overflowRetried := false
+	// emptyReplyRetried 本 run 是否已经为空回复重试过一次。
+	// 空回复通常意味着上下文超出模型窗口，压缩重试一次足够；无限重试只会把一次失败
+	// 拖成一长串同样的失败。重试后仍为空就直接报错，让用户看到明确原因。
+	emptyReplyRetried := false
 	// summaryBroken 摘要器坏掉（调用失败/结果异常）后置位：本run之内不再尝试摘要式压缩。
 	// 否则每一轮都要白白付一次失败的 LLM 调用，而确定性截断本来就能兜住。
 	summaryBroken := false
@@ -776,11 +802,13 @@ func runToolLoop(ar *agentRun) *ChatResult {
 		var (
 			resp          *llm.LLMResp
 			flusher       func(string)
+			flushThinking func(string)
 			flushShutdown func()
 		)
 		if useStream {
-			flusher, flushShutdown = ar.Recorder.FlushStream()
-			resp, err = llm.CallLLMStreamForModel(run.Ctx(), model, req, flusher)
+			// 正文与思考各一条节流通道：它们落在界面不同区域，合并推送前端无法分开。
+			flusher, flushThinking, flushShutdown = ar.Recorder.FlushStream()
+			resp, err = llm.CallLLMStreamForModel(run.Ctx(), model, req, flusher, flushThinking)
 			flushShutdown() // 确保残余分片在进入工具执行/done 前全部发出
 		} else {
 			resp, err = llm.CallLLMForModel(run.Ctx(), model, req)
@@ -957,8 +985,10 @@ func runToolLoop(ar *agentRun) *ChatResult {
 				Role:      store.RoleAssistant,
 				Content:   choice.Message.Content, // LLM 可能返回空内容
 				ToolCalls: executedToolCalls,
-				// [新增] 保存 thinking 内容（仅当启用 thinking 时）
-				Thinking: resp.Thinking,
+				// [新增] 保存 thinking 内容与签名（仅当启用 thinking 时）。
+				// 签名必须与正文成对保存：带工具调用的这一轮，下一轮要把两者一起回传。
+				Thinking:          resp.Thinking,
+				ThinkingSignature: resp.ThinkingSignature,
 			}
 			savedAssistant, err := ar.Store.AppendMessage(sessionID, assistantMsg)
 			if err != nil {
@@ -969,11 +999,15 @@ func runToolLoop(ar *agentRun) *ChatResult {
 				}
 			}
 			persistedMsgs = append(persistedMsgs, *savedAssistant)
-			// 同步到内存消息列表（用于后续 LLM 调用）
+			// 同步到内存消息列表（用于后续 LLM 调用）。
+			// 带工具调用的这一轮必须把 thinking + 签名一并放进内存消息：下一轮
+			// 若走 Anthropic 协议，缺了签名会直接 400（见 ToAnthropicRequest）。
 			messages = append(messages, llm.LLMMessage{
-				Role:      store.RoleAssistant,
-				Content:   choice.Message.Content,
-				ToolCalls: choice.Message.ToolCalls,
+				Role:              store.RoleAssistant,
+				Content:           choice.Message.Content,
+				ToolCalls:         choice.Message.ToolCalls,
+				Thinking:          resp.Thinking,
+				ThinkingSignature: resp.ThinkingSignature,
 			})
 
 			// 持久化每个工具结果消息（role=tool, tool_call_id）
@@ -1013,12 +1047,83 @@ func runToolLoop(ar *agentRun) *ChatResult {
 			continue
 		}
 
+		// === finish_reason == "stop" ===
+		//
+		// ★ 空回复防线：模型返回 "stop" 但正文为空，绝大多数情况不是"它选择不说话"，
+		// 而是上下文已超出窗口——多家网关（本项目实测 DeepSeek / Anthropic 兼容端点）
+		// 在超限时不回错误，而是返回一个空 content + finish_reason=stop 的响应。
+		// 若照常把它当最终回复落库，会话就会"静默死亡"：用户看到一条空回复，再发
+		// "继续"也因为上下文没变而依旧为空——而且全程没有任何报错。这正是本项目
+		// 反复出现（至少 3 次）的静默失败。此处必须显式拦下，绝不能静默落库。
+		if strings.TrimSpace(choice.Message.Content) == "" {
+			used, win := 0, 0
+			if ctxStat != nil {
+				used, win = ctxStat.UsedTokens, ctxStat.WindowTokens
+			}
+			fmt.Printf("[chat] 空回复：模型返回 finish_reason=%q 但正文为空（会话 %s，轮次 %d，上下文 %d/%d tokens，已重试=%v）\n",
+				choice.FinishReason, sessionID, turn, used, win, emptyReplyRetried)
+
+			// 第一次遇到：尝试压缩/截断上下文后重试一次。压缩是**唯一**能让重试有意义的前提——
+			// 上下文不变的话，重试必然还是同一个空回复。
+			if !emptyReplyRetried && !compact {
+				emptyReplyRetried = true
+				if ar.Compactor != nil && !summaryBroken {
+					out, cerr := ar.Compactor(run.Ctx(), session, model)
+					switch {
+					case cerr != nil:
+						fmt.Printf("[chat] 空回复后压缩出错，退回确定性截断重试: %v\n", cerr)
+						summaryBroken = true
+					case out.Degraded:
+						fmt.Printf("[chat] 空回复后摘要不可用，改用确定性截断重试: %s\n", out.Reason)
+						summaryBroken = true
+					case out.Compressed:
+						if s2, e2 := ar.Store.GetSession(sessionID); e2 == nil {
+							session = s2
+							messages = buildRunMessages(session, systemPrompt, compact, imageLoaderFor(ar.Attachments))
+							anchor = nil
+							ctxStat = agent.ContextStatOf(session, messages, window, nil, toolTokens, calib)
+							ar.Recorder.Emit(ChatEvent{
+								Type:    ChatEventContextCompacted,
+								Compact: out,
+								Context: ctxStat,
+							})
+							fmt.Printf("[chat] 空回复后已压缩上下文（覆盖 %d 条消息），重试本轮\n", out.CoveredMsgs)
+							continue
+						}
+					default:
+						fmt.Printf("[chat] 空回复后未压缩: %s\n", out.Reason)
+					}
+				}
+				// 摘要不可用或没压成：退回确定性截断再试一次
+				messages = buildRunMessages(session, systemPrompt, true, imageLoaderFor(ar.Attachments))
+				anchor = nil
+				ctxStat = agent.ContextStatOf(session, messages, window, nil, toolTokens, calib)
+				fmt.Printf("[chat] 空回复后改用确定性截断重试本轮\n")
+				continue
+			}
+
+			// 重试过仍为空：以明确错误结束，而不是静默落一条空回复。
+			msg := "模型返回了空回复（未产生任何内容）"
+			if used > 0 && win > 0 && used*100/win >= 80 {
+				msg = fmt.Sprintf("模型返回了空回复：上下文已接近窗口上限（%d/%d tokens），请新建会话或使用 /compact 压缩后重试", used, win)
+			}
+			fmt.Printf("[chat] 空回复：重试后仍为空，判定为静默失败并返回错误（会话 %s）\n", sessionID)
+			ar.Recorder.Emit(ChatEvent{Type: ChatEventError, Error: msg})
+			return &ChatResult{
+				Error:     msg,
+				ToolCalls: toolCallRecords,
+				Messages:  persistedMsgs,
+				Context:   ctxStat,
+			}
+		}
+
 		// === finish_reason == "stop"，持久化最终回复 ===
 		finalMsg := store.Message{
 			Role:    store.RoleAssistant,
 			Content: choice.Message.Content,
-			// [新增] 保存 thinking 内容（仅当启用 thinking 时）
-			Thinking: resp.Thinking,
+			// [新增] 保存 thinking 内容与签名（仅当启用 thinking 时）
+			Thinking:          resp.Thinking,
+			ThinkingSignature: resp.ThinkingSignature,
 		}
 		savedFinal, err := ar.Store.AppendMessage(sessionID, finalMsg)
 		if err != nil {

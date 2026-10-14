@@ -132,8 +132,10 @@ type runRecorder interface {
 	// EmitDiff 推送差异更新。它与聊天事件走的是**不同通道**（diff:update），
 	// 所以不能与 Emit 合并成一个方法。
 	EmitDiff(files []diff.DiffFile, turn int)
-	// FlushStream 启动流式分片推送器；返回的 shutdown 保证可安全调用
-	FlushStream() (enqueue func(string), shutdown func())
+	// FlushStream 启动流式分片推送器；返回的 shutdown 保证可安全调用。
+	// 返回两个 enqueue：正文分片与思考分片。两者各自节流、各自推送，
+	// 因为它们落在界面的不同区域，混在一起前端无法分开。
+	FlushStream() (onContent func(string), onThinking func(string), shutdown func())
 }
 
 // appRecorder 主会话的 recorder：推给 wails 事件通道。
@@ -170,11 +172,21 @@ func (r *appRecorder) EmitDiff(files []diff.DiffFile, turn int) {
 }
 
 // FlushStream 启动流式分片推送器
-func (r *appRecorder) FlushStream() (func(string), func()) {
+func (r *appRecorder) FlushStream() (func(string), func(string), func()) {
 	if r == nil || r.app == nil {
-		return func(string) {}, func() {}
+		return func(string) {}, func(string) {}, func() {}
 	}
-	return r.app.startDeltaFlusher(r.sessionID, r.runID)
+	content, shutdown := r.app.startDeltaFlusher(r.sessionID, r.runID, func(chunk string) ChatEvent {
+		return ChatEvent{Type: ChatEventReplyDelta, Reply: chunk}
+	})
+	thinking, shutdownThinking := r.app.startDeltaFlusher(r.sessionID, r.runID, func(chunk string) ChatEvent {
+		return ChatEvent{Type: ChatEventThinkingDelta, Thinking: chunk}
+	})
+	// 关闭时两条都要收尾，否则思考的最后一片可能还在缓冲里没发出去
+	return content, thinking, func() {
+		shutdown()
+		shutdownThinking()
+	}
 }
 
 // newMainAgentRun 组装主会话的一次运行。

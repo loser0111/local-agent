@@ -1,0 +1,100 @@
+# CI：每次推送 / PR 都跑一遍 Go 与前端的最小验证。
+#
+# 两个不那么显然、但踩不准就会直接失败的点：
+#
+# 1) Wails v2 在 Linux 上是 cgo 程序。根包（main.go 里的 github.com/wailsapp/wails/v2）
+#    需要 GTK3 + WebKit2GTK 的 C 头文件才能编译，裸 runner 上 go build ./... 会报
+#    "libwebkit2gtk-4.0 找不到"。ubuntu-latest（24.04）已不再提供 4.0，所以装 4.1
+#    并在所有 go 命令上加 -tags webkit2_41（Wails 官方在 24.04 上的推荐做法）。
+#
+# 2) main.go 有 //go:embed all:frontend/dist，而 frontend/dist 在 .gitignore 里——
+#    干净检出后该目录根本不存在，直接 go build ./... 会以
+#    "pattern all:frontend/dist: no matching files found" 失败。
+#    所以 go 作业依赖 frontend 作业产出的真实 dist，而不是先跑 go。
+name: CI
+
+on:
+  push:
+  pull_request:
+
+# 同一分支的新推送取消仍在排队/运行的旧任务，避免重复排队
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# 最小权限：本流水线只读代码
+permissions:
+  contents: read
+
+jobs:
+  frontend:
+    name: 前端（构建）
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 构建
+        run: npm run build
+
+      # 产物交给 go 作业：main.go 的 go:embed 需要真实的 frontend/dist。
+      # path 相对仓库根（working-directory 只影响 run 步骤，不影响 uses）。
+      - uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist
+          retention-days: 1
+
+  go:
+    name: Go（构建 / vet / 测试）
+    needs: frontend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Wails 的 Linux 构建依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: 取回前端产物（供 go:embed 使用）
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist
+
+      - name: go build
+        run: go build -tags webkit2_41 ./...
+
+      - name: go vet
+        run: go vet -tags webkit2_41 ./...
+
+      # 测试暂设为"只报告不阻断"：internal/app 里还有 2 个**既有**失败
+      # （改动前的基线上同样失败，已用 git stash 对照确认）：
+      #   - TestExecutePlanCancel               计划软取消后未置 cancelled
+      #   - TestHardCancelAbortsInFlightRequest  硬取消未断开在途请求（测试挂起至超时）
+      # 两者都落在"两级取消"子系统，需要单独排查，不适合在本轮 CI 引入时顺手改。
+      # 另有 1 个既有 flaky：internal/snapshot 的 TestCheckpointSurvivesGC（偶发，与 gc 时序相关）。
+      # 待它们修好，把 continue-on-error 去掉，让测试成为真正的门禁。
+      # 注意：build 与 vet 仍是阻断的，所以"编译不过 / vet 不过"一定会被拦下。
+      #
+      # -timeout 5m：挂起的用例不必等满 go 默认的 10 分钟，早点失败早点看到。
+      - name: go test
+        continue-on-error: true
+        run: go test -tags webkit2_41 -timeout 5m ./...

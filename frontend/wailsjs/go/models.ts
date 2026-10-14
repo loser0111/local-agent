@@ -626,6 +626,8 @@ export namespace llm {
 	    tool_call_id?: string;
 	    tool_calls?: LLMToolCall[];
 	    images?: LLMImage[];
+	    thinking?: string;
+	    thinkingSignature?: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new LLMMessage(source);
@@ -638,6 +640,8 @@ export namespace llm {
 	        this.tool_call_id = source["tool_call_id"];
 	        this.tool_calls = this.convertValues(source["tool_calls"], LLMToolCall);
 	        this.images = this.convertValues(source["images"], LLMImage);
+	        this.thinking = source["thinking"];
+	        this.thinkingSignature = source["thinkingSignature"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -1847,6 +1851,7 @@ export namespace store {
 	    createdAt: number;
 	    attachments?: media.Attachment[];
 	    thinking?: string;
+	    thinkingSignature?: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new Message(source);
@@ -1862,6 +1867,7 @@ export namespace store {
 	        this.createdAt = source["createdAt"];
 	        this.attachments = this.convertValues(source["attachments"], media.Attachment);
 	        this.thinking = source["thinking"];
+	        this.thinkingSignature = source["thinkingSignature"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {

@@ -61,7 +61,39 @@ func callLLM(ctx context.Context, url, token string, req *LLMReq) (*LLMResp, err
 	// 顺序在 tokenAnchor 之前——锚点必须建在**归一后**的 PromptTokens 上（见 LLMUsage 的不变式）。
 	llmResp.Usage.Normalize()
 	llmResp.Usage.RawUsage = ExtractRawUsage(body)
+	// 非流式的推理正文：部分网关把它放在 choices[].message 里（而不是顶层 thinking）。
+	// 顶层已有就不覆盖（某些网关两者都发，顶层更明确）。
+	if llmResp.Thinking == "" {
+		llmResp.Thinking = reasoningOfRawChoices(body)
+	}
 	return &llmResp, nil
+}
+
+// reasoningOfRawChoices 从原始响应体里取 choices[].message 的 reasoning_content / reasoning。
+//
+// 为什么要单独解析原始体：LLMMessage 是内部中立的统一形状，不含 reasoning 字段；
+// 而各家把它放在 message 下的字段名又不统一。这里只做一次兜底提取，失败返回空串。
+func reasoningOfRawChoices(body []byte) string {
+	var probe struct {
+		Choices []struct {
+			Message struct {
+				ReasoningContent string `json:"reasoning_content"`
+				Reasoning        string `json:"reasoning"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(body, &probe); err != nil {
+		return ""
+	}
+	for _, c := range probe.Choices {
+		if c.Message.ReasoningContent != "" {
+			return c.Message.ReasoningContent
+		}
+		if c.Message.Reasoning != "" {
+			return c.Message.Reasoning
+		}
+	}
+	return ""
 }
 
 // ===== LLM 流式调用（SSE，OpenAI 兼容）=====
@@ -71,8 +103,13 @@ type llmStreamChunk struct {
 	Choices []struct {
 		Index int `json:"index"`
 		Delta struct {
-			Role      string `json:"role"`
-			Content   string `json:"content"`
+			Role    string `json:"role"`
+			Content string `json:"content"`
+			// ReasoningContent 推理正文分片（DeepSeek-R1 / 各家 reasoning 模型走这个字段）。
+			// 与正文分开：它是"想"的过程，不是回答，不该混进流式气泡。
+			ReasoningContent string `json:"reasoning_content"`
+			// Reasoning 部分网关（OpenAI o 系、xAI 等）用 reasoning 而非 reasoning_content。
+			Reasoning string `json:"reasoning"`
 			ToolCalls []struct {
 				Index    int    `json:"index"`
 				ID       string `json:"id"`
@@ -83,6 +120,11 @@ type llmStreamChunk struct {
 				} `json:"function"`
 			} `json:"tool_calls"`
 		} `json:"delta"`
+		// Message 非流式形状的思考字段（部分网关流式帧里也用 message 带 reasoning）。
+		Message *struct {
+			ReasoningContent string `json:"reasoning_content"`
+			Reasoning        string `json:"reasoning"`
+		} `json:"message"`
 		FinishReason string `json:"finish_reason"`
 	} `json:"choices"`
 	// Usage 部分网关只在最后一帧里带用量（OpenAI 需 stream_options.include_usage）。
@@ -105,7 +147,7 @@ type openAIStreamError struct {
 // 文本分片实时回调 onContent（由调用方节流后推送前端）；
 // 工具调用的 arguments 分片在流内按 index 聚合，流结束后一次性返回完整 LLMResp，
 // 使 executeChat 主循环无需感知流式/非流式差异。
-func CallLLMStream(ctx context.Context, url, token string, req *LLMReq, onContent func(string)) (*LLMResp, error) {
+func CallLLMStream(ctx context.Context, url, token string, req *LLMReq, onContent, onThinking func(string)) (*LLMResp, error) {
 	req.Stream = true
 	data, err := json.Marshal(req)
 	if err != nil {
@@ -143,6 +185,7 @@ func CallLLMStream(ctx context.Context, url, token string, req *LLMReq, onConten
 
 	var (
 		content     strings.Builder
+		reasoning   strings.Builder // 推理正文（reasoning_content / reasoning）
 		finish      string
 		tcOrder     []int
 		tcCalls     = map[int]*LLMToolCall{}
@@ -200,6 +243,30 @@ func CallLLMStream(ctx context.Context, url, token string, req *LLMReq, onConten
 				content.WriteString(choice.Delta.Content)
 				if onContent != nil {
 					onContent(choice.Delta.Content)
+				}
+			}
+			// 推理分片只累加、不推给前端**正文**通道（思考过程不该混进回答气泡），
+			// 但要经 onThinking 实时外推——否则开着 reasoning 模型时，
+			// 思考阶段界面上什么都不会动，用户以为卡住了。
+			pushReasoning := func(s string) {
+				if s == "" {
+					return
+				}
+				reasoning.WriteString(s)
+				if onThinking != nil {
+					onThinking(s)
+				}
+			}
+			if choice.Delta.ReasoningContent != "" {
+				pushReasoning(choice.Delta.ReasoningContent)
+			} else if choice.Delta.Reasoning != "" {
+				pushReasoning(choice.Delta.Reasoning)
+			}
+			if choice.Message != nil {
+				if choice.Message.ReasoningContent != "" {
+					pushReasoning(choice.Message.ReasoningContent)
+				} else if choice.Message.Reasoning != "" {
+					pushReasoning(choice.Message.Reasoning)
 				}
 			}
 			for _, dtc := range choice.Delta.ToolCalls {
@@ -262,5 +329,10 @@ func CallLLMStream(ctx context.Context, url, token string, req *LLMReq, onConten
 	// 归一化流式用量：与 callLLM 同一条规则，必须在返回前完成——
 	// tokenAnchor 建的是 Usage.PromptTokens，锚在归一前的值上等于把缓存量算丢。
 	streamUsage.Normalize()
-	return &LLMResp{Choices: []LLMChoice{{FinishReason: finish, Message: msg}}, Usage: streamUsage}, nil
+	return &LLMResp{
+		Choices: []LLMChoice{{FinishReason: finish, Message: msg}},
+		Usage:   streamUsage,
+		// 推理正文（若有）。OpenAI 系没有签名，ThinkingSignature 留空。
+		Thinking: reasoning.String(),
+	}, nil
 }

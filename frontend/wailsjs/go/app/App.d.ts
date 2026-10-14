@@ -107,6 +107,8 @@ export function GetUsageDetail(arg1:string):Promise<app.UsageDetail>;
 
 export function Greet(arg1:string):Promise<string>;
 
+export function HasUI():Promise<boolean>;
+
 export function ImportMCPServers(arg1:string):Promise<app.MCPImportResult>;
 
 export function InstallSkillFromFolder(arg1:string):Promise<Array<skill.SkillInstallResult>>;

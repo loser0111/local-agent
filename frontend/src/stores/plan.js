@@ -156,6 +156,10 @@ export const usePlanStore = defineStore('plan', () => {
         onReplyDelta: (chunk) => {
           if (placeholder) chatStore.appendStreamContent(sessionId, placeholder.id, chunk)
         },
+        // 思考分片写进同一个占位消息的 thinking 字段（与 reply_delta 分开的另一个区域）
+        onThinkingDelta: (chunk) => {
+          if (placeholder) chatStore.appendStreamThinking(sessionId, placeholder.id, chunk)
+        },
         onToolCallStart: (tc) => {
           if (placeholder) chatStore.addToolCall(sessionId, placeholder.id, tc)
         },

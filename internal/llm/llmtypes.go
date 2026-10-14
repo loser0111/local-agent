@@ -26,6 +26,11 @@ type LLMMessage struct {
 	ToolCallID string        `json:"tool_call_id,omitempty"`
 	ToolCalls  []LLMToolCall `json:"tool_calls,omitempty"`
 	Images     []LLMImage    `json:"images,omitempty"`
+	// Thinking / ThinkingSignature 上一轮 assistant 消息的思考块（仅 Anthropic 用）。
+	// 启用 thinking 且该轮带工具调用时，必须把它们随 assistant 消息一起回传，
+	// 否则服务端 400。对 OpenAI 系协议无意义（适配层会忽略）。
+	Thinking          string `json:"thinking,omitempty"`
+	ThinkingSignature string `json:"thinkingSignature,omitempty"`
 }
 
 // LLMImage 一次请求里携带的一张图片
@@ -298,6 +303,10 @@ type LLMResp struct {
 	// 仅在启用 thinking 且模型返回时有值
 	// 这个字段不会被发送回给模型，仅作历史记录
 	Thinking string `json:"thinking,omitempty"`
+	// ThinkingSignature 思考块签名（仅 Anthropic 协议）。
+	// 与 Thinking 成对出现：启用 thinking 且带工具调用时，下一轮请求必须把
+	// thinking 块连同签名一起回传，否则服务端 400。
+	ThinkingSignature string `json:"thinkingSignature,omitempty"`
 }
 
 // LLMChoice LLM 选择项
