@@ -189,6 +189,7 @@ export namespace app {
 	    error?: string;
 	    cancelled?: boolean;
 	    cancelKind?: string;
+	    exhausted?: boolean;
 	    context?: agent.ContextStat;
 	    thinking?: string;
 	
@@ -206,6 +207,7 @@ export namespace app {
 	        this.error = source["error"];
 	        this.cancelled = source["cancelled"];
 	        this.cancelKind = source["cancelKind"];
+	        this.exhausted = source["exhausted"];
 	        this.context = this.convertValues(source["context"], agent.ContextStat);
 	        this.thinking = source["thinking"];
 	    }

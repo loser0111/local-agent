@@ -133,6 +133,14 @@ type SubagentResult struct {
 	ToolCalls int      `json:"toolCalls"`
 	Declined  []string `json:"declined,omitempty"` // 因需要授权而被挡下的操作
 	Error     string   `json:"error,omitempty"`
+
+	// Truncated 本次运行**因轮次预算用尽**而结束（不是失败）。
+	//
+	// 为什么单独一个字段而不是把它算进 Status：轮次用尽时子代理往往已经做完大部分工作，
+	// 结论（收尾调用产出的那份）是可用的——把它记成 failed 会让父会话以为"什么都没做成"
+	// 而重做一遍。Status 仍是 completed，Truncated 只补充说明"结论可能不完整"。
+	// 主会话据此可以决定是否追加一轮更聚焦的派生。
+	Truncated bool `json:"truncated,omitempty"`
 }
 
 // DelegatedPaths 子代理改过、而父会话在派生之前没碰过的路径。

@@ -612,33 +612,115 @@ func TestSubagentTotalLimitPerRun(t *testing.T) {
 	}
 }
 
-// 轮次上限：max_turns 会被夹到 20/30 之间，循环靠它停下来（否则一个跑偏的子代理会一直烧）。
-func TestSubagentTurnLimit(t *testing.T) {
+// ★ 回归：复现"子代理老是失败"的真实场景。
+//
+// 线上表现：一个宽泛任务（读很多文件 + 答多个子问题）把轮次预算烧光，模型在**最后一次**
+// 工具调用后就被切断了——它从未被要求给出结论。旧实现下 res.Reply 为空、Status=failed、
+// Summary="（子代理没有给出结论）"，父会话只收到一句"超过最大对话轮次限制"，
+// 40+ 次工具调用查到的事实一个字都没回来。一批子代理因此**全部**失败。
+//
+// 本测试钉住修复后的行为：轮次用尽 → 收尾调用产出结论 → 父会话拿到**非空且可用**的 Summary，
+// 状态为 completed，且 Exhausted 被如实标出。
+func TestSubagentExhaustionReturnsUsableConclusion(t *testing.T) {
 	dir := newTestRepo(t)
-	scripts := make([]string, 0, 40)
-	for i := 0; i < 40; i++ {
-		scripts = append(scripts, fakeChatResp(t, "", fakeCall{
-			id: fmt.Sprintf("c%d", i), name: tool.ToolListDir, args: `{}`,
-		}))
+	// 每轮带**多个**工具调用（贴近真实：一次 assistant 消息常带 2 个 tool_calls），
+	// 于是"工具调用数 > 轮次上限"这件事被复现出来——这正是本次会话 48 次调用 / 25 轮的由来。
+	rounds := make([]string, 0, 5)
+	for i := 0; i < 5; i++ {
+		rounds = append(rounds, fakeChatResp(t, "",
+			fakeCall{id: fmt.Sprintf("a%d", i), name: tool.ToolListDir, args: `{}`},
+			fakeCall{id: fmt.Sprintf("b%d", i), name: tool.ToolListDir, args: `{}`},
+		))
 	}
+	// 收尾调用给出结论（真实模型在被明确要求"只用文字总结"时几乎总会给出）
+	rounds = append(rounds, fakeChatResp(t, "结论：已读完全部文件，X 在 a.go:12，Y 未完成。"))
 
-	env := newSubagentTestEnv(t, dir, permission.ModeAcceptEdits, scripts...)
+	env := newSubagentTestEnv(t, dir, permission.ModeAcceptEdits, rounds...)
 	run := env.app.runs.Begin(env.parent.ID, "")
-	if _, err := env.app.runSubagent(run, env.parent, dir, &env.model, "一直列目录", 3); err != nil {
+	res, err := env.app.runSubagent(run, env.parent, dir, &env.model, "调研整个域", 5)
+	if err != nil {
 		t.Fatalf("派生子代理失败: %v", err)
 	}
-	if got := env.llm.count(); got != 3 {
-		t.Fatalf("max_turns=3 时应只发 3 次请求，实际 %d", got)
+
+	// 旧实现在这里全挂：Status=failed、Summary="（子代理没有给出结论）"
+	if res.Status != subagentStatusCompleted {
+		t.Fatalf("轮次用尽应记 completed（不是 failed），实际 %s（err=%s）", res.Status, res.Error)
+	}
+	if strings.Contains(res.Summary, "没有给出结论") {
+		t.Fatalf("轮次用尽也必须带回可用结论，实际 %q", res.Summary)
+	}
+	if !strings.Contains(res.Summary, "a.go:12") {
+		t.Fatalf("结论应包含收尾调用产出的事实，实际 %q", res.Summary)
+	}
+	if !res.Truncated {
+		t.Fatal("应标记 Truncated，让父会话知道结论可能不完整")
+	}
+	if !strings.Contains(res.Summary, "轮次预算已用尽") {
+		t.Fatalf("结论里应附带截断说明，实际 %q", res.Summary)
+	}
+	// 工具调用数确实超过了轮次上限（复现条件成立）
+	if res.ToolCalls != 10 {
+		t.Fatalf("应执行 5 轮 × 2 次 = 10 次工具调用，实际 %d", res.ToolCalls)
+	}
+	if env.llm.count() != 6 {
+		t.Fatalf("应发 5 次工具轮 + 1 次收尾，实际 %d", env.llm.count())
+	}
+}
+
+// 轮次上限：max_turns 会被夹到 20/30 之间，循环靠它停下来（否则一个跑偏的子代理会一直烧）。
+//
+// ★ 轮次用尽**不再**等于失败（P0/P1 修复的核心）：耗尽后引擎会补一次"只收尾、不带工具"的
+// 调用拿到结论，子代理状态仍是 completed 并带 Truncated 标记。
+func TestSubagentTurnLimit(t *testing.T) {
+	dir := newTestRepo(t)
+	// 造 n 个"一直调工具"的响应（每个都带一个 tool_call，循环会一直转）
+	toolRounds := func(n int) []string {
+		out := make([]string, 0, n)
+		for i := 0; i < n; i++ {
+			out = append(out, fakeChatResp(t, "", fakeCall{
+				id: fmt.Sprintf("c%d", i), name: tool.ToolListDir, args: `{}`,
+			}))
+		}
+		return out
+	}
+	wrapUp := "收尾结论：已列出目录，未完成 X。"
+
+	// max_turns=3：恰好 3 轮工具调用，随后 1 次收尾调用
+	scripts := append(toolRounds(3), fakeChatResp(t, wrapUp))
+	env := newSubagentTestEnv(t, dir, permission.ModeAcceptEdits, scripts...)
+	run := env.app.runs.Begin(env.parent.ID, "")
+	res, err := env.app.runSubagent(run, env.parent, dir, &env.model, "一直列目录", 3)
+	if err != nil {
+		t.Fatalf("派生子代理失败: %v", err)
+	}
+	// 3 轮工具调用 + 1 次收尾调用
+	if got := env.llm.count(); got != 4 {
+		t.Fatalf("max_turns=3 时应发 3 次工具轮 + 1 次收尾，实际 %d", got)
+	}
+	// ★ 轮次用尽不是失败：状态仍是 completed，且结论来自收尾调用
+	if res.Status != subagentStatusCompleted {
+		t.Fatalf("轮次用尽不该判为失败，实际状态 %s（err=%s）", res.Status, res.Error)
+	}
+	if !res.Truncated {
+		t.Fatal("轮次用尽应置 Truncated 标记，供父会话判断结论可能不完整")
+	}
+	if !strings.Contains(res.Summary, "收尾结论") {
+		t.Fatalf("结论应来自收尾调用，实际 %q", res.Summary)
+	}
+	// 收尾调用**必须不带工具**：再产生 tool_calls 就没有轮次执行了，会留下悬空调用
+	if wrapBody := env.llm.bodyAt(3); strings.Contains(wrapBody, `"tools"`) {
+		t.Fatalf("收尾调用不该带工具定义，实际请求体: %s", wrapBody)
 	}
 
 	// 超过硬上限的取值一律夹到默认轮次，而不是照单全收
-	env2 := newSubagentTestEnv(t, dir, permission.ModeAcceptEdits, scripts...)
+	scripts2 := append(toolRounds(agent.SubagentDefaultTurns), fakeChatResp(t, "结论"))
+	env2 := newSubagentTestEnv(t, dir, permission.ModeAcceptEdits, scripts2...)
 	run2 := env2.app.runs.Begin(env2.parent.ID, "")
 	if _, err := env2.app.runSubagent(run2, env2.parent, dir, &env2.model, "一直列目录", 999); err != nil {
 		t.Fatalf("派生子代理失败: %v", err)
 	}
-	if got := env2.llm.count(); got != agent.SubagentDefaultTurns {
-		t.Fatalf("超上限应夹到 %d 轮，实际 %d", agent.SubagentDefaultTurns, got)
+	if got := env2.llm.count(); got != agent.SubagentDefaultTurns+1 {
+		t.Fatalf("超上限应夹到 %d 轮 + 1 次收尾，实际 %d", agent.SubagentDefaultTurns, got)
 	}
 }
 

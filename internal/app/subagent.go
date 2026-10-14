@@ -174,22 +174,41 @@ func (a *App) runSubagent(parentRun *agent.RunControl, parent *store.Session, di
 		Recorder:          &subagentRecorder{app: a, runID: child.ID},
 	})
 
+	raw := strings.TrimSpace(res.Reply)
 	out := &agent.SubagentResult{
 		RunID:     child.ID,
 		Status:    subagentStatusCompleted,
-		Summary:   store.TruncateRunes(strings.TrimSpace(res.Reply), subagentSummaryMaxLen),
 		Declined:  sub.Declined(),
 		ToolCalls: len(res.ToolCalls),
+		// 轮次用尽不是失败：结论（收尾调用产出的那份）通常可用，见 SubagentResult.Truncated。
+		Truncated: res.Exhausted,
+	}
+	switch {
+	case raw == "":
+		out.Summary = "（子代理没有给出结论）"
+	case res.Exhausted:
+		// 让主会话知道这份结论是"尽力收尾"来的，而不是完整结论——
+		// 它据此可以决定要不要再派生一个更聚焦的子代理把剩下的补完。
+		out.Summary = store.TruncateRunes(
+			raw+"\n\n（注：该子代理的轮次预算已用尽，以上为尽力收尾所得的结论，可能不完整。）",
+			subagentSummaryMaxLen)
+	default:
+		out.Summary = store.TruncateRunes(raw, subagentSummaryMaxLen)
 	}
 	switch {
 	case res.Cancelled:
 		out.Status = subagentStatusCancelled
-	case res.Error != "":
+	case raw == "":
+		// 连一句兜底文本都没有：这确实是失败，如实记。
+		// 与下面的分支分开写，是为了让"轮次用尽但拿到了结论"不被误判——
+		// 那种情况子代理往往已做完大部分工作，记成 failed 会让父会话以为"什么都没做成"
+		// 而重做一遍，这正是本次要修的失败放大点。
 		out.Status = subagentStatusFailed
 		out.Error = res.Error
-	}
-	if out.Summary == "" {
-		out.Summary = "（子代理没有给出结论）"
+	case res.Error != "" && !res.Exhausted:
+		// 真正的执行错误才记 failed；轮次用尽（Exhausted）被排除在外。
+		out.Status = subagentStatusFailed
+		out.Error = res.Error
 	}
 	if dir != "" {
 		if files, err := a.diffService.DiffForSession(child.ID, dir); err == nil {

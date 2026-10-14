@@ -29,6 +29,16 @@ type ChatResult struct {
 	Cancelled  bool   `json:"cancelled,omitempty"`
 	CancelKind string `json:"cancelKind,omitempty"` // soft | hard
 
+	// Exhausted 本次运行是否**因轮次预算用尽**而结束。
+	//
+	// 它取代了原先"轮次用尽 = Error"的做法（见 runToolLoop 末尾）。轮次用尽不是失败：
+	// 模型已经做了大量工作，只是没来得及收尾。所以这里显式区分开——
+	//   - Exhausted=true 时 Error 为空、Reply 是收尾调用产出的结论；
+	//   - 调用方（子代理）据此把状态记成"完成但有截断"，而不是 failed。
+	// 单独立一个字段而不是复用 Cancelled：取消是"用户叫停"，用尽预算是"跑到了上限"，
+	// 两者的文案与后续动作都不同（取消不该提示"给更多轮次"，用尽则正该如此）。
+	Exhausted bool `json:"exhausted,omitempty"`
+
 	// Context 本轮结束时的上下文用量（前端据此显示用量指示；/compact 的提示也用它）
 	Context *agent.ContextStat `json:"context,omitempty"`
 
@@ -1189,11 +1199,125 @@ func runToolLoop(ar *agentRun) *ChatResult {
 		return result
 	}
 
+	// ★ 轮次用尽：不直接判失败，先补一次"只收尾、不带工具"的调用拿到结论。
+	//
+	// 见 wrapUpAfterTurnExhausted 的说明：这是把"全损"变成"可用部分结果"的关键一步。
+	// 收尾成功就落库、推 done、照常返回；失败则退回"Exhausted + 空结论"，由调用方决定怎么兜。
+	wrapUp, ok := wrapUpAfterTurnExhausted(ar, run, sessionID, modelID, messages)
+	if !ok {
+		// 收尾调用失败：用最后一条 assistant 文本兜底（可能非空，聊胜于无）。
+		// 找不到任何文本时才留空——调用方（子代理）据此显示"没有给出结论"。
+		wrapUp = lastAssistantText(persistedMsgs)
+	}
+
+	if wrapUp != "" {
+		finalMsg := store.Message{Role: store.RoleAssistant, Content: wrapUp}
+		if saved, err := ar.Store.AppendMessage(sessionID, finalMsg); err == nil {
+			persistedMsgs = append(persistedMsgs, *saved)
+		} else {
+			// 落库失败不阻断：结论已经拿到了，能回给调用方就有价值。
+			fmt.Printf("[chat] 收尾结论落库失败（会话 %s）: %v\n", sessionID, err)
+		}
+		ar.Recorder.Emit(ChatEvent{Type: "done", Reply: wrapUp})
+	}
+
+	// Error 只在"连兜底文本都没有"时才置：拿到结论的运行不是错误，而是"截断的成功"。
+	// 置上 Error 会让前端按错误渲染、并让调用方走失败分支——那正是这次要修的问题。
+	errText := ""
+	if wrapUp == "" {
+		errText = "超过最大对话轮次限制（未能产出结论）"
+	}
 	return &ChatResult{
-		Error:     "超过最大对话轮次限制",
+		Reply:     wrapUp,
 		ToolCalls: toolCallRecords,
 		Messages:  persistedMsgs,
+		Context:   ctxStat,
+		Error:     errText,
+		Exhausted: true,
 	}
+}
+
+// lastAssistantText 取最后一条**非空**的 assistant 文本（收尾调用失败时的兜底）。
+//
+// 只取 assistant：tool 结果里是文件内容，拿它当"结论"会让上层看到一大段无关代码。
+// 倒序找第一条非空的——最后一条 assistant 往往是"我接下来要看 X"这类半句，
+// 但比空结论有用；真正的结论质量由收尾调用保证。
+func lastAssistantText(msgs []store.Message) string {
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role != store.RoleAssistant {
+			continue
+		}
+		if t := strings.TrimSpace(msgs[i].Content); t != "" {
+			return t
+		}
+	}
+	return ""
+}
+
+// ===== 轮次用尽后的收尾（P0）=====
+//
+// 背景：for 循环是**按条件退出**的，退出时循环体内那一整套收尾（落最终回复、算本轮 diff、
+// 推 done 事件）一次都没走。原先的实现直接把这种退出当成错误返回
+// （Error="超过最大对话轮次限制"、Reply 为空）。后果是把一次"做完了大部分、只是没来得及
+// 总结"的运行，判成了彻底失败——调用方拿到的是空结论。
+//
+// 对子代理这条后果尤其重：它的 Summary 唯一来源就是 Reply，于是 40 多次工具调用查到的事实
+// 一个字都回不到主会话，只回一句"超过最大对话轮次限制"。实测中这会让一批子代理**全部**失败。
+//
+// 修法：轮次用尽后**再发一次请求，明确不带工具**，让模型用文字收尾。选"不带工具"而不是
+// "再给一次机会带工具"，是因为后者可能又产生一轮 tool_calls，而我们已经没有轮次去执行它们了
+// ——那会留下悬空的 tool_call（协议上非法，下次请求直接 400，见 recovery.go）。
+//
+// 这一层是**尽力而为**：收尾请求自己也可能失败（网络、限流、上下文超限）。它失败不影响
+// 返回结构——调用方仍能拿到 Exhausted=true 与已持久化的中间消息，只是 Reply 为空。
+const wrapUpPrompt = "你的工具调用轮次预算已经用尽，无法再执行任何工具。\n" +
+	"请**立即**停止调用工具，只用文字给出结论，供上层直接使用：\n" +
+	"1. 已经完成的工作与关键动作；\n" +
+	"2. 已经查清或完成的事实与结论（带上具体文件路径、函数名、命令等标识）；\n" +
+	"3. 尚未完成的部分，以及下一步建议。\n" +
+	"不要再请求任何工具；直接输出上述结论。"
+
+// wrapUpAfterTurnExhausted 轮次用尽后补一次"只收尾、不带工具"的调用。
+//
+// 返回 (结论, 是否成功)。失败返回空串——调用方据此决定是否回落（如用最后一条 assistant 文本）。
+// 它**不**落库、不推事件：这是收尾本身，落库与推 done 由调用方统一处理，
+// 避免"收尾消息"与"最终回复"两处各写一份持久化逻辑。
+func wrapUpAfterTurnExhausted(ar *agentRun, run *agent.RunControl, sessionID, modelID string,
+	messages []llm.LLMMessage) (string, bool) {
+
+	if ar == nil || ar.Model == nil {
+		return "", false
+	}
+	// 追加收尾指令。放在最后一条消息之后：此刻序列的末尾必然是一组完整的工具结果
+	// （循环是"要么带着 tool 结果 continue、要么带着最终回复 return"，不可能停在半个 tool_call 上）。
+	msgs := make([]llm.LLMMessage, 0, len(messages)+1)
+	msgs = append(msgs, messages...)
+	msgs = append(msgs, llm.LLMMessage{Role: store.RoleUser, Content: wrapUpPrompt})
+
+	req := &llm.LLMReq{
+		Model:       modelID,
+		Messages:    msgs,
+		Temperature: 1.0,
+		// 明确不带工具：见上面说明——再产生 tool_calls 就没轮次执行了。
+		Tools: nil,
+	}
+	// 用运行 ctx：用户在这时点停止，收尾请求也要能立刻断掉。
+	resp, err := llm.CallLLMForModel(run.Ctx(), ar.Model, req)
+	if err != nil {
+		fmt.Printf("[chat] 轮次用尽后的收尾调用失败（会话 %s）: %v\n", sessionID, err)
+		return "", false
+	}
+	if len(resp.Choices) == 0 {
+		return "", false
+	}
+	// 用量照样记一笔：收尾这次调用是真实花费，不该从统计里消失。
+	ar.noteUsage(llm.TokenUsageOf(resp.Usage), resp.Usage.RawUsage)
+
+	text := strings.TrimSpace(resp.Choices[0].Message.Content)
+	if text == "" {
+		return "", false
+	}
+	return text, true
 }
 
 // ===== Plan & Execute（规划-执行模式）=====
