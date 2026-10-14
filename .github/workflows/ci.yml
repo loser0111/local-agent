@@ -85,16 +85,20 @@ jobs:
       - name: go vet
         run: go vet -tags webkit2_41 ./...
 
-      # 测试暂设为"只报告不阻断"：internal/app 里还有 2 个**既有**失败
-      # （改动前的基线上同样失败，已用 git stash 对照确认）：
-      #   - TestExecutePlanCancel               计划软取消后未置 cancelled
-      #   - TestHardCancelAbortsInFlightRequest  硬取消未断开在途请求（测试挂起至超时）
-      # 两者都落在"两级取消"子系统，需要单独排查，不适合在本轮 CI 引入时顺手改。
-      # 另有 1 个既有 flaky：internal/snapshot 的 TestCheckpointSurvivesGC（偶发，与 gc 时序相关）。
-      # 待它们修好，把 continue-on-error 去掉，让测试成为真正的门禁。
-      # 注意：build 与 vet 仍是阻断的，所以"编译不过 / vet 不过"一定会被拦下。
+      # 测试是**阻断门禁**。
+      #
+      # 此前这里挂着 continue-on-error，因为 internal/app 有 2 个既有确定性失败
+      # （TestExecutePlanCancel、TestHardCancelAbortsInFlightRequest，都在两级取消子系统）。
+      # 2026-10-14 已定位并修复，两者都**不是产品缺陷**：
+      #   - 前者：测试助手 newPlanTestApp 没初始化 App.runs（生产代码在 setup 里有），
+      #          CancelPlan 命不中运行，于是软取消静默失效、计划跑成 completed；
+      #   - 后者：mock handler 不读 request body，net/http 探测不到客户端断开，
+      #          srv.Close() 一直等这条连接（测试挂到超时），而客户端侧其实已正常断开——
+      #          真实结论被这层假挂起掩盖。
+      # 同时修掉一条既有失败 TestSubagentDeclineIsAuditedWithItsOwnStage（子代理的 ask 被
+      # 降级成拒绝，却先多记了一条 decision=ask 的审计）与 snapshot/diff/app 里由机器级
+      # git-ai（全局 git 配置的 trace2 上报）引起的 TempDir 清理 flaky。
       #
       # -timeout 5m：挂起的用例不必等满 go 默认的 10 分钟，早点失败早点看到。
       - name: go test
-        continue-on-error: true
         run: go test -tags webkit2_41 -timeout 5m ./...

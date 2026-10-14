@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"wails-tmp/internal/agent"
 	"wails-tmp/internal/diff"
 	"wails-tmp/internal/llm"
 	"wails-tmp/internal/store"
@@ -215,6 +216,10 @@ func newPlanTestApp(t *testing.T, srvURL string) (*App, *store.Session) {
 	app.toolStore = tool.NewToolStore(filepath.Join(base, "tools.json"))
 	app.toolManager = NewToolManager(app.toolStore, nil)
 	app.diffService = diff.NewDiffService()
+	// 运行注册表：生产代码在 App.setup 里初始化（app.go 的 a.runs = &agent.RunRegistry{}）。
+	// 零值 App 少了它，CancelPlan / StopChat 就命不中在跑的运行——测试助手必须与生产一致，
+	// 否则取消类用例会静默失效（TestExecutePlanCancel 正是栽在这里）。
+	app.runs = &agent.RunRegistry{}
 	if err := app.modelStore.AddModel(store.Model{Name: "mock", URL: srvURL, APIKey: "k"}); err != nil {
 		t.Fatal(err)
 	}

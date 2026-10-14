@@ -264,6 +264,11 @@ func TestHardCancelAbortsInFlightRequest(t *testing.T) {
 	var started int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.StoreInt32(&started, 1)
+		// 必须先把 body 读干：net/http 只有在 handler 开始读 body 之后，才会起一条
+		// 后台读来探测"客户端断开"。不读的话 r.Context() 永不取消，srv.Close() 会一直
+		// 等这条连接（表现为测试挂到超时），而**客户端侧其实早已正常断开**——
+		// 于是真实结论被这层假挂起掩盖（见 TestHardCancelAbortsInFlightRequest 的成因）。
+		_, _ = io.ReadAll(r.Body)
 		// 一直不回：硬取消必须靠 ctx 把在途请求断掉（而不是等它超时）
 		<-r.Context().Done()
 	}))

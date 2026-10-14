@@ -473,7 +473,9 @@ func buildRunMessages(session *store.Session, systemPrompt string, forceTruncate
 		history = store.CompactMessages(history)
 	}
 	history = agent.ApplyToolResultBudget(history)
-	return buildLLMMessages(history, systemPrompt, loader)
+	// 配平悬空的 tool_call（中断留下的"有 tool_calls、无结果"序列）——正常路径下空操作，
+	// 见 recovery.go。放在最后一步：它是协议层的兜底，前面两步只改"该发什么"。
+	return repairDanglingToolCalls(buildLLMMessages(history, systemPrompt, loader))
 }
 
 // executeChat 执行完整的多轮对话流程（普通聊天入口）
@@ -514,6 +516,10 @@ func (a *App) buildBasePrompt(session *store.Session, dir string) string {
 			"当前会话绑定的工作区目录为：%s\n"+
 			"涉及文件读写、目录操作或运行命令时，若未指定绝对路径，默认应基于此目录（相对路径均相对于该目录）。", dir)
 	}
+	// 项目指令文件（工作区根的 AGENTS.md / CLAUDE.md / .cursorrules）：
+	// 让"这个仓库的约定"随仓库走，而不是只活在用户记忆里。放在工作区段之后——
+	// 它是对该工作区的补充说明，位置紧邻更自然。
+	prompt += loadProjectInstruction(dir)
 	prompt += "\n\n## 工具使用偏好\n" +
 		"读写文件请用 read_file / write_file / edit_file（相对路径相对于工作区目录）；" +
 		"查找文件用 glob、搜索内容用 grep、查看目录用 list_dir。这些工具要么只读、要么按路径精确操作，" +
@@ -695,6 +701,13 @@ func runToolLoop(ar *agentRun) *ChatResult {
 		systemPrompt += store.VisionUnsupportedNote
 	}
 	messages := buildRunMessages(session, systemPrompt, compact, imageLoaderFor(ar.Attachments))
+	// 把未完成的 todo 清单注入系统提示词：中断后"接着往下做"从软引导变成硬机制
+	// （见 recovery.go）。只列未完成项，全部完成时不追加。放这一层而不是调用方：
+	// 这里已重新加载过 session，拿得到最新的 Todos。
+	systemPrompt = withTodoContext(systemPrompt, session)
+	if len(messages) > 0 && messages[0].Role == store.RoleSystem {
+		messages[0].Content = systemPrompt
+	}
 	// 一行日志：**本次请求实际带了几张图**。
 	// "贴了图没进来 / 进来了没发出去"这两类故障长得很像，而这一行就能当场分辨。
 	fmt.Printf("[请求] 会话 %s：携带 %d 张图片，共 %d 条消息\n", sessionID, countImages(messages), len(messages))

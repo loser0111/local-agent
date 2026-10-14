@@ -60,10 +60,16 @@ func (e *SubagentEnforcer) Enforce(ctx context.Context, t tool.ToolInterface, ar
 	}
 
 	subject, verdict, callErr := e.parent.Decide(t, args)
-	e.parent.RecordVerdict(subject, verdict)
 	if callErr != nil {
 		// 调用错误（如命令为空）直接回给模型改，它不是权限结论
+		e.parent.RecordVerdict(subject, verdict)
 		return callErr
+	}
+	// ask 路径**不在这里记原始结论**：子代理根本不弹窗，记一条 decision=ask 会让人
+	// 以为授权请求发出过。它下面会被降级成一条 subagent-declined，只记那条。
+	// 其余路径（allow / deny）就是最终结论，照记。
+	if verdict.Decision != permission.DecisionAsk {
+		e.parent.RecordVerdict(subject, verdict)
 	}
 
 	switch verdict.Decision {
