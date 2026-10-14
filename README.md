@@ -290,8 +290,8 @@ Output: `build/bin/local-agent[.exe]`
 ### Backend Development
 
 ```bash
-# Build
-go build ./cmd/app/...
+# Build（入口在仓库根目录 main.go，无 cmd/ 子目录）
+go build ./...
 
 # Test
 go test ./...
@@ -361,27 +361,33 @@ On Windows, `wails build` uses the GUI subsystem, so launched console programs c
 
 ```
 local-agent/
-├── cmd/
-│   └── app/              # Application entry point
-├── internal/
-│   ├── app/              # Core business logic
-│   ├── llm/              # LLM integration
-│   ├── store/            # Storage layer
-│   ├── agent/            # Agent execution
-│   ├── permission/       # Authorization
-│   ├── tool/             # Tool framework
-│   ├── diff/             # Diff tracking
-│   ├── memory/           # Memory system
+├── main.go               # 应用入口（Wails 启动 + //go:embed all:frontend/dist）
+├── internal/             # 后端按域拆包
+│   ├── app/              # 桥接层与业务逻辑（会话/对话/工具循环/计划/撤销/子代理…）
+│   ├── agent/            # 代理执行引擎（runcontrol / contextmgmt / subagent / ask）
+│   ├── llm/              # LLM 协议适配（anthropic / openai / 重试退避）
+│   ├── store/            # 持久化层（sessions / models / plan / usage / contextprefs…）
+│   ├── permission/       # 权限与授权
+│   ├── tool/             # 工具框架（内置工具、元工具路由、MCP、白名单）
+│   ├── diff/             # 会话级 diff 归因
+│   ├── snapshot/         # 每轮 checkpoint 与撤销
+│   ├── skill/            # Skills 能力
+│   ├── memstore/         # 长期记忆存储
+│   ├── memory/           # 记忆工具实现
+│   ├── media/            # 附件/图片
+│   ├── git/ procx/ task/ # git 包装 / 子进程封装 / 任务生命周期
 │   └── ...
+├── plugin/               # 桌面插件（定时任务/通知，独立子包）
 ├── frontend/
 │   ├── src/
-│   │   ├── components/   # Vue components
+│   │   ├── components/   # Vue 组件（business / layout）
+│   │   ├── panes/        # 右侧面板（chat / diff / plan / todo / subagent…）
 │   │   ├── stores/       # Pinia state
 │   │   ├── api/          # API clients
-│   │   ├── types/        # TypeScript types
 │   │   └── ...
 │   ├── package.json
 │   └── vite.config.js
+├── docs/                 # 设计与实施文档
 ├── wails.json            # Wails configuration
 ├── go.mod/go.sum         # Go dependencies
 └── README.md             # This file
@@ -417,13 +423,15 @@ POST /api/sessions/{sessionId}/chat
 
 ## Documentation
 
-Detailed documentation for specific topics:
+设计与实施文档集中在 [`docs/`](./docs/)。按主题挑重点：
 
-- **[THINKING_IMPLEMENTATION.md](./THINKING_IMPLEMENTATION.md)** - Extended thinking technical details
-- **[FRONTEND_IMPLEMENTATION_GUIDE.md](./FRONTEND_IMPLEMENTATION_GUIDE.md)** - Frontend architecture & components
-- **[FRONTEND_CHANGES_COMPLETE.md](./FRONTEND_CHANGES_COMPLETE.md)** - Recent frontend updates
-- **[START_HERE.md](./START_HERE.md)** - Quick start guide
-- **[IMPLEMENTATION_CHECKLIST.md](./IMPLEMENTATION_CHECKLIST.md)** - Feature checklist
+- **[docs/agent-gaps-implementation-plan.md](./docs/agent-gaps-implementation-plan.md)** - 中断 / 上下文 / 撤销 / 子代理四条硬伤的设计与实施记录
+- **[docs/p2-p3-impl-spec.md](./docs/p2-p3-impl-spec.md)** - 撤销与子代理的实现级规格（文件、签名、测试清单）
+- **[docs/permission-management-outline.md](./docs/permission-management-outline.md)** - 权限系统
+- **[docs/skills-refactor.md](./docs/skills-refactor.md)** - Skills 能力（当前标准）
+- **[docs/memory-system-optimization.md](./docs/memory-system-optimization.md)** - 长期记忆（P0 已实施，P1 部分）
+- **[docs/ui-polish-plan.md](./docs/ui-polish-plan.md)** - 前端主题与可用性
+- **[docs/frontend-design.md](./docs/frontend-design.md)** - 前端设计总览
 
 ## Contributing
 

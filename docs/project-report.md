@@ -1,5 +1,15 @@
 ﻿# local-agent 项目分析报告
 
+> **[已过时 · 仅作历史快照]** 本文写于项目早期，描述的是当时的代码形态。此后项目已大幅演进，**下文多处与现状不符**，请勿据此评估当前实现：
+> - 代码已按域拆包到 `internal/*`（`internal/app` / `internal/llm` / `internal/store` / `internal/agent` / `internal/permission` / `internal/tool` / `internal/diff` / `internal/snapshot` / `internal/skill` / `internal/memory` 等），根目录仅留 `main.go`；下文「目录与文件结构」里的 `app.go` / `chat.go` / `tools.go` 顶层路径已不存在。
+> - 工具早已不只暴露元工具：`read_file`/`write_file`/`edit_file`/`glob`/`grep`/`list_dir`/`exec_shell` 等直出给模型（见 `internal/tool/names.go` 的 `DirectToolOrder`），其余经 `tool_router` 发现。
+> - 「非流式调用」已不成立：现已支持 SSE 流式 + 扩展思考（thinking）流式展示。
+> - `MaxChatTurns` 现为 200（`internal/app/chat.go:43`），非 50。
+> - 下文「七、观察与建议」中的建议（权限白名单/确认、SSE 流式）**均已实现**；README 也已重写，不再是模板默认内容。
+> - 另：文中「项目路径 `E:\learn\local-agent`」是当时的 Windows 工作副本；当前工作区在 macOS（`/Users/temptrip/external/local-agent`）。
+>
+> 需要当前的实现盘点，请以 `docs/` 下带「实施记录/实施状态」的文档与代码为准。
+
 > 项目路径：E:\learn\local-agent
 > 技术栈：Go 1.25 + Wails v2.15 + Vue（前端模板）
 > 报告类型：源代码结构与功能分析

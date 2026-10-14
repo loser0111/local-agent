@@ -1,6 +1,6 @@
 # local-agent 记忆系统优化方案
 
-> - 状态：**P0 已实施**（分支 `feature/memory-optimization`）；P1 / P2 待做
+> - 状态：**P0 已实施**；P1 **部分实施**（G6 工作区指令文件 `AGENTS.md` 已落地，见 `internal/app/projectdoc.go`；G5 回合结束提取、G7 会话工作记忆、G8 设置页/面板入口均**未做**——`Session` 上虽已预留 `WorkingMemory` / `WorkingMemoryUpTo` / `LastExtractMessageID` 三个字段（`internal/store/sessions.go:138-142`），但**全仓无任何读写**，只是占位；前端亦无记忆管理界面）；P2 未做。
 > - 对标：Claude Code `memdir/` + Session Memory + `CLAUDE.md`；本地分析见 `docs/claude-code-memory-analysis.md`
 > - 原则：保留 `memory.MemoryStore` 的工程能力，把 Claude Code 的**对话闭环**接进来；不换协议、不绑 1P API
 

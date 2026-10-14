@@ -73,6 +73,18 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      # gofmt 是**阻断门禁**：格式不一致会持续制造 review 噪音，也说明提交前没跑格式化。
+      # 放在最前——它不需要编译、不需要 GTK/前端产物，失败得最快，能在装依赖之前就拦住。
+      # 与 go build/vet/test 一样用 `./...` 的等价范围（`gofmt -l .` 会跳过非 Go 文件）。
+      - name: gofmt 检查
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "以下文件未通过 gofmt，请本地运行 gofmt -w . 后重新提交："
+            echo "$unformatted"
+            exit 1
+          fi
+
       - name: 取回前端产物（供 go:embed 使用）
         uses: actions/download-artifact@v4
         with:

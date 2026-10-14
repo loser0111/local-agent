@@ -1,7 +1,8 @@
 # Plan & Execute（规划-执行）模式实现方案（开发依据）
 
 > - 项目：`E:\learn\local-agent`（Wails v2 + Go 后端 + Vue 3 前端）
-> - 状态：待实施
+> - 状态：**已实施**（`internal/store/plan.go` + `App.SavePlan`/`ExecutePlan`/`ReopenPlan`/`CancelPlan`，前端 `frontend/src/panes/PlanPane.vue` + `frontend/src/stores/plan.js`）。
+>   下文是设计稿；注意它写于改造前，正文里的 `MaxChatTurns=50` 等表述已过时（现为 `internal/app/chat.go:43` 的 200）。
 > - 用途：为 local-agent 引入 **Plan & Execute** 能力：复杂请求先规划成可审核的任务清单，用户批准后分步执行、进度可视。本文档为后续开发的唯一依据，包含机制解析、数据契约、关键代码、边界与验收标准。
 
 ---

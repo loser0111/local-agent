@@ -5,8 +5,9 @@
 > 保留本文件仅作为设计历史参考。
 
 > - 项目：`E:\learn\local-agent`（Wails v2 + Go 后端 + Vue 3 前端）
-> - 状态：待实施
-> - 用途：为 local-agent 引入对标 Claude Code 的 **Skills（技能）** 能力。本文档为后续开发的唯一依据，包含机制解析、数据契约、完整代码、边界与验收标准。
+> - 状态：**已实施，但已被 `docs/skills-refactor.md` 的标准对齐重构取代**（见文首 [已归档] 说明）。
+>   实际实现见 `internal/skill/`（`skills.go` / `skillparse.go` / `skillresources.go` / `skillinstall.go`）与前端 `frontend/src/components/business/Skill*.vue`。
+> - 用途：为 local-agent 引入对标 Claude Code 的 **Skills（技能）** 能力。本文档为**立项当时**的开发依据（机制解析、数据契约、完整代码、边界与验收标准），现状以代码为准。
 
 ---
 

@@ -1,7 +1,8 @@
 ﻿# 对话右侧栏 Diff 展示：实现方案（开发依据）
 
 > - 项目：`E:\learn\local-agent`（Wails v2 + Go 后端 + Vue 3 前端）
-> - 状态：待实施
+> - 状态：**已实施**（后端 `internal/diff/diff.go` + `App.GetDiff`/`GetDiffTurns`，前端 `frontend/src/panes/DiffPane.vue` + `frontend/src/stores/diff.js`）。
+>   下文是设计稿，实际实现与它的差异以代码为准；文末「已知取舍」一节即落地时的补充记录。
 > - 用途：后续开发的唯一依据，包含数据契约、完整代码、边界与验收标准
 
 ---
