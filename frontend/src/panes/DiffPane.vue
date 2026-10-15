@@ -404,6 +404,11 @@ function reviewCode() {
   font-size: $font-size-sm;
   text-align: center;
   padding: $space-lg;
+
+  & > div:first-child {
+    font-size: $font-size-lg;
+    color: $color-text-secondary;
+  }
 }
 
 .diff-empty-hint {

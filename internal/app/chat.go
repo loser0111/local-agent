@@ -1,0 +1,1728 @@
+package app
+
+import (
+	"encoding/json"
+	"fmt"
+	"strings"
+	"sync"
+	"time"
+	"wails-tmp/internal/agent"
+	"wails-tmp/internal/diff"
+	"wails-tmp/internal/llm"
+	"wails-tmp/internal/media"
+	"wails-tmp/internal/permission"
+	"wails-tmp/internal/skill"
+	"wails-tmp/internal/snapshot"
+	"wails-tmp/internal/store"
+	"wails-tmp/internal/tool"
+)
+
+// ChatResult 对话结果（返回给前端）
+type ChatResult struct {
+	Reply     string           `json:"reply"`               // AI 最终回复内容
+	ToolCalls []store.ToolCall `json:"toolCalls,omitempty"` // 工具调用记录
+	Messages  []store.Message  `json:"messages,omitempty"`  // 后端持久化的所有消息（assistant+tool_calls, tool结果, 最终回复）
+	Diff      []diff.DiffFile  `json:"diff,omitempty"`      // 本轮对话产生的工作区差异
+	Plan      *store.Plan      `json:"plan,omitempty"`      // 规划/执行流程返回时携带的计划
+	Error     string           `json:"error,omitempty"`     // 错误信息
+
+	// Cancelled 本轮是否被用户停止（区别于"失败"：取消不应触发自动重试，
+	// 前端文案也不同——超时可以说"重试一下"，取消不该）。
+	Cancelled  bool   `json:"cancelled,omitempty"`
+	CancelKind string `json:"cancelKind,omitempty"` // soft | hard
+
+	// Exhausted 本次运行是否**因轮次预算用尽**而结束。
+	//
+	// 它取代了原先"轮次用尽 = Error"的做法（见 runToolLoop 末尾）。轮次用尽不是失败：
+	// 模型已经做了大量工作，只是没来得及收尾。所以这里显式区分开——
+	//   - Exhausted=true 时 Error 为空、Reply 是收尾调用产出的结论；
+	//   - 调用方（子代理）据此把状态记成"完成但有截断"，而不是 failed。
+	// 单独立一个字段而不是复用 Cancelled：取消是"用户叫停"，用尽预算是"跑到了上限"，
+	// 两者的文案与后续动作都不同（取消不该提示"给更多轮次"，用尽则正该如此）。
+	Exhausted bool `json:"exhausted,omitempty"`
+
+	// Context 本轮结束时的上下文用量（前端据此显示用量指示；/compact 的提示也用它）
+	Context *agent.ContextStat `json:"context,omitempty"`
+
+	// Thinking 模型生成的思考过程（仅当启用 extended thinking 时）
+	// 这是只读的历史记录，不参与后续请求构建
+	Thinking string `json:"thinking,omitempty"`
+}
+
+// ===== 常量 =====
+
+const (
+	MaxChatTurns = 200
+
+	SystemPrompt = "你是一个智能助手，可以调用工具来帮助用户解决问题。"
+)
+
+// startDeltaFlusher 启动分片节流推送器：
+// 首个分片立即推送，之后 50ms 或累计 ≥20 字符合并推送一次，避免高频 IPC。
+// 返回的 enqueue 非阻塞入队；调用方在流结束后调 shutdown 等待残余分片发完。
+//
+// sessionID / runID 必须由调用方给出：这条 goroutine 是**脱离调用栈**推送的，
+// 它发出去的分片同样是"某次运行的输出"，前端要靠归属把它贴到正确的会话上。
+//
+// build 负责把一段合并后的文本装成事件。正文（reply_delta）与思考（thinking_delta）
+// 共用这一套节流/关闭逻辑——两者的推送节奏完全一样，只是落在事件的哪个字段上不同；
+// 复制一份出来只会让"50ms 或 20 字"这种参数有两个地方要改。
+func (a *App) startDeltaFlusher(sessionID, runID string, build func(chunk string) ChatEvent) (enqueue func(string), shutdown func()) {
+	ch := make(chan string, 256)
+	done := make(chan struct{})
+
+	go func() {
+		var sb strings.Builder
+		ticker := time.NewTicker(50 * time.Millisecond)
+		defer ticker.Stop()
+
+		flush := func() {
+			if sb.Len() == 0 || !a.HasUI() {
+				sb.Reset()
+				return
+			}
+			ev := build(sb.String())
+			ev.SessionID = sessionID
+			ev.RunID = runID
+			a.eventsEmit("chat:event", ev)
+			sb.Reset()
+		}
+
+		for {
+			select {
+			case c, ok := <-ch:
+				if !ok {
+					flush()
+					close(done)
+					return
+				}
+				if sb.Len() == 0 {
+					sb.WriteString(c)
+					flush() // 首分片立即推送
+				} else {
+					sb.WriteString(c)
+					if sb.Len() >= 20 {
+						flush()
+					}
+				}
+			case <-ticker.C:
+				flush()
+			}
+		}
+	}()
+
+	enqueue = func(c string) {
+		select {
+		case ch <- c:
+		default: // 背压极端情况下丢弃单分片也不阻塞 LLM 读取（文本已在后端聚合）
+		}
+	}
+	shutdown = func() {
+		close(ch)
+		<-done
+	}
+	return enqueue, shutdown
+}
+
+// ===== 对话流程（借鉴 01agent 的状态机，简化为循环）=====
+
+// ChatEvent 聊天过程事件（经 "chat:event" 通道推送给前端）
+//
+// **归属不变式**：所有事件都必须带 SessionID。前端只订阅一次这条进程级通道，
+// 再按 SessionID 分发给对应会话的视图状态；没有归属的事件在前端会被丢弃
+// （见 docs/session-scoped-events-design.md 的不变式 1 与 4）。
+// 为了让"忘记带归属"变成不可能，本包的出口只有两个：emitChatEvent 与 emitInteraction
+// （外加运行期的 runRecorder 实现），三者的签名都**强制**要求传会话 ID——
+// 漏传是编译错误，而不是运行期的静默串台。
+type ChatEvent struct {
+	Type      string          `json:"type"` // tool_call_start / tool_call_end / reply_delta / thinking_delta / done / error / diff_update / plan_update / permission_request / ask_user
+	SessionID string          `json:"sessionId,omitempty"`
+	RunID     string          `json:"runId,omitempty"`
+	ToolCall  *store.ToolCall `json:"toolCall,omitempty"`
+	Reply     string          `json:"reply,omitempty"`
+	// Thinking 思考分片（type=thinking_delta）。
+	//
+	// 与 Reply 分开走同一个事件类型、同一个字段名不同：思考与正文在界面上是两个区域，
+	// 且模型可能"先想、再答、再想"（带工具调用时每轮各有一段思考），
+	// 混进 Reply 会让思考文字直接出现在回答气泡里。
+	Thinking  string          `json:"thinking,omitempty"`
+	Error     string          `json:"error,omitempty"`
+	Diff      []diff.DiffFile `json:"diff,omitempty"`      // diff_update 事件携带的差异文件
+	Turn      int             `json:"turn,omitempty"`      // diff 所属轮次
+	Plan      *store.Plan     `json:"plan,omitempty"`      // plan_update 事件全量携带最新计划
+	StepIndex int             `json:"stepIndex,omitempty"` // plan_update 触发步骤索引（计划级变更为 -1，omitempty 时不下发）
+	// Permission 权限授权请求（type=permission_request）：前端应弹出授权弹窗，
+	// 并把结果经 ResolvePermission 回传。请求期间后端阻塞等待，超时/取消一律按拒绝处理。
+	Permission *permission.Request `json:"permission,omitempty"`
+	// Ask 模型主动提问（type=ask_user）：前端应弹出提问弹窗，用户作答后经 ResolveAskUser 回传。
+	// 等待期间后端阻塞；超时/取消会以"用户未作答"回给模型，让它自行决策而不是让整轮失败。
+	Ask *agent.AskRequest `json:"ask,omitempty"`
+	// Compact 自动摘要压缩的产物（type=context_compacted）。
+	// 压缩会让用量**突然下降**，这是设计内行为；但用户只看到数字掉了一半，
+	// 很容易以为对话被截断了。所以压缩一发生就主动推一次，把"原文没丢"讲清楚。
+	Compact *agent.CompactOutcome `json:"compact,omitempty"`
+	// Context 事件发生后的上下文用量。前端据此就地刷新指示，
+	// 不必等这一轮结束的 ChatResult 回来。
+	Context *agent.ContextStat `json:"context,omitempty"`
+	// Usage 本轮 token 用量（type=usage）。与 Context 分开推、走同一个事件类型：
+	// 上下文用量是"还剩多少空间"，token 用量是"已经花了多少"，
+	// 两者跟着同一轮请求产生，但刷新时机与消费方不同（指示器 vs 明细弹窗）。
+	Usage *UsageEvent `json:"usage,omitempty"`
+	// Todos 待办清单全量（type=todo_update）。todo 工具每次改动清单后推送一次，
+	// 前端整表替换——清单很短，全量推送省掉了增量同步的状态漂移问题。
+	Todos []store.TodoItem `json:"todos,omitempty"`
+}
+
+// 事件类型常量（前端按同名分支分发）
+const (
+	ChatEventToolCallStart = "tool_call_start"
+	ChatEventToolCallEnd   = "tool_call_end"
+	ChatEventReplyDelta    = "reply_delta"
+	// ChatEventThinkingDelta 思考过程分片。与 reply_delta 一样是流式增量，
+	// 但落在界面的另一个区域（思考块），前端必须分开消费。
+	ChatEventThinkingDelta = "thinking_delta"
+	ChatEventPermission    = "permission_request"
+	// ChatEventCancelled 本轮被用户停止（软取消或硬取消）。前端据此把流式气泡
+	// 收尾成"已停止"，而不是留着它永远转圈。
+	ChatEventCancelled = "cancelled"
+	// ChatEventError 本轮以错误结束（如模型返回空回复）。事件携带可读原因，
+	// 前端据此把流式气泡收尾成错误，而不是停在"正在输入"或留一条空回复。
+	ChatEventError = "error"
+	// ChatEventContextCompacted 自动摘要压缩已生效（事件携带压缩结果与新的用量）。
+	// 前端用它弹一次提示：用量下降是压缩造成的，原文仍在会话记录里。
+	ChatEventContextCompacted = "context_compacted"
+	// ChatEventUsage 一轮模型调用的 token 用量已产生（事件携带本轮与会话累计）。
+	// 前端据此就地刷新用量明细弹窗，不必等这一轮结束的 ChatResult 回来。
+	ChatEventUsage = "usage"
+	// ChatEventTodoUpdate 待办清单已变化（事件携带全量清单）。
+	// 与 plan_update 一样是"面板级"事件：它不依附某一轮，因此前端要按 sessionId 归位。
+	ChatEventTodoUpdate = "todo_update"
+)
+
+// emitChatEvent 向前端推送一个聊天事件（无 Wails 上下文时静默跳过）。
+//
+// sessionID / runID 由调用方显式给出，并在这里写进载荷：**归属只在出口盖一次章**，
+// 运行期事件走 runRecorder（见 agentrun.go），两条路都收敛到这几行。
+// 改成强制传参是刻意的：多会话并行下，"这条事件属于谁"没有默认值可猜。
+func (a *App) emitChatEvent(sessionID, runID string, ev ChatEvent) {
+	if !a.HasUI() {
+		return
+	}
+	if ev.SessionID == "" {
+		ev.SessionID = sessionID
+	}
+	if ev.RunID == "" {
+		ev.RunID = runID
+	}
+	a.eventsEmit("chat:event", ev)
+}
+
+// EventUserInteraction 需要用户交互的阻塞式请求（授权 / 提问）专用事件名。
+//
+// 为什么不复用 "chat:event"：前端每次调用结束都会 EventsOff("chat:event")，而 Wails 的
+// EventsOff 会移除该事件的**全部**监听——于是这类"无论从哪条链路发起都要能弹出来"的请求，
+// 一旦挂在按调用注册的回调上就会漏（曾经就漏了计划执行路径：授权弹窗没弹，后端白等 5 分钟
+// 才超时失败）。独立通道让前端只需在应用根部订阅一次，新增任何调用入口都不会再漏。
+const EventUserInteraction = "user:interaction"
+
+// emitInteraction 推送需要用户应答的交互事件。
+//
+// **同时发到两条通道**，是为了对「前端产物与 Go 二进制版本不一致」免疫：
+// main.go 用 go:embed 把 frontend/dist 打进二进制，只要构建顺序不当（先 build Go 后 build 前端，
+// 或只重建了一侧），就会出现"后端在新通道喊、前端在旧通道听"（或反之），
+// 表现为弹窗永不出现、工具卡片一直卡在"运行中"直到超时。
+// 两条通道都发，新前端听 user:interaction、旧前端听 chat:event，各自只收到一次。
+//
+// 归属同样在这里盖章：前端要据此决定"这个弹窗是不是当前会话的"，
+// 并把它记到对应会话的挂起表里（后台会话的请求只出列表标记，不弹窗）。
+func (a *App) emitInteraction(sessionID string, ev ChatEvent) {
+	if !a.HasUI() {
+		return
+	}
+	if ev.SessionID == "" {
+		ev.SessionID = sessionID
+	}
+	a.eventsEmit(EventUserInteraction, ev)
+	a.eventsEmit("chat:event", ev) // 兼容旧前端产物
+	// 打一行日志：下次界面没弹出时，看控制台就能判断是"后端没发"还是"前端没收到"
+	fmt.Printf("[交互] 已推送 %s，等待界面应答（若弹窗没出现，请确认前端产物与二进制来自同一次构建）\n", ev.Type)
+}
+
+// imageLoader 把消息里的附件引用读成可发送的图片。
+//
+// 返回 (图片, 载入失败的说明)。失败必须能被调用方看见并写进消息文本——
+// "图读不出来"和"这条消息本来就没有图"对模型是两件完全不同的事，
+// 静默跳过会让模型对着一张不存在的图瞎答。
+//
+// 这是一个**依赖注入点**而不是直接调 AttachmentStore：buildLLMMessages 是取消息序列的
+// 纯组装函数，测试可以传一个假 loader 精确构造"图片读取失败"这类场景。
+type imageLoader func(atts []media.Attachment) ([]llm.LLMImage, []string)
+
+// imageLoaderFor 把附件存储适配成一个图片加载器（附件存储可以为 nil）。
+//
+// 为什么不是 AttachmentStore.LoadImages 方法：附件存储已下沉到 internal/media，
+// 而 Go 不允许在**包外**给外部类型定义方法；它的返回类型里带着 llm.LLMImage（仍在 main），
+// 所以把它做成 main 的自由函数 + 这层适配器，依赖方向仍是 main → media，不会反向。
+func imageLoaderFor(s *media.AttachmentStore) imageLoader {
+	return func(atts []media.Attachment) ([]llm.LLMImage, []string) { return loadImages(s, atts) }
+}
+
+// loadImages 读取一批附件，返回图片与逐条失败说明。
+// 接收者 s 可以为 nil（未初始化附件存储）：此时返回空并在说明里点出原因，
+// 而不是静默返回空——生产链路漏传附件存储就会立刻显形，而不是表现为"图不见了"。
+func loadImages(s *media.AttachmentStore, atts []media.Attachment) ([]llm.LLMImage, []string) {
+	if len(atts) == 0 {
+		return nil, nil
+	}
+	if s == nil {
+		return nil, []string{fmt.Sprintf("（%d 张图片未能载入：附件存储未初始化）", len(atts))}
+	}
+	images := make([]llm.LLMImage, 0, len(atts))
+	var notes []string
+	for _, att := range atts {
+		if att.Kind != "" && att.Kind != media.AttachmentKindImage {
+			notes = append(notes, fmt.Sprintf("（附件 %s 类型不受支持，已忽略）", att.Describe()))
+			continue
+		}
+		data, err := s.Load(att)
+		if err != nil {
+			notes = append(notes, fmt.Sprintf("（图片 %s 未能载入：%v）", att.Describe(), err))
+			// 同步打一行日志：消息里那句"未能载入"用户未必会看，
+			// 而"附件没落盘"与"附件落盘了但读不回来"是两种完全不同的故障，日志是第一现场。
+			fmt.Printf("[附件] 读取失败 id=%s name=%q path=%q: %v\n", att.ID, att.Name, att.Path, err)
+			continue
+		}
+		images = append(images, llm.LLMImage{
+			MediaType: att.MediaType,
+			Data:      data,
+			Bytes:     len(data),
+			Width:     att.Width,
+			Height:    att.Height,
+		})
+	}
+	return images, notes
+}
+
+// resolveImages 走 loader 读图，并把失败说明拼成一行附注。
+func resolveImages(loader imageLoader, atts []media.Attachment) ([]llm.LLMImage, string) {
+	if len(atts) == 0 {
+		return nil, ""
+	}
+	if loader == nil {
+		// 没有 loader 说明这条链路不携带图片。仍然显式说一句：
+		// 日后若有人在生产路径漏传 loader，现象会是"图没了但有提示"，而不是无声无息。
+		return nil, fmt.Sprintf("（有 %d 张图片未能载入：当前链路未装配附件存储）", len(atts))
+	}
+	images, notes := loader(atts)
+	if len(notes) == 0 {
+		return images, ""
+	}
+	return images, strings.Join(notes, "；")
+}
+
+// toolImageNote 工具产图时那条附注：把图与"它是哪个工具给的"绑在一起。
+// 少了这句，模型只看到一张孤立的图，无从判断它从哪来、该拿它做什么。
+func toolImageNote(toolName string) string {
+	if strings.TrimSpace(toolName) == "" {
+		return "（以下是上面工具返回的图片）"
+	}
+	return fmt.Sprintf("（以下是 %s 返回的图片）", toolName)
+}
+
+// appendNote 把一行附注接到消息文本上（原本没有正文时就直接作为正文）
+func appendNote(content, note string) string {
+	if strings.TrimSpace(content) == "" {
+		return note
+	}
+	return strings.TrimRight(content, "\n") + "\n" + note
+}
+
+// appendToolResultMessages 追加一次工具结果：tool 文本立刻写入 messages；若这次结果带图，
+// 那条承载图片的 user 消息**不进 messages，而是挂到 pending**，等本轮工具消息写完再补
+// （见 appendToolResultImages）。
+//
+// 这个形状由两条协议的硬约束逼出来，所以不能让调用方各写一份：
+//   - OpenAI 的 tool 消息 content 只能是字符串，塞数组会被网关直接拒；
+//   - Anthropic 的 tool_result 块本身能装图片，而适配器会把相邻的同角色消息并进同一个
+//     user 回合（见 appendAnthropicMessage）——那条 user 消息于是自动并进 tool_result
+//     所在的那一轮，不会多出一个回合。
+//
+// **为什么图片必须挂起、而不能当场追加**：OpenAI 系（含各家网关）要求 assistant(tool_calls)
+// 之后紧跟**连续**的 tool 消息，且覆盖它声明的每一个 tool_call_id。一轮里若有多个工具调用，
+// 而产出图片的又不是最后一个，图片 user 消息就会插在两条 tool 消息中间——网关只数到它前面
+// 那一条 tool，于是整条请求被拒：
+//
+//	An assistant message with 'tool_calls' must be followed by tool messages
+//	responding to each 'tool_call_id'. (insufficient tool messages following tool_calls message)
+//
+// 它**不在当次报错**：断裂的序列已经落库，之后每次从历史重建请求都会被拒，那个会话就再也
+// 发不出消息了。触发条件很窄（多工具调用 + 产图的不是最后一个），所以真机上看起来像"偶发
+// 失败"，实际是"这个会话从此废掉"。所以图片一律先挂起，由调用方在本轮最后一条工具结果
+// 写完后补上。
+//
+// **两处必须共用它**：工具循环（运行中刚产生的这条结果）与 buildLLMMessages
+// （下一轮从会话重建的同一批历史）。各写一份的话，第二轮请求里的这条消息就会与
+// 第一轮长得不一样——而人只有在"图片突然不见了"时才会发现。同理，"先挂起、最后补"这件事
+// 两处也必须一致：顺序只要写错一处，断裂的序列就已经落进会话记录了，另一处再对也没用。
+func appendToolResultMessages(messages, pending []llm.LLMMessage, toolName, content, toolCallID string,
+	atts []media.Attachment, loader imageLoader) ([]llm.LLMMessage, []llm.LLMMessage) {
+
+	images, note := resolveImages(loader, atts)
+	if note != "" {
+		content = appendNote(content, note)
+	}
+	messages = append(messages, llm.LLMMessage{Role: store.RoleTool, Content: content, ToolCallID: toolCallID})
+	if len(images) > 0 {
+		pending = append(pending, llm.LLMMessage{
+			Role:    store.RoleUser,
+			Content: toolImageNote(toolName),
+			Images:  images,
+		})
+	}
+	return messages, pending
+}
+
+// appendToolResultImages 把挂起的图片 user 消息补到 messages 尾部，返回 (messages, nil)。
+//
+// 调用时机是硬约束：必须在**本轮最后一条 tool 消息之后**（理由见 appendToolResultMessages）。
+// 返回两个值而不是就地改一个变量，是为了让两处调用点长得一模一样——"flushed 之后忘了清空"
+// 这种错会表现为图片重发一遍，而"flush 早了"会表现为整条请求被网关拒绝。
+func appendToolResultImages(messages, pending []llm.LLMMessage) ([]llm.LLMMessage, []llm.LLMMessage) {
+	if len(pending) == 0 {
+		return messages, pending
+	}
+	return append(messages, pending...), nil
+}
+
+// countImages 统计消息序列里一共带了几张图（排障日志用）
+func countImages(messages []llm.LLMMessage) int {
+	n := 0
+	for _, m := range messages {
+		n += len(m.Images)
+	}
+	return n
+}
+
+// buildThinkingConfig 从会话配置构建 thinking 参数
+// 仅当 thinking 在会话中启用且预算 > 0 时才返回有效的配置，否则返回 nil
+func buildThinkingConfig(session *store.Session) *llm.LLMThinking {
+	if session == nil || !session.ThinkingEnabled || session.ThinkingBudget <= 0 {
+		return nil
+	}
+	return &llm.LLMThinking{
+		Type:         "enabled",
+		BudgetTokens: session.ThinkingBudget,
+	}
+}
+
+// buildLLMMessages 从历史消息构造 LLM messages 数组
+// 正确重建消息序列：assistant(tool_calls) → tool(tool_call_id) → assistant(最终回复)
+// systemPrompt 由调用方拼接（基础人设 + L1 技能清单 + 强制注入正文）
+// 约定：当前这条用户输入（普通聊天由前端、计划步骤由执行器）已持久化在 history 末尾，
+// 此处不再重复追加，避免同一句话在模型上下文中出现两次。
+//
+// loader 是附件读取口（可为 nil，见 imageLoader 的说明）。
+// 这里是**唯一**把 store.Message.Attachments 变成协议图片的地方——用户贴的图与工具读到的图
+// 走的是同一条路，因此"怎么存"与"怎么发"各自只有一处实现。
+func buildLLMMessages(history []store.Message, systemPrompt string, loader imageLoader) []llm.LLMMessage {
+	messages := []llm.LLMMessage{
+		{Role: store.RoleSystem, Content: systemPrompt},
+	}
+
+	// tool_call_id → 工具名。工具结果消息本身不带工具名，而"这是谁返回的图"
+	// 恰恰是模型最需要的上下文，只能从前面那条 assistant(tool_calls) 里反查。
+	toolNames := map[string]string{}
+
+	// 本轮工具结果里"带图的那些"挂在这儿，等这一段连续的 tool 消息走完再补上。
+	// 边收边发会把 assistant(tool_calls) 与 tool 的配对切断（见 appendToolResultMessages）。
+	var pendingImages []llm.LLMMessage
+
+	// 添加历史消息
+	for _, msg := range history {
+		// 一段连续的 tool 消息到头了（本条不是工具结果），先把挂起的图片消息补在它后面。
+		// 放在循环开头而不是"看到 tool 时看下一条"，是为了连"历史以工具结果收尾"也一并覆盖。
+		if msg.Role != store.RoleTool {
+			messages, pendingImages = appendToolResultImages(messages, pendingImages)
+		}
+
+		m := llm.LLMMessage{
+			Role:    msg.Role,
+			Content: msg.Content,
+		}
+		// tool 角色消息：携带 tool_call_id
+		if msg.ToolCallID != "" {
+			m.ToolCallID = msg.ToolCallID
+		}
+		// assistant 角色消息：转换工具调用记录为 LLM tool_calls 格式
+		if len(msg.ToolCalls) > 0 {
+			calls := make([]llm.LLMToolCall, 0, len(msg.ToolCalls))
+			for _, tc := range msg.ToolCalls {
+				argsBytes, _ := json.Marshal(tc.Args)
+				calls = append(calls, llm.LLMToolCall{
+					ID:   tc.ID,
+					Type: llm.ToolTypeFunction,
+					Function: llm.LLMToolFunction{
+						Name:      tc.Name,
+						Arguments: string(argsBytes),
+					},
+				})
+				toolNames[tc.ID] = tc.Name
+			}
+			m.ToolCalls = calls
+		}
+		// assistant 消息的 thinking 块回传：启用 thinking 且该轮带工具调用时，
+		// Anthropic 要求把上一轮的 thinking 连同签名放回请求里，否则 400。
+		// 只在"这一轮确实带工具调用"时回传——纯文本回复的 thinking 回传无意义，
+		// 还会白白把思考正文算进输入 token。
+		if msg.Role == store.RoleAssistant && len(msg.ToolCalls) > 0 && msg.ThinkingSignature != "" {
+			m.Thinking = msg.Thinking
+			m.ThinkingSignature = msg.ThinkingSignature
+		}
+
+		if msg.Role == store.RoleTool {
+			// 工具结果（可能带图）固定走同一个追加函数；带图的那条只挂起，下一轮循环开头补
+			messages, pendingImages = appendToolResultMessages(messages, pendingImages,
+				toolNames[msg.ToolCallID], m.Content, m.ToolCallID, msg.Attachments, loader)
+			continue
+		}
+
+		images, note := resolveImages(loader, msg.Attachments)
+		if note != "" {
+			m.Content = appendNote(m.Content, note)
+		}
+		m.Images = images
+		messages = append(messages, m)
+	}
+
+	// 历史以 tool 结果收尾时，上面那次 flush 不会被触发（它挂在"非 tool 消息"上）
+	messages, _ = appendToolResultImages(messages, pendingImages)
+
+	return messages
+}
+
+// buildRunMessages 组装本次运行发给模型的消息序列。
+//
+// 顺序有讲究：先做摘要前缀替换（它改变消息条数），再施加工具结果预算（逐条改内容），
+// 最后交给 buildLLMMessages 转成协议格式。
+// forceTruncate 为 true 时走确定性截断——它是降级路径与调试开关，不是常规流程。
+//
+// loader 是附件读取口，一路上传给 buildLLMMessages（可为 nil，见 imageLoader 的说明）。
+// 它必须是参数而不是去全局取：这一层要做的是"取哪几条消息"，取图的动作属于协议组装，
+// 待到了最后一步才发生——中间那两步（摘要替换、结果预算）都不碰图片。
+//
+// 两条中间步骤（摘要前缀替换、工具结果预算）的实现在 internal/agent：它们是"该发什么"
+// 的上下文策略，与会话/界面无关；构造协议消息（本文件这一侧）才是 main 的事。
+func buildRunMessages(session *store.Session, systemPrompt string, forceTruncate bool, loader imageLoader) []llm.LLMMessage {
+	if session == nil {
+		return buildLLMMessages(nil, systemPrompt, loader)
+	}
+	history := session.Messages
+	if session.ContextCoveredUpTo > 0 &&
+		session.ContextCoveredUpTo <= len(history) &&
+		strings.TrimSpace(session.ContextSummary) != "" {
+		history = agent.WithContextSummary(history, session.ContextCoveredUpTo, session.ContextSummary)
+	}
+	if forceTruncate {
+		history = store.CompactMessages(history)
+	}
+	history = agent.ApplyToolResultBudget(history)
+	// 配平悬空的 tool_call（中断留下的"有 tool_calls、无结果"序列）——正常路径下空操作，
+	// 见 recovery.go。放在最后一步：它是协议层的兜底，前面两步只改"该发什么"。
+	return repairDanglingToolCalls(buildLLMMessages(history, systemPrompt, loader))
+}
+
+// executeChat 执行完整的多轮对话流程（普通聊天入口）
+// 借鉴 01agent 的状态机设计：Preprocessing → LLM Call → Judge → Tool Execute → Rebuild → 循环
+// 持久化所有中间消息（assistant+tool_calls, tool结果, 最终回复），确保下次对话时消息序列完整
+func (a *App) executeChat(sessionID, query string, useStream bool) *ChatResult {
+	session, err := a.sessionStore.GetSession(sessionID)
+	if err != nil {
+		return &ChatResult{Error: fmt.Sprintf("加载会话失败: %v", err)}
+	}
+	model, err := a.modelStore.GetModelForCall(session.Model)
+	if err != nil {
+		return &ChatResult{Error: fmt.Sprintf("获取模型配置失败: %v", err)}
+	}
+	dir, _ := a.resolveProjectDir(sessionID)
+	prompt, allowedTools, err := a.buildBasePromptWithSkill(session, dir, query)
+	if err != nil {
+		return &ChatResult{Error: err.Error()}
+	}
+	// 登记为可取消的运行：前端「停止」经 StopChat 命中它（软取消 / 硬取消）。
+	// 用 beginExclusive：同一会话已经在跑时直接拒绝——多会话并行是允许的，
+	// 同一会话并行会互相破坏消息序列与 diff 归因（见 agent.ErrSessionBusy 的说明）。
+	run, berr := a.runs.BeginExclusive(sessionID, "")
+	if berr != nil {
+		return &ChatResult{Error: berr.Error()}
+	}
+	defer a.runs.End(run)
+	return runToolLoop(a.newMainAgentRun(run, session, dir, prompt, allowedTools, &model, useStream, false))
+}
+
+// buildBasePrompt 组装基础系统提示词：基础人设 + 工作区说明 + 技能上下文（L1 清单 / 强制注入正文）
+// dir 为会话工作区目录（为空串时不追加工作区段）
+func (a *App) buildBasePrompt(session *store.Session, dir string) string {
+	prompt := SystemPrompt
+	// 工作区说明：告知模型当前会话绑定的工作目录（未设置时为进程工作目录）
+	if dir != "" {
+		prompt += fmt.Sprintf("\n\n## 工作区\n"+
+			"当前会话绑定的工作区目录为：%s\n"+
+			"涉及文件读写、目录操作或运行命令时，若未指定绝对路径，默认应基于此目录（相对路径均相对于该目录）。", dir)
+	}
+	// 项目指令文件（工作区根的 AGENTS.md / CLAUDE.md / .cursorrules）：
+	// 让"这个仓库的约定"随仓库走，而不是只活在用户记忆里。放在工作区段之后——
+	// 它是对该工作区的补充说明，位置紧邻更自然。
+	prompt += loadProjectInstruction(dir)
+	prompt += "\n\n## 工具使用偏好\n" +
+		"读写文件请用 read_file / write_file / edit_file（相对路径相对于工作区目录）；" +
+		"查找文件用 glob、搜索内容用 grep、查看目录用 list_dir。这些工具要么只读、要么按路径精确操作，" +
+		"比 shell 命令更安全，也不会被 shell 语法（引号、重定向、命令替换）影响。\n" +
+		"要看**图片**的内容（截图、报错图、设计稿、图表）用 read_image——read_file 只返回文本、读不了二进制，" +
+		"而 read_image 会把图作为图像内容交给你，你可以直接描述和分析其中内容。\n" +
+		// 这条是实测补上的：真机上曾出现"消息里只有一串图片 URL"的情况（粘贴没落到图片通道），
+		// 而模型当时声称「让我尝试通过工具下载或查看它」，白耗一轮之后还是要用户重来。
+		// 把事实写清楚，模型就不会假装有抓取能力。
+		"用户贴的图片会**作为图像内容**直接出现在消息里，你直接就能看到，不需要任何工具。" +
+		// 这段是实测改的。原来的写法说"你没有抓取外部链接的能力，不要花轮次尝试"——
+		// 那是错的：exec_shell 就在工具列表里，curl 真能跑通，模型也因此真的去下载了。
+		// 把能力说清楚、并给出边界，比说一句不成立的话更有效。
+		"顺序上先看消息里**有没有图像内容**：有图就直接看，不要再去下载任何链接。" +
+		"只有当消息里只有一个链接、完全没有图像内容时，才考虑取图——你可以用 exec_shell 跑 curl " +
+		"把它下载到工作区再用 read_image 看（会按 exec_shell 的权限规则询问）；" +
+		"但链接未必指向用户这次想给你看的那张图（它可能来自更早的对话），所以动手前先跟用户确认一句。" +
+		"read_image 只能读工作区内的文件，读不了 URL。" +
+		"另外，如果你收到一条本该带图的消息却看不到任何图像内容，就如实说「我这边没有收到图像内容」，" +
+		"**不要编造原因**（例如猜用户发的是链接、或说图太大）；用户可以用 /vision 自检模型能不能看图。\n" +
+		"exec_shell 留给构建、测试、git 等真正的命令；不要用它做 cat / sed -i / echo > 这类文件读写。\n" +
+		"需要**训练数据之外的最新信息**（新闻、版本号、依赖现状、报错信息、价格等）时用 web_search 联网检索：" +
+		"它返回标题、URL 与摘要；要细读某条结果，再用 exec_shell 的 curl 取全文。" +
+		"查本地代码或文件**不要**联网，用 grep / glob / read_file。\n" +
+		"遇到会产生大量中间过程、且与当前主线关系不大的任务（把一个模块摸清楚、独立调研一个问题），" +
+		"可以用 spawn_agent 派一个子代理去做：它有自己独立的上下文，你只收到一份结论，" +
+		"那些中间过程不会占用你的上下文。一两步就能做完的事不必派。"
+
+	// 效率约定：引导模型一轮批量调用、避免重复读数与无谓的工具发现往返。
+	// 执行层本就支持一轮返回多个 tool_calls（runToolLoop 串行执行、整体只算一轮），
+	// 但此前的提示词从未提及，模型只会一个一个来，探索类任务因此多耗一倍以上轮次。
+	prompt += "\n\n## 效率约定\n" +
+		"轮次很宝贵，请用下面这些方式减少往返：\n" +
+		"1. 一轮可以发起多个互不依赖的工具调用：在同一次响应里返回多个 tool_call，它们只算一轮、按先后顺序执行。" +
+		"调研阶段（读多个文件、搜多处代码、列目录）请尽量合并到同一轮，不要一个个来。\n" +
+		"2. 有副作用的操作（write_file / edit_file / exec_shell）一次只发一个，确认结果无误再发下一个：" +
+		"批量发出会让权限确认连续弹窗，出错了也更难定位是哪一个。\n" +
+		"3. 同一个文件不要反复读：读完记住内容，要改就直接 edit_file；" +
+		"已经确认过的命令也不要再跑一遍去'再验证'。\n" +
+		"4. 先用 glob / grep 定位到具体文件与行，再 read_file 精读；不要盲目通读整个目录。\n" +
+		"5. 上面「工具使用偏好」里已点名的工具都可直接调用，不必先经 tool_router 去 list / describe；" +
+		"只有不确定有哪些工具、或不确定某工具的完整参数时，才用 tool_router 发现。\n" +
+		"跨会话偏好与项目事实用 memory_search 查阅、memory_save 写入、memory_forget 删除；" +
+		"不要用 write_file 去改记忆目录。\n" +
+		"6. 多步骤、要跨多轮、或者需要让用户看到进度的任务，先用 todo 工具把步骤列成清单，" +
+		"做完一项就把它标成 done（面板上会实时显示）。清单很短、随时可改，别为了走流程硬建；" +
+		"一步就能做完的事不要建清单。上下文被压缩后，清单是你重建进度的依据。"
+
+	if a.skillStore != nil {
+		enabled := a.enabledSkillsForSession(session)
+		if idx := skill.BuildSkillIndex(enabled); idx != "" {
+			prompt += "\n\n## 可用技能（Skills）\n" +
+				"当请求与下列技能的描述匹配时，先调用 read_skill 取回该技能的完整说明，再按说明执行；" +
+				"技能自带的 references/ 文档用 read_skill_file 读取，scripts/ 下的脚本用 exec_shell 执行：\n" + idx
+		}
+	}
+	if mem := a.memoryIndexBlock(session); mem != "" {
+		prompt += "\n\n" + mem
+	}
+	return prompt
+}
+
+// buildBasePromptWithSkill 在基础提示词上叠加「显式调用技能」段。
+// 用户在消息开头写 /技能名 时，该技能正文直接进入本轮 system prompt：
+// 是否使用该技能由用户决定，不再经模型路由（这正是 disable-model-invocation 的语义）。
+// 未命中技能时按普通消息处理（例如消息其实是一条以 / 开头的路径）。
+//
+// 第二个返回值是该技能的 allowed-tools（未命中技能时为 nil）。它由调用方送进
+// BuildOptions.AllowedTools，让声明变成**真的约束**——只把白名单写进提示词而不收窄
+// 工具视图的话，模型仍能调用声明之外的工具，技能/角色就只是一段没有约束力的文字。
+func (a *App) buildBasePromptWithSkill(session *store.Session, dir, query string) (string, []string, error) {
+	prompt := a.buildBasePrompt(session, dir)
+	if a.skillStore == nil {
+		return a.attachMemoryRecall(session, query, prompt), nil, nil
+	}
+	res := a.skillStore.ResolveSkillCommand(query)
+	if res.Reason != "" {
+		return "", nil, fmt.Errorf("%s", res.Reason)
+	}
+	if !res.Ok || res.Skill == nil {
+		return a.attachMemoryRecall(session, query, prompt), nil, nil
+	}
+	// 会话白名单同样约束显式调用：本会话没开放的技能不该被 /名称 绕过
+	if !a.skillAllowedInSession(session, res.Skill.ID) {
+		return "", nil, fmt.Errorf("技能 %s 未在本会话的可用技能中", res.Skill.ID)
+	}
+	body, err := a.skillStore.LoadBody(res.Skill.ID)
+	if err != nil {
+		return "", nil, err
+	}
+	return a.attachMemoryRecall(session, query, prompt+skill.BuildExplicitSkillBlock(res.Skill, body)),
+		res.Skill.AllowedTools, nil
+}
+
+// skillAllowedInSession 会话技能白名单是否放行该技能（白名单为空=全部放行）
+func (a *App) skillAllowedInSession(session *store.Session, id string) bool {
+	if len(session.EnabledSkills) == 0 {
+		return true
+	}
+	for _, s := range session.EnabledSkills {
+		if s == id {
+			return true
+		}
+	}
+	return false
+}
+
+// runToolLoop 执行一次「构建请求→LLM→工具循环」的完整运行。
+//
+// 普通聊天、计划步骤执行、以及将来的子代理共用的**唯一**执行引擎。
+// 它只依赖 agentRun 携带的依赖、不直接引用 *App，所以是自由函数而不是方法——
+// 编译通过本身就是这层解耦的证明（见 agentrun.go）。
+//
+// 调用方负责：组装 systemPrompt、装配工具视图与权限网关、把当前用户消息持久化进会话历史。
+// ar.Compact=true 时对历史消息做确定性截断（降级路径与调试开关）。
+// 软取消在每轮工具循环开始前检查；硬取消由 ar.Control 的 ctx 贯穿到在途请求与子进程。
+func runToolLoop(ar *agentRun) *ChatResult {
+	if ar == nil || ar.Store == nil {
+		return &ChatResult{Error: "运行上下文缺失"}
+	}
+	// 把运行参数取成局部变量：循环主体因此几乎不用改，
+	// diff 里只剩「依赖从哪里来」这一件事变了，便于逐行复核。
+	run := ar.Control
+	if run == nil {
+		run = (&agent.RunRegistry{}).Begin(ar.SessionID, ar.PlanID)
+	}
+	sessionID := ar.SessionID
+	systemPrompt := ar.SystemPrompt
+	model := ar.Model
+	useStream, compact := ar.Stream, ar.Compact
+	dir := ar.Dir
+	isRepo := ar.IsRepo
+	maxTurns := ar.MaxTurns
+	if maxTurns <= 0 {
+		maxTurns = MaxChatTurns
+	}
+
+	// 1. 重新加载会话：确保包含调用方刚持久化的用户消息以及此前全部消息（跨步骤上下文连续）
+	session, err := ar.Store.GetSession(sessionID)
+	if err != nil {
+		return &ChatResult{Error: fmt.Sprintf("加载会话失败: %v", err)}
+	}
+
+	// 2. 确定模型 ID（优先用 ModelID，为空则用 Name）
+	modelID := model.ModelID
+	if modelID == "" {
+		modelID = model.Name
+	}
+
+	// ★ 记录本轮工作区基线（对话开始前的快照，用于轮末计算本轮 diff）
+	// dir 与 isRepo 由调用方给出（见 agentRun），这里不再自行解析
+	turnBase := ""
+	// turnCheckpoint 撤销用的完整快照。与 turnBase 刻意分开、各取一份：
+	// turnBase（stash create）不含未跟踪文件、用于算 diff；这份含未跟踪文件、用于回退。
+	// 合并会带来两个问题：diff 会把未跟踪文件重复计算；回退会误删用户手写的未跟踪文件。
+	turnCheckpoint := ""
+	if isRepo {
+		// 先恢复会话里持久化的 diff 状态（基线与已归因的路径），重启后仍能算会话级 diff
+		ar.Diff.RestoreSession(sessionID, session.DiffBaseline, session.DiffTouched)
+		ar.Diff.EnsureBaseline(sessionID, dir)
+		ar.Diff.BeginTurn(sessionID)
+		turnBase = ar.Diff.TurnSnapshot(dir)
+
+		// 取不到不算错误：本轮只是不可回退，对话照常进行
+		if cp, cpErr := snapshot.Checkpoint(dir, sessionID, store.NextDiffTurn(session)); cpErr == nil {
+			turnCheckpoint = cp
+			snapshot.PruneCheckpoints(dir, sessionID, snapshot.KeepTurns)
+		} else {
+			fmt.Printf("[checkpoint] 本轮快照失败，该轮不可回退: %v\n", cpErr)
+		}
+	}
+
+	// 3. 组装发给模型的消息序列：摘要前缀替换（若会话有生效摘要）+ 单条工具结果预算。
+	//    compact=true 是降级/调试开关，强制走确定性截断，不是常规路径。
+	//
+	// 先补系统提示词那句话说（如果 /vision 已证明这个模型看不到图）：
+	// 放在 buildRunMessages **之前**，循环内部每次重建 messages 都会继承它。
+	if ar.VisionUnsupported {
+		systemPrompt += store.VisionUnsupportedNote
+	}
+	messages := buildRunMessages(session, systemPrompt, compact, imageLoaderFor(ar.Attachments))
+	// 把未完成的 todo 清单注入系统提示词：中断后"接着往下做"从软引导变成硬机制
+	// （见 recovery.go）。只列未完成项，全部完成时不追加。放这一层而不是调用方：
+	// 这里已重新加载过 session，拿得到最新的 Todos。
+	systemPrompt = withTodoContext(systemPrompt, session)
+	if len(messages) > 0 && messages[0].Role == store.RoleSystem {
+		messages[0].Content = systemPrompt
+	}
+	// 一行日志：**本次请求实际带了几张图**。
+	// "贴了图没进来 / 进来了没发出去"这两类故障长得很像，而这一行就能当场分辨。
+	fmt.Printf("[请求] 会话 %s：携带 %d 张图片，共 %d 条消息\n", sessionID, countImages(messages), len(messages))
+
+	// 4. 工具视图由调用方装配（见 newMainAgentRun）。
+	// 这里是子代理唯一需要与主会话不同的地方——它要用自己的权限网关与工具子集，
+	// 所以装配点必须留在调用方，循环只管拿来用。
+	toolView := ar.ToolView
+	tools := toolView.GetToolsForLLM()
+
+	// 5. 上下文用量的基准量：窗口大小、工具定义的固定开销、用量锚点。
+	//    锚点由响应里回传的真实 input token 建立，把估算误差限制在两条锚点之间。
+	window := agent.ContextWindowOf(model)
+	toolTokens := agent.ToolSchemaTokens(tools)
+	// 估算校准系数：本次运行全程不变（按会话模型查一次）。ar.TokenCalib 为 nil
+	// （子代理，以及只手工构造了 agentRun 的测试）时按 1.0，即退化成纯字符估算。
+	calib := 1.0
+	if ar.TokenCalib != nil {
+		calib = ar.TokenCalib.Ratio(session.Model)
+	}
+	var anchor *agent.TokenAnchor
+	var ctxStat *agent.ContextStat
+	overflowRetried := false
+	// emptyReplyRetried 本 run 是否已经为空回复重试过一次。
+	// 空回复通常意味着上下文超出模型窗口，压缩重试一次足够；无限重试只会把一次失败
+	// 拖成一长串同样的失败。重试后仍为空就直接报错，让用户看到明确原因。
+	emptyReplyRetried := false
+	// summaryBroken 摘要器坏掉（调用失败/结果异常）后置位：本run之内不再尝试摘要式压缩。
+	// 否则每一轮都要白白付一次失败的 LLM 调用，而确定性截断本来就能兜住。
+	summaryBroken := false
+
+	// 6. 工具调用循环
+	var toolCallRecords []store.ToolCall
+	var persistedMsgs []store.Message // 本次运行持久化的所有消息
+
+	for turn := 0; turn < maxTurns; turn++ {
+		// 软取消：当前 LLM 调用与工具执行跑完，下一轮循环不再开始。
+		//
+		// 刻意**不在循环中途掐断**：本轮所有工具都会走完（硬取消时它们会因 ctx 已取消
+		// 而立即失败），随后 assistant 消息与全部 tool 结果一起落库，保证
+		// tool_calls 与 tool 消息一一配对。若在工具执行到一半直接返回，
+		// 会留下断裂的消息序列——它不会当次报错，而是在下一次构建请求时被 API 拒绝。
+		if run.SoftRequested() {
+			ar.Recorder.Emit(ChatEvent{Type: ChatEventCancelled, Error: "执行已取消"})
+			return &ChatResult{
+				Error:      "执行已取消",
+				ToolCalls:  toolCallRecords,
+				Messages:   persistedMsgs,
+				Cancelled:  true,
+				CancelKind: run.Kind(),
+			}
+		}
+
+		// 上下文接近窗口就先压缩再发请求——这是"敢让 agent 跑长任务"的关键一步。
+		// 压缩改的是存储（会话三个摘要字段），所以序列必须跟着重建、用量锚点必须作废。
+		// 压缩失败不阻断本轮：compactSession 内部已降级，这里只记一笔日志。
+		ctxStat = agent.ContextStatOf(session, messages, window, anchor, toolTokens, calib)
+		compactedThisTurn := false
+		if ar.Compactor != nil && agent.NeedCompact(ctxStat.UsedTokens, window) && !summaryBroken && !compact {
+			out, cerr := ar.Compactor(run.Ctx(), session, model)
+			switch {
+			case cerr != nil:
+				fmt.Printf("[context] 压缩出错（本轮继续，不阻断对话）: %v\n", cerr)
+				summaryBroken = true
+			case out.Degraded:
+				fmt.Printf("[context] 摘要不可用，本run改用确定性截断: %s\n", out.Reason)
+				summaryBroken = true
+				messages = buildRunMessages(session, systemPrompt, true, imageLoaderFor(ar.Attachments))
+				ctxStat = agent.ContextStatOf(session, messages, window, nil, toolTokens, calib)
+			case !out.Compressed:
+				fmt.Printf("[context] 未压缩: %s\n", out.Reason)
+			default:
+				if s2, e2 := ar.Store.GetSession(sessionID); e2 == nil {
+					session = s2
+					messages = buildRunMessages(session, systemPrompt, compact, imageLoaderFor(ar.Attachments))
+					anchor = nil
+					ctxStat = agent.ContextStatOf(session, messages, window, nil, toolTokens, calib)
+					compactedThisTurn = true
+					// 主动告知：前缀被换成摘要之后用量会立刻下降。走事件而不落库——
+					// 它是解释而不是对话内容，不该在会话记录里留一串噪声。
+					ar.Recorder.Emit(ChatEvent{
+						Type:    ChatEventContextCompacted,
+						Compact: out,
+						Context: ctxStat,
+					})
+				}
+			}
+		}
+
+		// 记录**真实发出的那一份**（摘要替换 + 工具结果预算之后），供界面排障查看。
+		// 快照内部做浅拷贝；这里不阻断任何逻辑，失败了也不影响对话。
+		ar.ReqLog.Record(snapshotLLMRequest(run, session, turn, modelID, systemPrompt, messages, tools, ctxStat, compactedThisTurn))
+
+		req := &llm.LLMReq{
+			Model:       modelID,
+			Messages:    messages,
+			Temperature: 1.0,
+			Stream:      useStream,
+			Tools:       tools,
+			// [新增] 传递 thinking 配置（如果启用）
+			Thinking: buildThinkingConfig(session),
+		}
+
+		// 流式与非流式在聚合后返回结构相同，主循环无需分叉
+		var (
+			resp          *llm.LLMResp
+			flusher       func(string)
+			flushThinking func(string)
+			flushShutdown func()
+		)
+		if useStream {
+			// 正文与思考各一条节流通道：它们落在界面不同区域，合并推送前端无法分开。
+			flusher, flushThinking, flushShutdown = ar.Recorder.FlushStream()
+			resp, err = llm.CallLLMStreamForModel(run.Ctx(), model, req, flusher, flushThinking)
+			flushShutdown() // 确保残余分片在进入工具执行/done 前全部发出
+		} else {
+			resp, err = llm.CallLLMForModel(run.Ctx(), model, req)
+		}
+		if err != nil {
+			// 硬取消会让在途请求以 "context canceled" 失败：按"已取消"返回，
+			// 而不是当成一次真实失败——前端对这两者的处理不同（取消不该提示重试）。
+			if run.Kind() == agent.CancelKindHard {
+				ar.Recorder.Emit(ChatEvent{Type: ChatEventCancelled, Error: "执行已取消"})
+				return &ChatResult{
+					Error:      "执行已取消",
+					ToolCalls:  toolCallRecords,
+					Messages:   persistedMsgs,
+					Cancelled:  true,
+					CancelKind: agent.CancelKindHard,
+				}
+			}
+			// 上下文超限：这是压缩之外的最后一道防线（被动触发，说明前面的
+			// 主动阈值判断没兜住——比如窗口配得比真实值大）。只试一次，
+			// 免得和网络类错误混在一起反复重试。
+			if !overflowRetried && llm.IsContextOverflowError(err) {
+				overflowRetried = true
+				if !summaryBroken && !compact {
+					out, cerr := ar.Compactor(run.Ctx(), session, model)
+					if cerr == nil && out.Compressed {
+						if s2, e2 := ar.Store.GetSession(sessionID); e2 == nil {
+							session = s2
+							messages = buildRunMessages(session, systemPrompt, compact, imageLoaderFor(ar.Attachments))
+							anchor = nil
+							fmt.Printf("[context] 上下文超限，已摘要压缩（覆盖 %d 条消息）后重试\n", out.CoveredMsgs)
+							// 超限才压缩说明前面的阈值判断没兜住，用户更该知道
+							// 这次"用量突然下降"是怎么来的——同样只发事件不落库。
+							ctxStat = agent.ContextStatOf(session, messages, window, nil, toolTokens, calib)
+							ar.Recorder.Emit(ChatEvent{
+								Type:    ChatEventContextCompacted,
+								Compact: out,
+								Context: ctxStat,
+							})
+							continue
+						}
+					}
+					if out.Degraded {
+						summaryBroken = true
+					}
+				}
+				// 摘要压不出来（消息太少 / 摘要器不可用）：退回确定性截断再试一次
+				messages = buildRunMessages(session, systemPrompt, true, imageLoaderFor(ar.Attachments))
+				anchor = nil
+				fmt.Printf("[context] 上下文超限，改用确定性截断后重试\n")
+				continue
+			}
+
+			return &ChatResult{
+				Error:     err.Error(),
+				ToolCalls: toolCallRecords,
+				Messages:  persistedMsgs,
+			}
+		}
+
+		if len(resp.Choices) == 0 {
+			return &ChatResult{
+				Error:     "LLM 返回空响应",
+				ToolCalls: toolCallRecords,
+				Messages:  persistedMsgs,
+			}
+		}
+
+		// 响应里带回真实用量就更新锚点：后续估算以它为基准，两条锚点之间的误差不累积。
+		// 这是整套估算敢用粗略字符系数的前提。
+		if resp.Usage.PromptTokens > 0 {
+			anchor = &agent.TokenAnchor{InputTokens: resp.Usage.PromptTokens, MsgCount: len(messages)}
+
+			// 顺手做一次校准观测：同一段序列，真实用量与字符估算此刻都在手上。
+			// 估算那侧刻意用**未缩放**的口径（estimateSeqTokens 不乘 calib），否则观测值
+			// 会被现有系数拉向 1.0，校准自己把自己抹平。
+			if ar.TokenCalib != nil {
+				ar.TokenCalib.Observe(session.Model, resp.Usage.PromptTokens,
+					agent.EstimateSeqTokens(messages, nil)+toolTokens)
+			}
+		}
+
+		// 用量统计与锚点是**两件事**，不能合并进上面那个 if。
+		// 锚点只在 PromptTokens>0 时更新（它是"上下文有多长"的真值来源）；
+		// 而统计必须覆盖"只有输出 token"这种畸形响应——部分网关的流式帧只回传
+		// output_tokens，若跟着锚点走，那一轮的花费会凭空消失。
+		ar.noteUsage(llm.TokenUsageOf(resp.Usage), resp.Usage.RawUsage)
+
+		choice := resp.Choices[0]
+
+		// 判断是否需要工具调用
+		if choice.FinishReason == llm.FinishReasonToolCalls && len(choice.Message.ToolCalls) > 0 {
+			// === 持久化 assistant 消息（含 tool_calls 记录）===
+			// 先执行所有工具，收集执行记录，再持久化 assistant 消息
+			// 执行分两组：**只读且无需授权**的调用并发执行，其余按原序串行。
+			// 判据与理由见 executeToolCalls。
+			executedToolCalls, producedByCall := ar.executeToolCalls(run, toolView, sessionID, dir, choice.Message.ToolCalls)
+			// 累加到本次运行的汇总记录（ChatResult.ToolCalls / 取消与失败路径都要用它）
+			toolCallRecords = append(toolCallRecords, executedToolCalls...)
+
+			// 持久化 assistant 消息（含 tool_calls 执行记录）
+			assistantMsg := store.Message{
+				Role:      store.RoleAssistant,
+				Content:   choice.Message.Content, // LLM 可能返回空内容
+				ToolCalls: executedToolCalls,
+				// [新增] 保存 thinking 内容与签名（仅当启用 thinking 时）。
+				// 签名必须与正文成对保存：带工具调用的这一轮，下一轮要把两者一起回传。
+				Thinking:          resp.Thinking,
+				ThinkingSignature: resp.ThinkingSignature,
+			}
+			savedAssistant, err := ar.Store.AppendMessage(sessionID, assistantMsg)
+			if err != nil {
+				return &ChatResult{
+					Error:     fmt.Sprintf("持久化 assistant 消息失败: %v", err),
+					ToolCalls: toolCallRecords,
+					Messages:  persistedMsgs,
+				}
+			}
+			persistedMsgs = append(persistedMsgs, *savedAssistant)
+			// 同步到内存消息列表（用于后续 LLM 调用）。
+			// 带工具调用的这一轮必须把 thinking + 签名一并放进内存消息：下一轮
+			// 若走 Anthropic 协议，缺了签名会直接 400（见 ToAnthropicRequest）。
+			messages = append(messages, llm.LLMMessage{
+				Role:              store.RoleAssistant,
+				Content:           choice.Message.Content,
+				ToolCalls:         choice.Message.ToolCalls,
+				Thinking:          resp.Thinking,
+				ThinkingSignature: resp.ThinkingSignature,
+			})
+
+			// 持久化每个工具结果消息（role=tool, tool_call_id）
+			//
+			// 图片消息**不跟着每条工具结果立刻追加**：一轮里若有多个调用、而产图的不是最后一个，
+			// 它就会插在两条 tool 消息之间，把 assistant(tool_calls) 与 tool 的配对切断。
+			// 见 appendToolResultMessages。
+			var pendingImages []llm.LLMMessage
+			for _, tc := range choice.Message.ToolCalls {
+				// 从执行记录中找到对应结果
+				var toolContent string
+				for _, rec := range executedToolCalls {
+					if rec.ID == tc.ID {
+						toolContent = rec.Result
+						break
+					}
+				}
+
+				toolMsg := store.Message{
+					Role:        store.RoleTool,
+					Content:     toolContent,
+					ToolCallID:  tc.ID,
+					Attachments: producedByCall[tc.ID],
+				}
+				savedTool, err := ar.Store.AppendMessage(sessionID, toolMsg)
+				if err != nil {
+					return &ChatResult{
+						Error:     fmt.Sprintf("持久化 tool 消息失败: %v", err),
+						ToolCalls: toolCallRecords,
+						Messages:  persistedMsgs,
+					}
+				}
+				persistedMsgs = append(persistedMsgs, *savedTool)
+				// 同步到内存消息列表。**必须走 appendToolResultMessages**：它与下一轮
+				// 从会话重建出来的那条结果形状完全一致（工具文本 + 承载图片的 user 消息）。
+				// 这里手写一遍的话，本轮与下一轮的请求序列就会不一样。
+				messages, pendingImages = appendToolResultMessages(messages, pendingImages,
+					tc.Function.Name, toolContent, tc.ID, producedByCall[tc.ID], imageLoaderFor(ar.Attachments))
+			}
+			// 本轮工具结果全部写完，挂起的图片消息现在才补——顺序与 buildLLMMessages 一致
+			messages, _ = appendToolResultImages(messages, pendingImages)
+
+			// 继续循环，重新调用 LLM（带工具结果）
+			continue
+		}
+
+		// === finish_reason == "stop" ===
+		//
+		// ★ 空回复防线：模型返回 "stop" 但正文为空，绝大多数情况不是"它选择不说话"，
+		// 而是上下文已超出窗口——多家网关（本项目实测 DeepSeek / Anthropic 兼容端点）
+		// 在超限时不回错误，而是返回一个空 content + finish_reason=stop 的响应。
+		// 若照常把它当最终回复落库，会话就会"静默死亡"：用户看到一条空回复，再发
+		// "继续"也因为上下文没变而依旧为空——而且全程没有任何报错。这正是本项目
+		// 反复出现（至少 3 次）的静默失败。此处必须显式拦下，绝不能静默落库。
+		if strings.TrimSpace(choice.Message.Content) == "" {
+			used, win := 0, 0
+			if ctxStat != nil {
+				used, win = ctxStat.UsedTokens, ctxStat.WindowTokens
+			}
+			fmt.Printf("[chat] 空回复：模型返回 finish_reason=%q 但正文为空（会话 %s，轮次 %d，上下文 %d/%d tokens，已重试=%v）\n",
+				choice.FinishReason, sessionID, turn, used, win, emptyReplyRetried)
+
+			// 第一次遇到：尝试压缩/截断上下文后重试一次。压缩是**唯一**能让重试有意义的前提——
+			// 上下文不变的话，重试必然还是同一个空回复。
+			if !emptyReplyRetried && !compact {
+				emptyReplyRetried = true
+				if ar.Compactor != nil && !summaryBroken {
+					out, cerr := ar.Compactor(run.Ctx(), session, model)
+					switch {
+					case cerr != nil:
+						fmt.Printf("[chat] 空回复后压缩出错，退回确定性截断重试: %v\n", cerr)
+						summaryBroken = true
+					case out.Degraded:
+						fmt.Printf("[chat] 空回复后摘要不可用，改用确定性截断重试: %s\n", out.Reason)
+						summaryBroken = true
+					case out.Compressed:
+						if s2, e2 := ar.Store.GetSession(sessionID); e2 == nil {
+							session = s2
+							messages = buildRunMessages(session, systemPrompt, compact, imageLoaderFor(ar.Attachments))
+							anchor = nil
+							ctxStat = agent.ContextStatOf(session, messages, window, nil, toolTokens, calib)
+							ar.Recorder.Emit(ChatEvent{
+								Type:    ChatEventContextCompacted,
+								Compact: out,
+								Context: ctxStat,
+							})
+							fmt.Printf("[chat] 空回复后已压缩上下文（覆盖 %d 条消息），重试本轮\n", out.CoveredMsgs)
+							continue
+						}
+					default:
+						fmt.Printf("[chat] 空回复后未压缩: %s\n", out.Reason)
+					}
+				}
+				// 摘要不可用或没压成：退回确定性截断再试一次
+				messages = buildRunMessages(session, systemPrompt, true, imageLoaderFor(ar.Attachments))
+				anchor = nil
+				ctxStat = agent.ContextStatOf(session, messages, window, nil, toolTokens, calib)
+				fmt.Printf("[chat] 空回复后改用确定性截断重试本轮\n")
+				continue
+			}
+
+			// 重试过仍为空：以明确错误结束，而不是静默落一条空回复。
+			msg := "模型返回了空回复（未产生任何内容）"
+			if used > 0 && win > 0 && used*100/win >= 80 {
+				msg = fmt.Sprintf("模型返回了空回复：上下文已接近窗口上限（%d/%d tokens），请新建会话或使用 /compact 压缩后重试", used, win)
+			}
+			fmt.Printf("[chat] 空回复：重试后仍为空，判定为静默失败并返回错误（会话 %s）\n", sessionID)
+			ar.Recorder.Emit(ChatEvent{Type: ChatEventError, Error: msg})
+			return &ChatResult{
+				Error:     msg,
+				ToolCalls: toolCallRecords,
+				Messages:  persistedMsgs,
+				Context:   ctxStat,
+			}
+		}
+
+		// === finish_reason == "stop"，持久化最终回复 ===
+		finalMsg := store.Message{
+			Role:    store.RoleAssistant,
+			Content: choice.Message.Content,
+			// [新增] 保存 thinking 内容与签名（仅当启用 thinking 时）
+			Thinking:          resp.Thinking,
+			ThinkingSignature: resp.ThinkingSignature,
+		}
+		savedFinal, err := ar.Store.AppendMessage(sessionID, finalMsg)
+		if err != nil {
+			return &ChatResult{
+				Error:     fmt.Sprintf("持久化最终回复失败: %v", err),
+				ToolCalls: toolCallRecords,
+				Messages:  persistedMsgs,
+			}
+		}
+		persistedMsgs = append(persistedMsgs, *savedFinal)
+
+		// ★ 计算本轮 diff：只统计本会话在本轮触碰过的路径（会话级隔离）
+		var diffFiles []diff.DiffFile
+		if isRepo {
+			turnPaths := ar.Diff.TurnTouched(sessionID)
+			if files, err := ar.Diff.DiffScoped(dir, turnBase, turnPaths); err == nil && len(files) > 0 {
+				diffFiles = files
+				base, touched := ar.Diff.SnapshotState(sessionID)
+				turnNo, appendErr := ar.Store.AppendDiff(sessionID, diff.DiffTurn{
+					Files:     files,
+					Additions: diff.SumAdd(files),
+					Deletions: diff.SumDel(files),
+					CreatedAt: time.Now().UnixMilli(),
+					// 撤销所需的两项：本轮开始时的完整快照 + 本轮结束时各文件的内容状态
+					Base:     turnCheckpoint,
+					EndState: snapshot.EndStateOf(dir, files),
+				}, base, touched)
+				if appendErr == nil {
+					ar.Recorder.EmitDiff(files, turnNo)
+				}
+			}
+		}
+
+		result := &ChatResult{
+			Reply:     choice.Message.Content,
+			ToolCalls: toolCallRecords,
+			Messages:  persistedMsgs,
+			Diff:      diffFiles,
+			Context:   ctxStat,
+			// [新增] 包含 thinking 内容
+			Thinking: resp.Thinking,
+		}
+
+		// 推送完成事件
+		ar.Recorder.Emit(ChatEvent{
+			Type:  "done",
+			Reply: result.Reply,
+		})
+
+		return result
+	}
+
+	// ★ 轮次用尽：不直接判失败，先补一次"只收尾、不带工具"的调用拿到结论。
+	//
+	// 见 wrapUpAfterTurnExhausted 的说明：这是把"全损"变成"可用部分结果"的关键一步。
+	// 收尾成功就落库、推 done、照常返回；失败则退回"Exhausted + 空结论"，由调用方决定怎么兜。
+	wrapUp, ok := wrapUpAfterTurnExhausted(ar, run, sessionID, modelID, messages)
+	if !ok {
+		// 收尾调用失败：用最后一条 assistant 文本兜底（可能非空，聊胜于无）。
+		// 找不到任何文本时才留空——调用方（子代理）据此显示"没有给出结论"。
+		wrapUp = lastAssistantText(persistedMsgs)
+	}
+
+	if wrapUp != "" {
+		finalMsg := store.Message{Role: store.RoleAssistant, Content: wrapUp}
+		if saved, err := ar.Store.AppendMessage(sessionID, finalMsg); err == nil {
+			persistedMsgs = append(persistedMsgs, *saved)
+		} else {
+			// 落库失败不阻断：结论已经拿到了，能回给调用方就有价值。
+			fmt.Printf("[chat] 收尾结论落库失败（会话 %s）: %v\n", sessionID, err)
+		}
+		ar.Recorder.Emit(ChatEvent{Type: "done", Reply: wrapUp})
+	}
+
+	// Error 只在"连兜底文本都没有"时才置：拿到结论的运行不是错误，而是"截断的成功"。
+	// 置上 Error 会让前端按错误渲染、并让调用方走失败分支——那正是这次要修的问题。
+	errText := ""
+	if wrapUp == "" {
+		errText = "超过最大对话轮次限制（未能产出结论）"
+	}
+	return &ChatResult{
+		Reply:     wrapUp,
+		ToolCalls: toolCallRecords,
+		Messages:  persistedMsgs,
+		Context:   ctxStat,
+		Error:     errText,
+		Exhausted: true,
+	}
+}
+
+// lastAssistantText 取最后一条**非空**的 assistant 文本（收尾调用失败时的兜底）。
+//
+// 只取 assistant：tool 结果里是文件内容，拿它当"结论"会让上层看到一大段无关代码。
+// 倒序找第一条非空的——最后一条 assistant 往往是"我接下来要看 X"这类半句，
+// 但比空结论有用；真正的结论质量由收尾调用保证。
+func lastAssistantText(msgs []store.Message) string {
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role != store.RoleAssistant {
+			continue
+		}
+		if t := strings.TrimSpace(msgs[i].Content); t != "" {
+			return t
+		}
+	}
+	return ""
+}
+
+// ===== 轮次用尽后的收尾（P0）=====
+//
+// 背景：for 循环是**按条件退出**的，退出时循环体内那一整套收尾（落最终回复、算本轮 diff、
+// 推 done 事件）一次都没走。原先的实现直接把这种退出当成错误返回
+// （Error="超过最大对话轮次限制"、Reply 为空）。后果是把一次"做完了大部分、只是没来得及
+// 总结"的运行，判成了彻底失败——调用方拿到的是空结论。
+//
+// 对子代理这条后果尤其重：它的 Summary 唯一来源就是 Reply，于是 40 多次工具调用查到的事实
+// 一个字都回不到主会话，只回一句"超过最大对话轮次限制"。实测中这会让一批子代理**全部**失败。
+//
+// 修法：轮次用尽后**再发一次请求，明确不带工具**，让模型用文字收尾。选"不带工具"而不是
+// "再给一次机会带工具"，是因为后者可能又产生一轮 tool_calls，而我们已经没有轮次去执行它们了
+// ——那会留下悬空的 tool_call（协议上非法，下次请求直接 400，见 recovery.go）。
+//
+// 这一层是**尽力而为**：收尾请求自己也可能失败（网络、限流、上下文超限）。它失败不影响
+// 返回结构——调用方仍能拿到 Exhausted=true 与已持久化的中间消息，只是 Reply 为空。
+const wrapUpPrompt = "你的工具调用轮次预算已经用尽，无法再执行任何工具。\n" +
+	"请**立即**停止调用工具，只用文字给出结论，供上层直接使用：\n" +
+	"1. 已经完成的工作与关键动作；\n" +
+	"2. 已经查清或完成的事实与结论（带上具体文件路径、函数名、命令等标识）；\n" +
+	"3. 尚未完成的部分，以及下一步建议。\n" +
+	"不要再请求任何工具；直接输出上述结论。"
+
+// wrapUpAfterTurnExhausted 轮次用尽后补一次"只收尾、不带工具"的调用。
+//
+// 返回 (结论, 是否成功)。失败返回空串——调用方据此决定是否回落（如用最后一条 assistant 文本）。
+// 它**不**落库、不推事件：这是收尾本身，落库与推 done 由调用方统一处理，
+// 避免"收尾消息"与"最终回复"两处各写一份持久化逻辑。
+func wrapUpAfterTurnExhausted(ar *agentRun, run *agent.RunControl, sessionID, modelID string,
+	messages []llm.LLMMessage) (string, bool) {
+
+	if ar == nil || ar.Model == nil {
+		return "", false
+	}
+	// 追加收尾指令。放在最后一条消息之后：此刻序列的末尾必然是一组完整的工具结果
+	// （循环是"要么带着 tool 结果 continue、要么带着最终回复 return"，不可能停在半个 tool_call 上）。
+	msgs := make([]llm.LLMMessage, 0, len(messages)+1)
+	msgs = append(msgs, messages...)
+	msgs = append(msgs, llm.LLMMessage{Role: store.RoleUser, Content: wrapUpPrompt})
+
+	req := &llm.LLMReq{
+		Model:       modelID,
+		Messages:    msgs,
+		Temperature: 1.0,
+		// 明确不带工具：见上面说明——再产生 tool_calls 就没轮次执行了。
+		Tools: nil,
+	}
+	// 用运行 ctx：用户在这时点停止，收尾请求也要能立刻断掉。
+	resp, err := llm.CallLLMForModel(run.Ctx(), ar.Model, req)
+	if err != nil {
+		fmt.Printf("[chat] 轮次用尽后的收尾调用失败（会话 %s）: %v\n", sessionID, err)
+		return "", false
+	}
+	if len(resp.Choices) == 0 {
+		return "", false
+	}
+	// 用量照样记一笔：收尾这次调用是真实花费，不该从统计里消失。
+	ar.noteUsage(llm.TokenUsageOf(resp.Usage), resp.Usage.RawUsage)
+
+	text := strings.TrimSpace(resp.Choices[0].Message.Content)
+	if text == "" {
+		return "", false
+	}
+	return text, true
+}
+
+// ===== 一轮内多个工具调用的执行（并发安全子集）=====
+//
+// 背景：模型一轮可以返回多个 tool_call（如同时读 5 个文件）。原先一律串行执行，
+// 一轮里的 N 次只读 I/O 要排成 N 个往返，是长任务里最明显的等待来源。
+//
+// 为什么不能简单地对所有调用 go func()：
+//  1. **图片归因**：ImageCollector 是整个工具视图共享的，"执行一次、取一次"是串行假设
+//     （media.ImageCollector 的说明）。并发时两张图会混在一起，再也分不清来源。
+//  2. **文件归因**：DiffService.NoteActivity 是"调用前后各扫一次全工作区、窗口内的改动
+//     算这次调用的"。两个窗口重叠 → 改动被重复归因或错配。
+//  3. **改动游标**：FileChangeLog.Mark/Since 是单会话单游标，并发写入会交错。
+//  4. **授权弹窗**：前端每个会话只有**一个**挂起槽位（permissions.js 的 pendingBySession）。
+//     两个并发请求都要授权时，后一个覆盖前一个，先到的那个白等到超时。
+//
+// 解法：**只并发"不写工作区、不需要授权"的只读工具**。不变式 1–3 只在工具会写工作区时
+// 才被触发（只读调用不产生归因，压根不需要窗口扫描），不变式 4 由派发前的权限预检挡掉。
+// 其余调用（写文件 / exec_shell / MCP / ask_user / spawn_agent / 需要授权的只读调用）
+// 保持原序串行——它们本就该独占工作区。
+//
+// 结果一律**按原始下标回填**：协议要求 tool 结果与 assistant.tool_calls 同序
+// （Anthropic 尤其严格），并发只改变执行顺序，不改变上报顺序。
+const maxParallelToolCalls = 4
+
+// executeToolCalls 执行一轮里的全部工具调用，返回执行记录与"哪次调用产了哪些图"。
+func (ar *agentRun) executeToolCalls(run *agent.RunControl, toolView *tool.SessionView,
+	sessionID, dir string, calls []llm.LLMToolCall) ([]store.ToolCall, map[string][]media.Attachment) {
+
+	records := make([]store.ToolCall, len(calls))
+	producedByCall := map[string][]media.Attachment{}
+	parallel := make([]bool, len(calls))
+
+	// 派发前预检：只读 + 无需授权的才进并行组。
+	// 预检是纯判定（不写审计、不阻塞），因此这里问一遍、执行时 Enforce 再判一遍不算浪费
+	// ——后者才是权威结论，前者只是调度决策。
+	for i, tc := range calls {
+		args := parseToolArgs(tc.Function.Arguments)
+		parallel[i] = toolView.ParallelSafeTool(tc.Function.Name, args)
+	}
+
+	// 并发组：只读工具，彼此无副作用。用信号量限制并发数，避免模型一次返回几十个调用时
+	// 打爆磁盘或触发网关限流。
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, maxParallelToolCalls)
+	imagesByIndex := make([][]media.Attachment, len(calls))
+	for i, tc := range calls {
+		if !parallel[i] {
+			continue
+		}
+		wg.Add(1)
+		go func(i int, tc llm.LLMToolCall) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			rec, imgs := ar.runOneTool(run, toolView, sessionID, dir, tc, true)
+			records[i] = rec
+			imagesByIndex[i] = imgs
+		}(i, tc)
+	}
+	wg.Wait()
+
+	// 串行组：按原序执行写操作与需授权调用。
+	for i, tc := range calls {
+		if parallel[i] {
+			continue
+		}
+		rec, imgs := ar.runOneTool(run, toolView, sessionID, dir, tc, false)
+		records[i] = rec
+		imagesByIndex[i] = imgs
+	}
+
+	// 产图按**原始下标**归位：工具结果消息要靠它挂附件（组装下一轮请求时读的正是那份附件）。
+	for i, imgs := range imagesByIndex {
+		if len(imgs) > 0 {
+			producedByCall[calls[i].ID] = imgs
+		}
+	}
+	return records, producedByCall
+}
+
+// runOneTool 执行单次工具调用，返回它的记录与产出的图片。
+//
+// parallel=true 表示它在并发组里：**跳过工作区归因**（只读调用不写工作区，不需要窗口扫描；
+// 而且并发窗口重叠会让归因错乱，见本段顶部说明）。图片取用与归因剔除只发生在串行组。
+func (ar *agentRun) runOneTool(run *agent.RunControl, toolView *tool.SessionView,
+	sessionID, dir string, tc llm.LLMToolCall, parallel bool) (store.ToolCall, []media.Attachment) {
+
+	args := parseToolArgs(tc.Function.Arguments)
+	startTime := time.Now()
+
+	rec := store.ToolCall{
+		ID:     tc.ID,
+		Name:   tc.Function.Name,
+		Args:   args,
+		Status: "running",
+	}
+	ar.Recorder.Emit(ChatEvent{
+		Type:     ChatEventToolCallStart,
+		ToolCall: &rec,
+	})
+
+	// 归因只在串行组做：写操作才需要"调用前后各扫一次工作区"的窗口
+	mark := 0
+	if !parallel {
+		mark = ar.Changes.Mark(sessionID)
+		ar.Diff.NoteActivity(sessionID, dir, false)
+	}
+
+	result, execErr := toolView.ExecuteToolCtx(run.Ctx(), tc.Function.Name, args)
+
+	var producedImages []media.Attachment
+	if !parallel {
+		// 立刻取走本次调用产出的图片：收集器是共用的，"执行一次、取一次"是串行假设
+		producedImages = toolView.TakeImages()
+		ar.Diff.NoteActivity(sessionID, dir, true)
+		// 子代理在本次调用期间改的文件不该算作本会话的改动（见 runSubagent）。
+		// 剔除必须放在归因之后——早一步会被重新记上。
+		if excluded := run.TakeExcludedPaths(sessionID); len(excluded) > 0 {
+			ar.Diff.DropTouched(sessionID, excluded)
+		}
+		if changed := ar.Changes.Since(sessionID, mark); len(changed) > 0 {
+			files := make([]string, 0, len(changed))
+			for _, c := range changed {
+				files = append(files, c.Rel)
+			}
+			rec.Files = files
+		}
+		if len(producedImages) > 0 {
+			rec.Images = media.AttachmentIDs(producedImages)
+		}
+	}
+
+	rec.Duration = time.Since(startTime).Seconds()
+	switch {
+	case execErr != nil:
+		rec.Status = "error"
+		if run.Kind() == agent.CancelKindHard {
+			// 硬取消会让未跑完的工具统一报 "context canceled"，换成可读说明
+			rec.Result = "已取消：运行被用户停止"
+		} else {
+			rec.Result = fmt.Sprintf("执行失败: %v", execErr)
+		}
+	default:
+		rec.Status = "success"
+		rec.Result = result
+	}
+
+	ar.Recorder.Emit(ChatEvent{
+		Type:     ChatEventToolCallEnd,
+		ToolCall: &rec,
+	})
+	return rec, producedImages
+}
+
+// parseToolArgs 解析工具调用参数；解析失败返回空表（工具自己会报参数缺失）。
+func parseToolArgs(raw string) map[string]interface{} {
+	var args map[string]interface{}
+	_ = json.Unmarshal([]byte(raw), &args)
+	return args
+}
+
+// ===== Plan & Execute（规划-执行模式）=====
+
+// emitPlanUpdate 推送计划状态变更事件（plan_update，全量携带最新计划）
+//
+// 归属直接取自计划本身（plan.SessionID）：调用点分布很广（规划、执行、取消、异常收尾），
+// 让它们各自记住"这条计划属于哪个会话"是多余的，计划里本来就写着。
+func (a *App) emitPlanUpdate(plan *store.Plan, stepIndex int) {
+	if plan == nil || !a.HasUI() {
+		return
+	}
+	a.eventsEmit("chat:event", ChatEvent{
+		Type:      "plan_update",
+		SessionID: plan.SessionID,
+		Plan:      plan,
+		StepIndex: stepIndex,
+	})
+}
+
+// ChatPlan 规划流程：调用规划器产出结构化计划（或平凡请求直答）。
+// 用户消息已由前端持久化，此处不再落库；规划器过程消息不持久化（对用户无信息量）。
+func (a *App) ChatPlan(sessionID, query string, useStream bool) *ChatResult {
+	// 1. 会话与模型解析（与 executeChat 一致）
+	session, err := a.sessionStore.GetSession(sessionID)
+	if err != nil {
+		return &ChatResult{Error: fmt.Sprintf("加载会话失败: %v", err)}
+	}
+	model, err := a.modelStore.GetModelForCall(session.Model)
+	if err != nil {
+		return &ChatResult{Error: fmt.Sprintf("获取模型配置失败: %v", err)}
+	}
+	modelID := model.ModelID
+	if modelID == "" {
+		modelID = model.Name
+	}
+	dir, _ := a.resolveProjectDir(sessionID)
+
+	// 登记为可取消的运行：规划期的 LLM 调用同样要能被停止
+	// （硬取消会断开在途的规划请求，而不是让用户白等一次 120s 超时）
+	run, berr := a.runs.BeginExclusive(sessionID, "")
+	if berr != nil {
+		return &ChatResult{Error: berr.Error()}
+	}
+	defer a.runs.End(run)
+
+	// 2. 规划器调用：无工具、非流式、低温。
+	//
+	// 重试交给 llm.CallLLMForModelWith 里的统一重试层。原先这里是「固定试两次、
+	// 不区分错误类型」：一次 400（请求本身有问题）也要白白再打一次，
+	// 而真正该重试的 429 却只多试一次就放弃——正好把两种情况的处理弄反了。
+	// giveUp 传 run.SoftRequested：用户点了停止之后不该还在后台重试。
+	if run.SoftRequested() {
+		return &ChatResult{Error: "执行已取消", Cancelled: true, CancelKind: run.Kind()}
+	}
+	req := &llm.LLMReq{
+		Model:       modelID,
+		Temperature: 0.2,
+		Messages: []llm.LLMMessage{
+			{Role: store.RoleSystem, Content: store.PlannerSystemPrompt},
+			{Role: store.RoleUser, Content: store.BuildPlannerUserPrompt(query, dir)},
+		},
+	}
+	resp, lastErr := llm.CallLLMForModelWith(run.Ctx(), &model, req, llm.DefaultRetryPolicy, run.SoftRequested)
+	if lastErr != nil {
+		return &ChatResult{Error: fmt.Sprintf("规划失败: %v", lastErr)}
+	}
+	if len(resp.Choices) == 0 {
+		return &ChatResult{Error: "规划器返回空响应"}
+	}
+
+	// 3. 解析规划输出
+	d, err := store.ParsePlanDraft(resp.Choices[0].Message.Content)
+	if err != nil {
+		return &ChatResult{Error: fmt.Sprintf("规划失败: %v", err)}
+	}
+
+	// 4. 平凡请求免计划（G8）：走普通工具循环直答
+	if !d.NeedPlan {
+		prompt, allowedTools, err := a.buildBasePromptWithSkill(session, dir, query)
+		if err != nil {
+			return &ChatResult{Error: err.Error()}
+		}
+		return runToolLoop(a.newMainAgentRun(run, session, dir, prompt, allowedTools, &model, useStream, false))
+	}
+
+	// 5. 组装计划并落盘（待审核状态）
+	now := time.Now().UnixMilli()
+	plan := &store.Plan{
+		ID:        store.GeneratePlanID(),
+		SessionID: sessionID,
+		Title:     d.Title,
+		Status:    store.PlanAwaitingApproval,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	for i, s := range d.Steps {
+		plan.Steps = append(plan.Steps, &store.PlanStep{
+			Index:  i,
+			Title:  strings.TrimSpace(s.Title),
+			Detail: s.Detail,
+			Status: store.StepPending,
+		})
+	}
+	if err := a.planStore.Save(plan); err != nil {
+		return &ChatResult{Error: fmt.Sprintf("保存计划失败: %v", err)}
+	}
+
+	// 6. 推送计划事件并返回
+	a.emitPlanUpdate(plan, -1)
+	return &ChatResult{Plan: plan}
+}
+
+// executePlan 逐步执行计划：每步 = 一次完整工具循环（runToolLoop）。
+// 长耗时，结束时返回；失败即停（后续步骤置 skipped）；done 步骤在重试时自动跳过。
+func (a *App) executePlan(planID string, useStream bool) (result *ChatResult) {
+	// 1. 加载计划并校验状态（running 状态拒绝并发执行，R10）
+	plan, err := a.planStore.Get(planID)
+	if err != nil {
+		return &ChatResult{Error: err.Error()}
+	}
+	if plan.Status != store.PlanAwaitingApproval && plan.Status != store.PlanCancelled && plan.Status != store.PlanFailed {
+		return &ChatResult{Error: "计划状态不允许执行: " + plan.Status}
+	}
+
+	// 2. 会话与模型解析
+	session, err := a.sessionStore.GetSession(plan.SessionID)
+	if err != nil {
+		return &ChatResult{Error: fmt.Sprintf("加载会话失败: %v", err)}
+	}
+	model, err := a.modelStore.GetModelForCall(session.Model)
+	if err != nil {
+		return &ChatResult{Error: fmt.Sprintf("获取模型配置失败: %v", err)}
+	}
+	dir, _ := a.resolveProjectDir(plan.SessionID)
+	basePrompt := a.buildBasePrompt(session, dir)
+
+	// 3. 登记为可取消的运行。计划执行与普通聊天共用同一套取消机制
+	// （原先自己一套 planCancels），因此 CancelPlan 也能升级为硬取消。
+	// 同样是互斥登记：计划在执行时，这条会话不该再接受第二次发送。
+	run, berr := a.runs.BeginExclusive(plan.SessionID, planID)
+	if berr != nil {
+		return &ChatResult{Error: berr.Error()}
+	}
+	defer a.runs.End(run)
+	checkCancel := func() bool { return run.SoftRequested() }
+
+	// 4. 计划置为执行中
+	plan.Status = store.PlanRunning
+	_ = a.planStore.Save(plan)
+	a.emitPlanUpdate(plan, -1)
+
+	// 兜底：无论从哪条路径离开（含 panic 与任何提前 return），都不能把计划留在 running。
+	// 留在 running 的后果是前端永久显示"执行中"、取消又找不到活跃通道而失败，
+	// 用户只能重启应用——这正是"计划失败后无法修改进度"的成因之一。
+	defer func() {
+		if r := recover(); r != nil {
+			for _, st := range plan.Steps {
+				if st.Status == store.StepRunning {
+					st.Status = store.StepFailed
+					st.Error = fmt.Sprintf("执行异常中断: %v", r)
+					st.FinishedAt = time.Now().UnixMilli()
+				}
+			}
+			store.MarkRemainingSkipped(plan, 0)
+			plan.Status = store.PlanFailed
+			_ = a.planStore.Save(plan)
+			a.emitPlanUpdate(plan, -1)
+			result = &ChatResult{Plan: plan, Error: fmt.Sprintf("计划执行异常中断: %v", r)}
+			return
+		}
+		if plan.Status != store.PlanRunning {
+			return // 已正常收尾（completed / failed / cancelled）
+		}
+		for _, st := range plan.Steps {
+			if st.Status == store.StepRunning {
+				st.Status = store.StepFailed
+				st.Error = "执行中断（未正常结束）"
+				st.FinishedAt = time.Now().UnixMilli()
+			}
+		}
+		plan.Status = store.PlanFailed
+		_ = a.planStore.Save(plan)
+		a.emitPlanUpdate(plan, -1)
+	}()
+
+	// 5. 逐步执行
+	for _, step := range plan.Steps {
+		// 步骤边界取消检查
+		if checkCancel() {
+			plan.Status = store.PlanCancelled
+			store.MarkRemainingSkipped(plan, step.Index)
+			_ = a.planStore.Save(plan)
+			a.emitPlanUpdate(plan, step.Index)
+			return &ChatResult{Plan: plan}
+		}
+		// 失败重试时跳过已完成步骤
+		if step.Status == store.StepDone {
+			continue
+		}
+
+		step.Status = store.StepRunning
+		step.StartedAt = time.Now().UnixMilli()
+		step.Error = ""
+		_ = a.planStore.Save(plan)
+		a.emitPlanUpdate(plan, step.Index)
+
+		// 步骤用户消息落库（聊天流即审计日志），随后走统一执行引擎
+		if _, err := a.sessionStore.AppendMessage(plan.SessionID, store.Message{
+			Role:    store.RoleUser,
+			Content: store.BuildPlanStepQuery(plan, step),
+		}); err != nil {
+			step.Status = store.StepFailed
+			step.Error = fmt.Sprintf("持久化步骤消息失败: %v", err)
+			step.FinishedAt = time.Now().UnixMilli()
+			plan.Status = store.PlanFailed
+			store.MarkRemainingSkipped(plan, step.Index+1)
+			_ = a.planStore.Save(plan)
+			a.emitPlanUpdate(plan, step.Index)
+			return &ChatResult{Plan: plan, Error: step.Error}
+		}
+
+		sys := store.BuildPlanSystemPrompt(a.attachMemoryRecall(session, store.BuildPlanStepQuery(plan, step), basePrompt), plan, step)
+		// 计划步骤不带技能声明：步骤是规划器产出的文本，没有对应的 allowed-tools，
+		// 因此这里传 nil（不额外收窄）。将来若给 PlanStep 加 Role 字段，就落在这里。
+		res := runToolLoop(a.newMainAgentRun(run, session, dir, sys, nil, &model, useStream, true /*compact*/))
+
+		// 步骤中途取消：按本步实际结果落状态，计划置 cancelled
+		if checkCancel() {
+			if res.Error == "" {
+				step.Status = store.StepDone
+				step.Summary = store.ExtractStepSummary(res.Reply)
+			} else {
+				step.Status = store.StepFailed
+				step.Error = "执行取消: " + res.Error
+			}
+			step.FinishedAt = time.Now().UnixMilli()
+			plan.Status = store.PlanCancelled
+			store.MarkRemainingSkipped(plan, step.Index+1)
+			_ = a.planStore.Save(plan)
+			a.emitPlanUpdate(plan, step.Index)
+			return &ChatResult{Plan: plan}
+		}
+
+		// 失败即停
+		if res.Error != "" {
+			step.Status = store.StepFailed
+			step.Error = res.Error
+			step.FinishedAt = time.Now().UnixMilli()
+			plan.Status = store.PlanFailed
+			store.MarkRemainingSkipped(plan, step.Index+1)
+			_ = a.planStore.Save(plan)
+			a.emitPlanUpdate(plan, step.Index)
+			return &ChatResult{Plan: plan, Error: "步骤执行失败: " + res.Error}
+		}
+
+		// 步骤完成：回写摘要
+		step.Status = store.StepDone
+		step.Summary = store.ExtractStepSummary(res.Reply)
+		step.FinishedAt = time.Now().UnixMilli()
+		_ = a.planStore.Save(plan)
+		a.emitPlanUpdate(plan, step.Index)
+	}
+
+	// 6. 全部完成
+	plan.Status = store.PlanCompleted
+	_ = a.planStore.Save(plan)
+	a.emitPlanUpdate(plan, -1)
+	return &ChatResult{Plan: plan, Reply: "计划执行完成"}
+}

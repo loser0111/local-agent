@@ -33,8 +33,8 @@ Wails 是**单进程、Go 代码编译期链接**的应用，不存在运行期�
 
 | | 形态 | 说明 |
 |---|---|---|
-| 后端 | 一组新增的 Go 文件（建议归入 `plugin/` 或 `scheduler*.go` + `task*.go`），在 `NewApp()` 里装配 | 与 `plan.go` / `subagent.go` 同级的平级能力模块，不是外挂 |
-| 桥接 | `App` 上新增导出方法，自动生成到 `frontend/wailsjs/go/main/App` | 沿用现有绑定机制 |
+| 后端 | 一组新增的 Go 文件（建议归入 `plugin/` 或 `scheduler*.go` + `task*.go`），在 `NewApp()` 里装配 | 与 `internal/store/plan.go` / `subagent.go` 同级的平级能力模块，不是外挂 |
+| 桥接 | `App` 上新增导出方法，自动生成到 `frontend/wailsjs/go/app/App` | 沿用现有绑定机制 |
 | 前端 | 设置页新增 tab + 工作区新增任务面板（改造现有 `TasksPane.vue`） | 沿用现有挂载点 |
 
 **结论**：本插件是「编译期内置的能力模块」，但要在**代码组织与依赖方向上保持插件化**——即插件的新增代码尽量只通过少量显式接口触碰主程序（见第四节），以便独立测试、独立开关、后续可整体剥离。
@@ -556,7 +556,7 @@ type Host interface {
 
 **通道 3：前端 → 插件（调用）**
 
-沿用现有绑定机制：`App` 上导出方法（任务 CRUD、启用/暂停、立即执行一次、历史查询、配置读写），前端经 `frontend/wailsjs/go/main/App` 调用。**不需要手写任何 HTTP 客户端**。
+沿用现有绑定机制：`App` 上导出方法（任务 CRUD、启用/暂停、立即执行一次、历史查询、配置读写），前端经 `frontend/wailsjs/go/app/App` 调用。**不需要手写任何 HTTP 客户端**。
 
 ---
 
@@ -670,7 +670,7 @@ plugin/
 |---|---|
 | `main.go` | `options` 增加 `SingleInstanceLock`、`HideWindowOnClose`、`StartHidden`（按配置）、`OnBeforeClose`（退出确认）；启动托盘 |
 | `app.go` | 装配插件；实现 `Host` 中属于主程序的部分；新增少量导出方法 |
-| `chat.go` / `runcontrol.go` | 对外暴露稳定的「运行生命周期事件」与「按 runID 取消」（F10.4） |
+| `chat.go` / `internal/agent/runcontrol.go` | 对外暴露稳定的「运行生命周期事件」与「按 runID 取消」（F10.4） |
 | `frontend/src/views/Settings.vue` | `tabs` 增加「定时任务」 |
 | `frontend/src/panes/TasksPane.vue` | 由静态假数据改为真实列表/编辑/历史 |
 | `frontend/src/types/index.js` | 补 `PANE_TITLES` 等 |
@@ -1688,7 +1688,7 @@ var taskMigrations = map[int]func(*TaskFile) (*TaskFile, string, error){}
 
 | 要点 | 理由 |
 |---|---|
-| 首迁备份且**不覆盖已有 `.bak`** | 沿用 `toolstore.go` 的既有做法——用户的配置是资产，第一次迁移前的状态最值得留；若每次都覆盖，就丢掉了最早的可用备份 |
+| 首迁备份且**不覆盖已有 `.bak`** | 沿用 `internal/tool/toolstore.go` 的既有做法——用户的配置是资产，第一次迁移前的状态最值得留；若每次都覆盖，就丢掉了最早的可用备份 |
 | **高版本保护**（`version > 当前` 时只读不写） | 用户可能回退到旧版本程序。若无保护，旧程序会按旧结构重写文件，**静默丢掉新版本的字段**。这是数据丢失里最隐蔽的一类 |
 | 迁移失败**降级启动**而非拒绝启动 | 对齐 F8.3：一个坏文件不能让应用起不来。能解析出多少用多少 |
 | 迁移必须**幂等** | 迁移中途崩溃后再次启动，要能从半迁移状态收敛，而不是反复损坏 |
@@ -1696,7 +1696,7 @@ var taskMigrations = map[int]func(*TaskFile) (*TaskFile, string, error){}
 
 #### 8.6.3 迁移的测试要求（非功能，但必须写进方案）
 
-迁移是**最容易出事故又最难测**的路径。要求：把每个历史版本的**真实文件样本**固化为测试夹具（`testdata/tasks_v1.json` 等），用「加载 → 断言迁移结果 → 断言可写回」的用例覆盖。这比读代码审查有效得多——`toolmodel.go` 里 `repairBuiltinExposure` 那个坑（内置工具被误判为 internal）正是靠「保留旧文件样本 + 断言」才可能在回归中发现的类型。
+迁移是**最容易出事故又最难测**的路径。要求：把每个历史版本的**真实文件样本**固化为测试夹具（`testdata/tasks_v1.json` 等），用「加载 → 断言迁移结果 → 断言可写回」的用例覆盖。这比读代码审查有效得多——`internal/tool/toolmodel.go` 里 `repairBuiltinExposure` 那个坑（内置工具被误判为 internal）正是靠「保留旧文件样本 + 断言」才可能在回归中发现的类型。
 
 ---
 

@@ -5,14 +5,14 @@ import {
   CancelPlan,
   ReopenPlan,
   ListPlans,
-} from '@/../wailsjs/go/main/App'
+} from '@/../wailsjs/go/app/App'
 import { subscribeChat } from '@/api/eventbus'
 
 /**
  * 判断是否运行在 Wails 桌面环境
  */
 function isWails() {
-  return typeof window !== 'undefined' && window.go && window.go.main && window.go.main.App
+  return typeof window !== 'undefined' && window.go && window.go.app && window.go.app.App
 }
 
 // ===== 浏览器开发模式 mock（localStorage 模拟计划存储） =====
@@ -119,7 +119,7 @@ export async function savePlan(plan) {
  * @param {string} sessionId
  * @param {string} planId
  * @param {boolean} useStream
- * @param {{onPlanUpdate?:Function, onReplyDelta?:Function, onToolCallStart?:Function, onToolCallEnd?:Function}} handlers
+ * @param {{onPlanUpdate?:Function, onReplyDelta?:Function, onThinkingDelta?:Function, onToolCallStart?:Function, onToolCallEnd?:Function}} handlers
  * @returns {Promise<{plan?:import('@/types').Plan, reply?:string, error?:string}>}
  */
 export async function executePlan(sessionId, planId, useStream, handlers = {}) {
@@ -129,8 +129,12 @@ export async function executePlan(sessionId, planId, useStream, handlers = {}) {
     const off = subscribeChat(sessionId, {
       onPlanUpdate: handlers.onPlanUpdate,
       onReplyDelta: handlers.onReplyDelta,
+      // 计划执行期间的思考同样要实时显示：计划步骤往往更慢，没有这段反馈
+      // 用户会以为卡在了某一步上
+      onThinkingDelta: handlers.onThinkingDelta,
       onToolCallStart: handlers.onToolCallStart,
       onToolCallEnd: handlers.onToolCallEnd,
+      onTodoUpdate: handlers.onTodoUpdate,
     })
     try {
       return await ExecutePlan(planId, !!useStream)

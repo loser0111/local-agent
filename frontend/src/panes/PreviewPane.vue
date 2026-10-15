@@ -63,22 +63,33 @@ const url = ref('http://localhost:5173')
 .preview-placeholder {
   text-align: center;
   color: $color-text-muted;
+
+  .ph-icon {
+    font-size: 56px;
+    margin-bottom: $space-md;
+    opacity: 0.5;
+    animation: preview-float 3s ease-in-out infinite;
+  }
+
+  .ph-text {
+    font-size: $font-size-md;
+    color: $color-text-secondary;
+    margin-bottom: $space-xs;
+  }
+
+  .ph-sub {
+    font-size: $font-size-xs;
+    margin-bottom: $space-md;
+  }
 }
 
-.ph-icon {
-  font-size: 48px;
-  margin-bottom: $space-md;
-}
-
-.ph-text {
-  font-size: $font-size-md;
-  color: $color-text-secondary;
-  margin-bottom: $space-xs;
-}
-
-.ph-sub {
-  font-size: $font-size-xs;
-  margin-bottom: $space-md;
+@keyframes preview-float {
+  0%, 100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-4px);
+  }
 }
 
 .ph-url {

@@ -8,6 +8,7 @@ import {
   Eye,
   FileCode,
   FileDiff,
+  ListChecks,
   ListTodo,
   PanelRight,
   Terminal,
@@ -24,6 +25,7 @@ import PlanPane from '@/panes/PlanPane.vue'
 import TasksPane from '@/panes/TasksPane.vue'
 import SubagentPane from '@/panes/SubagentPane.vue'
 import PreviewPane from '@/panes/PreviewPane.vue'
+import TodoPane from '@/panes/TodoPane.vue'
 
 const sessionStore = useSessionStore()
 const paneStore = usePaneStore()
@@ -86,6 +88,8 @@ const PANE_ICONS = {
   tasks: ListTodo,
   subagent: Bot,
   preview: Eye,
+  // todo 与 tasks 图标刻意区分：tasks 是"定时任务"（ListTodo），todo 是待办清单（ListChecks）
+  todo: ListChecks,
 }
 
 function paneIcon(pane) {
@@ -99,11 +103,11 @@ const chatWidth = ref(CHAT_DEFAULT)
 
 // 收起右侧时聊天区自己铺满：chatWidth（百分比或像素）此时已经没有意义，
 // 继续用 `0 0 X%` 会在右边留下一条空白。
-//
-// 注意这里只有"收起"一种铺满情形：右侧栏是常驻的（见模板），没打开面板时它占位并显示空态，
-// 所以未收起时聊天区仍按 chatWidth 分栏。
+// 铺满的两种情形：右侧被收起（只剩窄条），以及一个右侧面板都没打开 ——
+// 后者若不铺满，60% 的宽度限制会在右边留出一片空白，看着像个关不掉的空区域。
+// 其余情况按 chatWidth 分栏（右侧栏是常驻的，见模板）。
 const chatStyle = computed(() =>
-  collapsed.value ? { flex: '1 1 auto' } : { flex: '0 0 ' + chatWidth.value }
+  collapsed.value || !hasSecondary.value ? { flex: '1 1 auto' } : { flex: '0 0 ' + chatWidth.value }
 )
 
 function onChatDrag(dx) {
@@ -127,6 +131,7 @@ const paneComponents = {
   tasks: TasksPane,
   subagent: SubagentPane,
   preview: PreviewPane,
+  todo: TodoPane,
 }
 </script>
 
@@ -233,7 +238,7 @@ const paneComponents = {
 .pane-tabs {
   display: flex;
   height: $pane-header-height;
-  background-color: $color-bg-secondary;
+  background: $gradient-topbar;
   border-bottom: 1px solid $color-border;
   padding: 0 $space-xs;
   flex-shrink: 0;
@@ -386,5 +391,21 @@ const paneComponents = {
   font-size: $font-size-xs;
   line-height: $line-height-sm;
   color: $color-text-muted;
+}
+
+// 面板切换过渡：content 区域用淡入淡出
+.secondary-content > * {
+  animation: pane-fade-in 0.2s ease;
+}
+
+@keyframes pane-fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 </style>

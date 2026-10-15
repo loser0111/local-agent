@@ -1,7 +1,7 @@
 # 长期记忆设计模式调研（步骤 3 调研报告）
 
 > 调研对象：业界/开源长期记忆系统的设计模式，服务于 local-agent（纯文件存储、本地运行的 Go 桌面智能体）的长期记忆模块设计。
-> 主要参考：项目自带 `claude-code-memory-analysis.md`（Claude Code 逆向源码分析，已完整阅读）+ 业界公开资料。
+> 主要参考：项目自带 `docs/claude-code-memory-analysis.md`（Claude Code 逆向源码分析，已完整阅读）+ 业界公开资料。
 
 ## 0. 调研结论速览
 
@@ -25,7 +25,7 @@
   - 长期：账号级 memory，后端自动从对话推断保存（"remember"），用户可手动 `/remember`；新对话启动时按需检索注入。
   - 关键：短期是"会话状态"，长期是"跨会话事实库"，两者作用域与生命周期明确不同。
 
-- **Claude Code**（本项目最强蓝本，见 `claude-code-memory-analysis.md`）：
+- **Claude Code**（本项目最强蓝本，见 `docs/claude-code-memory-analysis.md`）：
   - ① **Auto-Memory**（`memory/`）：项目级、跨会话、永久。
   - ② **Session Memory**：单会话内，服务压缩（`summary.md`）。
   - ③ **CLAUDE.md 层级**：人工维护的常驻规则（用户/项目/本地/管理四级）。
@@ -207,7 +207,7 @@
 
 ### 最小可行方案（MVP）路线图
 
-1. **`memory/memorystore.go`**（对标 `sessions.go`）：`MemoryStore` 结构，`~/.local-agent/memory/memory.json` + 主题文件目录；`AddMemory / ListMemories / SearchMemories / DeleteMemory / UpdateMemory`，`mu sync.RWMutex`。
+1. **`internal/memstore/memorystore.go`**（对标 `internal/store/sessions.go`）：`MemoryStore` 结构，`~/.local-agent/memory/memory.json` + 主题文件目录；`AddMemory / ListMemories / SearchMemories / DeleteMemory / UpdateMemory`，`mu sync.RWMutex`。
 2. **app.go startup**：`a.memoryStore = NewMemoryStore(filepath.Join(baseDir, "memory"))`；`memory.enabled` 设置项。
 3. **读取接入**（`buildBasePrompt`）：每次 run 前 `memoryStore.Search(query, session.Project, topK)` → 注入 "## 长期记忆" 段。
 4. **写入接入**：

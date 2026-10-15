@@ -12,13 +12,13 @@
 
 ## 二、文件与职责
 
-后端拆成四个文件，边界按「解析 / 存储 / 资源 / 安装」切分，避免再出现一个 `skills.go` 里既写 YAML 解析又跑 `git clone` 的局面。
+后端拆成四个文件，边界按「解析 / 存储 / 资源 / 安装」切分，避免再出现一个 `internal/skill/skills.go` 里既写 YAML 解析又跑 `git clone` 的局面。
 
 ```
-skillparse.go      frontmatter 的解析、校验、序列化（唯一处理 YAML 的地方）
-skills.go          SkillStore、状态持久化、L1 清单、显式调用解析、read_skill（L2）
-skillresources.go  L3 资源枚举与受限读取、read_skill_file 工具
-skillinstall.go    安装器：文件夹 / zip / Git，以及更新
+internal/skill/skillparse.go      frontmatter 的解析、校验、序列化（唯一处理 YAML 的地方）
+internal/skill/skills.go          SkillStore、状态持久化、L1 清单、显式调用解析、read_skill（L2）
+internal/skill/skillresources.go  L3 资源枚举与受限读取、read_skill_file 工具
+internal/skill/skillinstall.go    安装器：文件夹 / zip / Git，以及更新
 ```
 
 前端相应新增 `components/business/SkillInstallDialog.vue`，并把 `SkillSettings.vue`、`SkillEditDialog.vue`、`api/skill.js`、`stores/skills.js` 改到新契约上。
@@ -108,9 +108,9 @@ Git 安装用 `git clone --depth 1`（可指定 `--branch` 与仓库内子目录
 
 开发沙箱里没有 Go 工具链（`apt` 无 root、模块代理被 allowlist 拦掉），`go build` / `go test` / `gofmt` 都跑不了，因此本轮改动是靠静态手段加一轮用户本地编译反馈过的。**第一轮编译暴露了三个错误，均已修复**：
 
-`skillparse.go` 与 `skills_test.go` 里各有一处**字符串字面量中混入了真实 BOM 字节**（`strings.TrimPrefix(text, "<BOM>")`）——Go 只允许 BOM 出现在文件开头，否则报 `invalid BOM in the middle of the file`。已改为 `"\ufeff"` 转义。
+`internal/skill/skillparse.go` 与 `skills_test.go` 里各有一处**字符串字面量中混入了真实 BOM 字节**（`strings.TrimPrefix(text, "<BOM>")`）——Go 只允许 BOM 出现在文件开头，否则报 `invalid BOM in the middle of the file`。已改为 `"\ufeff"` 转义。
 
-`SkillStore.Refresh()` 在重写 `skills.go` 时被漏掉，而 `app.go` 与 `skillinstall.go` 仍在调用它。已补回。
+`SkillStore.Refresh()` 在重写 `internal/skill/skills.go` 时被漏掉，而 `app.go` 与 `internal/skill/skillinstall.go` 仍在调用它。已补回。
 
 三个错误里有两点值得记下来，因为它们暴露了静态检查的盲区。一是**通过接收者调用的方法名不检查**：我原来的检查器只匹配裸函数调用 `name(`，`a.skillStore.Refresh()` 这种形式从缝里漏了过去；后来按接收者类型做了收紧版本，误报太多（`store` 在不同测试文件里是 `ModelStore`/`ToolStore`/`SkillStore`），最终改用**有界人工核对**：把我新写的 `SkillStore`、`SkillInstaller`、`ReadSkillTool`、`ReadSkillFileTool` 的方法集列出来，与它们上面的全部调用点逐一比对。二是「历史上调用过」不能替代「现在有声明」——按 git HEAD 的调用名建白名单是抓不到这类错误的。
 
@@ -118,7 +118,7 @@ Git 安装用 `git clone --depth 1`（可指定 `--branch` 与仓库内子目录
 
 其余静态检查（括号配平、未使用 import、跨文件重复声明、包内函数调用可解析）全过；其中 58 处「调用未找到定义」经逐条确认均为局部函数变量（`flush`、`cancel`、`markExposure` 等），非遗漏。
 
-前端做了更实的验证：5 个改动过的 `.vue` 文件用 `@vue/compiler-sfc` 跑通了 parse、`compileScript`、`compileTemplate`，并用项目自带的 `sass` 编译了各自的 `<style lang="scss">`；`api/skill.js`、`stores/skills.js`、`types/index.js`、`wailsjs/go/main/App.js` 经 `node --check`（ESM）通过；`wailsjs/go/models.ts` 去除 TS 外壳后语法通过。
+前端做了更实的验证：5 个改动过的 `.vue` 文件用 `@vue/compiler-sfc` 跑通了 parse、`compileScript`、`compileTemplate`，并用项目自带的 `sass` 编译了各自的 `<style lang="scss">`；`api/skill.js`、`stores/skills.js`、`types/index.js`、`wailsjs/go/app/App.js` 经 `node --check`（ESM）通过；`wailsjs/go/models.ts` 去除 TS 外壳后语法通过。
 
 需要在本地补跑：
 

@@ -3,7 +3,7 @@
 > 基于：项目技术栈（Go 1.25 + Wails，**纯文件持久化，无 DB/向量依赖**）
 >        + 核心执行流程（`Chat → buildBasePrompt → runToolLoop`，步骤 2）
 >        + 业界调研结论（`docs/long-term-memory-research.md`，步骤 3）
->        + Claude Code 记忆机制（`claude-code-memory-analysis.md`）
+>        + Claude Code 记忆机制（`docs/claude-code-memory-analysis.md`）
 >
 > 本方案目标：给 local-agent 增加**跨会话长期记忆**能力，最小化改动、零新增依赖、可逆、用户可控。
 
@@ -18,7 +18,7 @@
 4. 零新增编译依赖；记忆文件纯文本，用户可手动编辑/审计。
 
 **原则（从项目现状推导）**
-- **文件优先**：遵循 `sessions.go`（JSON per session）/ `skills.go`（markdown）的既有风格，不引入 SQLite/向量库。
+- **文件优先**：遵循 `internal/store/sessions.go`（JSON per session）/ `internal/skill/skills.go`（markdown）的既有风格，不引入 SQLite/向量库。
 - **可逆、非破坏**：借鉴 contextmgmt "压缩可逆" 的先例——记忆独立于会话，`/clear` 只清会话、不清记忆。
 - **轻量检索**：MVP 用 in-process 关键词+标签匹配，**无 LLM 调用、无外部服务**。
 - **用户掌控**：显式命令（`/remember`/`/forget`）+ 配置开关 + 列表管理 UI。
@@ -287,10 +287,10 @@ func (a *App) buildPromptWithMemory(session *Session, dir, query string) (string
 - `ChatPlan` 规划/执行路径 → 同样替换
 - 子代理 `runSubagent` → **继续用** `buildSubagentPrompt`，不动
 
-### 5.2 注入接口（新增 `memorystore.go`）
+### 5.2 注入接口（新增 `internal/memstore/memorystore.go`）
 
 ```go
-// 新增文件 memory/memorystore.go，对标 sessions.go 的 SessionStore
+// 新增文件 internal/memstore/memorystore.go，对标 internal/store/sessions.go 的 SessionStore
 type MemoryStore struct {
     mu    sync.RWMutex
     dir   string // ~/.local-agent/memory
@@ -422,14 +422,14 @@ for 每条现有记忆 e：
 
 | 新增/改动 | 文件 | 内容 |
 |---|---|---|
-| 新增 | `memory/memorystore.go` | `MemoryStore`、`MemoryMeta`、`MemoryEntry`、CRUD、`Retrieve`、`FormatInjection`、去重、PII、淘汰 |
+| 新增 | `internal/memstore/memorystore.go` | `MemoryStore`、`MemoryMeta`、`MemoryEntry`、CRUD、`Retrieve`、`FormatInjection`、去重、PII、淘汰 |
 | 新增 | `memory/config.go`（或并入 memorystore） | `MemoryConfig`、默认值、env 优先级链 `isMemoryEnabled` |
 | 新增 | `memory/extract.go` | `extractMemoriesAsync`、抽取 prompt、`/dream` |
 | 改 | `app.go`（startup ~75 行） | `a.memoryStore = NewMemoryStore(filepath.Join(baseDir, "memory"))`；`a.memoryCfg` |
 | 改 | `app.go`（Chat ~610） | `/remember`/`/forget`/`/memory-list`/`/memory-stat` 命令拦截（同 `/compact` 前置） |
 | 改 | `chat.go`（executeChat ~543） | `buildBasePromptWithSkill` → `buildPromptWithMemory` |
 | 改 | `chat.go`（新增方法） | `buildPromptWithMemory`（§5.1）、`appendMemorySection`（§5.3） |
-| 改 | `sessions.go`（Session 结构） | 新增 `MemoryEnabled bool`（会话级 opt-out） |
+| 改 | `internal/store/sessions.go`（Session 结构） | 新增 `MemoryEnabled bool`（会话级 opt-out） |
 | 新增 | `frontend/.../MemoryList.vue`（Phase 3） | 记忆列表 UI（增删改，调用 `ListMemories`/`DeleteMemory`） |
 
 ---
@@ -442,11 +442,11 @@ for 每条现有记忆 e：
 - 无改动。已调研（步骤 3）、已出方案（本文件）。
 
 ### Phase 1（MVP，显式记忆）
-1. `memorystore.go`：`index.json` + 主题文件 CRUD（Add/Update/Delete/List），权限 0o700/0o600。
+1. `internal/memstore/memorystore.go`：`index.json` + 主题文件 CRUD（Add/Update/Delete/List），权限 0o700/0o600。
 2. `/remember`、`/forget`、`/memory-list` 命令。
 3. `Retrieve`（关键词+标签）+ `appendMemorySection` 注入主 prompt（§5）。
 4. `config.json` + `enabled` 开关 + 会话级 `MemoryEnabled`。
-5. 测试：`memorystore_test.go`（CRUD、去重、检索、注入格式、PII 过滤、路径安全）。
+5. 测试：`internal/memstore/memorystore_test.go`（CRUD、去重、检索、注入格式、PII 过滤、路径安全）。
 > ✅ 此阶段已完成记忆"读/显式写"闭环，零 LLM、可验证。
 
 ### Phase 2（自动记忆）

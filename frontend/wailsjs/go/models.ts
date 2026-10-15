@@ -178,6 +178,245 @@ export namespace agent {
 
 }
 
+export namespace app {
+	
+	export class ChatResult {
+	    reply: string;
+	    toolCalls?: store.ToolCall[];
+	    messages?: store.Message[];
+	    diff?: diff.DiffFile[];
+	    plan?: store.Plan;
+	    error?: string;
+	    cancelled?: boolean;
+	    cancelKind?: string;
+	    exhausted?: boolean;
+	    context?: agent.ContextStat;
+	    thinking?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new ChatResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.reply = source["reply"];
+	        this.toolCalls = this.convertValues(source["toolCalls"], store.ToolCall);
+	        this.messages = this.convertValues(source["messages"], store.Message);
+	        this.diff = this.convertValues(source["diff"], diff.DiffFile);
+	        this.plan = this.convertValues(source["plan"], store.Plan);
+	        this.error = source["error"];
+	        this.cancelled = source["cancelled"];
+	        this.cancelKind = source["cancelKind"];
+	        this.exhausted = source["exhausted"];
+	        this.context = this.convertValues(source["context"], agent.ContextStat);
+	        this.thinking = source["thinking"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class MCPImportSkip {
+	    name: string;
+	    reason: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new MCPImportSkip(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.name = source["name"];
+	        this.reason = source["reason"];
+	    }
+	}
+	export class MCPImportResult {
+	    imported: string[];
+	    skipped: MCPImportSkip[];
+	
+	    static createFrom(source: any = {}) {
+	        return new MCPImportResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.imported = source["imported"];
+	        this.skipped = this.convertValues(source["skipped"], MCPImportSkip);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	
+	export class PendingInteraction {
+	    kind: string;
+	    permission?: permission.Request;
+	    ask?: agent.AskRequest;
+	
+	    static createFrom(source: any = {}) {
+	        return new PendingInteraction(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.kind = source["kind"];
+	        this.permission = this.convertValues(source["permission"], permission.Request);
+	        this.ask = this.convertValues(source["ask"], agent.AskRequest);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class RuleView {
+	    rule: string;
+	    bucket: string;
+	    source: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new RuleView(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.rule = source["rule"];
+	        this.bucket = source["bucket"];
+	        this.source = source["source"];
+	    }
+	}
+	export class PermissionState {
+	    sessionId: string;
+	    mode: string;
+	    projectDir: string;
+	    rules: RuleView[];
+	    sources: permission.RuleSource[];
+	    grants: permission.Grant[];
+	    warnings: string[];
+	
+	    static createFrom(source: any = {}) {
+	        return new PermissionState(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.sessionId = source["sessionId"];
+	        this.mode = source["mode"];
+	        this.projectDir = source["projectDir"];
+	        this.rules = this.convertValues(source["rules"], RuleView);
+	        this.sources = this.convertValues(source["sources"], permission.RuleSource);
+	        this.grants = this.convertValues(source["grants"], permission.Grant);
+	        this.warnings = source["warnings"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	
+	export class UsageDetail {
+	    sessionId: string;
+	    hasData: boolean;
+	    last: store.TokenUsage;
+	    totals: store.UsageTotals;
+	    cache: store.CacheView;
+	    context?: agent.ContextStat;
+	    request?: llm.RequestSnapshot;
+	    rawUsage?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new UsageDetail(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.sessionId = source["sessionId"];
+	        this.hasData = source["hasData"];
+	        this.last = this.convertValues(source["last"], store.TokenUsage);
+	        this.totals = this.convertValues(source["totals"], store.UsageTotals);
+	        this.cache = this.convertValues(source["cache"], store.CacheView);
+	        this.context = this.convertValues(source["context"], agent.ContextStat);
+	        this.request = this.convertValues(source["request"], llm.RequestSnapshot);
+	        this.rawUsage = source["rawUsage"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+
+}
+
 export namespace diff {
 	
 	export class DiffLine {
@@ -389,6 +628,8 @@ export namespace llm {
 	    tool_call_id?: string;
 	    tool_calls?: LLMToolCall[];
 	    images?: LLMImage[];
+	    thinking?: string;
+	    thinkingSignature?: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new LLMMessage(source);
@@ -401,6 +642,8 @@ export namespace llm {
 	        this.tool_call_id = source["tool_call_id"];
 	        this.tool_calls = this.convertValues(source["tool_calls"], LLMToolCall);
 	        this.images = this.convertValues(source["images"], LLMImage);
+	        this.thinking = source["thinking"];
+	        this.thinkingSignature = source["thinkingSignature"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -459,241 +702,6 @@ export namespace llm {
 	        this.windowTokens = source["windowTokens"];
 	        this.compactedThisTurn = source["compactedThisTurn"];
 	        this.coveredMsgs = source["coveredMsgs"];
-	    }
-	
-		convertValues(a: any, classs: any, asMap: boolean = false): any {
-		    if (!a) {
-		        return a;
-		    }
-		    if (a.slice && a.map) {
-		        return (a as any[]).map(elem => this.convertValues(elem, classs));
-		    } else if ("object" === typeof a) {
-		        if (asMap) {
-		            for (const key of Object.keys(a)) {
-		                a[key] = new classs(a[key]);
-		            }
-		            return a;
-		        }
-		        return new classs(a);
-		    }
-		    return a;
-		}
-	}
-
-}
-
-export namespace main {
-	
-	export class ChatResult {
-	    reply: string;
-	    toolCalls?: store.ToolCall[];
-	    messages?: store.Message[];
-	    diff?: diff.DiffFile[];
-	    plan?: store.Plan;
-	    error?: string;
-	    cancelled?: boolean;
-	    cancelKind?: string;
-	    context?: agent.ContextStat;
-	
-	    static createFrom(source: any = {}) {
-	        return new ChatResult(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.reply = source["reply"];
-	        this.toolCalls = this.convertValues(source["toolCalls"], store.ToolCall);
-	        this.messages = this.convertValues(source["messages"], store.Message);
-	        this.diff = this.convertValues(source["diff"], diff.DiffFile);
-	        this.plan = this.convertValues(source["plan"], store.Plan);
-	        this.error = source["error"];
-	        this.cancelled = source["cancelled"];
-	        this.cancelKind = source["cancelKind"];
-	        this.context = this.convertValues(source["context"], agent.ContextStat);
-	    }
-	
-		convertValues(a: any, classs: any, asMap: boolean = false): any {
-		    if (!a) {
-		        return a;
-		    }
-		    if (a.slice && a.map) {
-		        return (a as any[]).map(elem => this.convertValues(elem, classs));
-		    } else if ("object" === typeof a) {
-		        if (asMap) {
-		            for (const key of Object.keys(a)) {
-		                a[key] = new classs(a[key]);
-		            }
-		            return a;
-		        }
-		        return new classs(a);
-		    }
-		    return a;
-		}
-	}
-	export class MCPImportSkip {
-	    name: string;
-	    reason: string;
-	
-	    static createFrom(source: any = {}) {
-	        return new MCPImportSkip(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.name = source["name"];
-	        this.reason = source["reason"];
-	    }
-	}
-	export class MCPImportResult {
-	    imported: string[];
-	    skipped: MCPImportSkip[];
-	
-	    static createFrom(source: any = {}) {
-	        return new MCPImportResult(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.imported = source["imported"];
-	        this.skipped = this.convertValues(source["skipped"], MCPImportSkip);
-	    }
-	
-		convertValues(a: any, classs: any, asMap: boolean = false): any {
-		    if (!a) {
-		        return a;
-		    }
-		    if (a.slice && a.map) {
-		        return (a as any[]).map(elem => this.convertValues(elem, classs));
-		    } else if ("object" === typeof a) {
-		        if (asMap) {
-		            for (const key of Object.keys(a)) {
-		                a[key] = new classs(a[key]);
-		            }
-		            return a;
-		        }
-		        return new classs(a);
-		    }
-		    return a;
-		}
-	}
-	
-	export class PendingInteraction {
-	    kind: string;
-	    permission?: permission.Request;
-	    ask?: agent.AskRequest;
-	
-	    static createFrom(source: any = {}) {
-	        return new PendingInteraction(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.kind = source["kind"];
-	        this.permission = this.convertValues(source["permission"], permission.Request);
-	        this.ask = this.convertValues(source["ask"], agent.AskRequest);
-	    }
-	
-		convertValues(a: any, classs: any, asMap: boolean = false): any {
-		    if (!a) {
-		        return a;
-		    }
-		    if (a.slice && a.map) {
-		        return (a as any[]).map(elem => this.convertValues(elem, classs));
-		    } else if ("object" === typeof a) {
-		        if (asMap) {
-		            for (const key of Object.keys(a)) {
-		                a[key] = new classs(a[key]);
-		            }
-		            return a;
-		        }
-		        return new classs(a);
-		    }
-		    return a;
-		}
-	}
-	export class RuleView {
-	    rule: string;
-	    bucket: string;
-	    source: string;
-	
-	    static createFrom(source: any = {}) {
-	        return new RuleView(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.rule = source["rule"];
-	        this.bucket = source["bucket"];
-	        this.source = source["source"];
-	    }
-	}
-	export class PermissionState {
-	    sessionId: string;
-	    mode: string;
-	    projectDir: string;
-	    rules: RuleView[];
-	    sources: permission.RuleSource[];
-	    grants: permission.Grant[];
-	    warnings: string[];
-	
-	    static createFrom(source: any = {}) {
-	        return new PermissionState(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.sessionId = source["sessionId"];
-	        this.mode = source["mode"];
-	        this.projectDir = source["projectDir"];
-	        this.rules = this.convertValues(source["rules"], RuleView);
-	        this.sources = this.convertValues(source["sources"], permission.RuleSource);
-	        this.grants = this.convertValues(source["grants"], permission.Grant);
-	        this.warnings = source["warnings"];
-	    }
-	
-		convertValues(a: any, classs: any, asMap: boolean = false): any {
-		    if (!a) {
-		        return a;
-		    }
-		    if (a.slice && a.map) {
-		        return (a as any[]).map(elem => this.convertValues(elem, classs));
-		    } else if ("object" === typeof a) {
-		        if (asMap) {
-		            for (const key of Object.keys(a)) {
-		                a[key] = new classs(a[key]);
-		            }
-		            return a;
-		        }
-		        return new classs(a);
-		    }
-		    return a;
-		}
-	}
-	
-	export class UsageDetail {
-	    sessionId: string;
-	    hasData: boolean;
-	    last: store.TokenUsage;
-	    totals: store.UsageTotals;
-	    cache: store.CacheView;
-	    context?: agent.ContextStat;
-	    request?: llm.RequestSnapshot;
-	    rawUsage?: string;
-	
-	    static createFrom(source: any = {}) {
-	        return new UsageDetail(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.sessionId = source["sessionId"];
-	        this.hasData = source["hasData"];
-	        this.last = this.convertValues(source["last"], store.TokenUsage);
-	        this.totals = this.convertValues(source["totals"], store.UsageTotals);
-	        this.cache = this.convertValues(source["cache"], store.CacheView);
-	        this.context = this.convertValues(source["context"], agent.ContextStat);
-	        this.request = this.convertValues(source["request"], llm.RequestSnapshot);
-	        this.rawUsage = source["rawUsage"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -1844,6 +1852,8 @@ export namespace store {
 	    toolCallId?: string;
 	    createdAt: number;
 	    attachments?: media.Attachment[];
+	    thinking?: string;
+	    thinkingSignature?: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new Message(source);
@@ -1858,6 +1868,8 @@ export namespace store {
 	        this.toolCallId = source["toolCallId"];
 	        this.createdAt = source["createdAt"];
 	        this.attachments = this.convertValues(source["attachments"], media.Attachment);
+	        this.thinking = source["thinking"];
+	        this.thinkingSignature = source["thinkingSignature"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -1989,6 +2001,26 @@ export namespace store {
 	        this.rollingGuardBlocks = source["rollingGuardBlocks"];
 	    }
 	}
+	export class TodoItem {
+	    id: string;
+	    text: string;
+	    status: string;
+	    createdAt?: number;
+	    updatedAt?: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new TodoItem(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.text = source["text"];
+	        this.status = source["status"];
+	        this.createdAt = source["createdAt"];
+	        this.updatedAt = source["updatedAt"];
+	    }
+	}
 	export class UsageTotals {
 	    turns: number;
 	    inputUncached: number;
@@ -2084,6 +2116,9 @@ export namespace store {
 	    parentId?: string;
 	    subagent?: SubagentInfo;
 	    usageTotals?: UsageTotals;
+	    todos?: TodoItem[];
+	    thinkingEnabled?: boolean;
+	    thinkingBudget?: number;
 	
 	    static createFrom(source: any = {}) {
 	        return new Session(source);
@@ -2119,6 +2154,9 @@ export namespace store {
 	        this.parentId = source["parentId"];
 	        this.subagent = this.convertValues(source["subagent"], SubagentInfo);
 	        this.usageTotals = this.convertValues(source["usageTotals"], UsageTotals);
+	        this.todos = this.convertValues(source["todos"], TodoItem);
+	        this.thinkingEnabled = source["thinkingEnabled"];
+	        this.thinkingBudget = source["thinkingBudget"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -2149,6 +2187,8 @@ export namespace store {
 	    enabledTools: string[];
 	    enabledSkills: string[];
 	    parentId?: string;
+	    thinkingEnabled?: boolean;
+	    thinkingBudget?: number;
 	
 	    static createFrom(source: any = {}) {
 	        return new SessionConfig(source);
@@ -2165,6 +2205,8 @@ export namespace store {
 	        this.enabledTools = source["enabledTools"];
 	        this.enabledSkills = source["enabledSkills"];
 	        this.parentId = source["parentId"];
+	        this.thinkingEnabled = source["thinkingEnabled"];
+	        this.thinkingBudget = source["thinkingBudget"];
 	    }
 	}
 	export class SessionPatch {
@@ -2174,6 +2216,8 @@ export namespace store {
 	    viewMode?: string;
 	    status?: string;
 	    project?: string;
+	    thinkingEnabled?: boolean;
+	    thinkingBudget?: number;
 	
 	    static createFrom(source: any = {}) {
 	        return new SessionPatch(source);
@@ -2187,8 +2231,11 @@ export namespace store {
 	        this.viewMode = source["viewMode"];
 	        this.status = source["status"];
 	        this.project = source["project"];
+	        this.thinkingEnabled = source["thinkingEnabled"];
+	        this.thinkingBudget = source["thinkingBudget"];
 	    }
 	}
+	
 	
 	export class TokenUsage {
 	    inputUncached: number;

@@ -105,16 +105,22 @@ func CallLLMForModelWith(ctx context.Context, model *store.Model, req *LLMReq, p
 // 前端的流式气泡是**追加**渲染的（appendStreamContent），重试会把同一段话再说一遍，
 // 而用户看到的是一段重复的废话——比直接报错还糟。所以这里用 emitted 当安全阀，
 // 只在「一个字都还没吐出去」时才允许重试。
-func CallLLMStreamForModel(ctx context.Context, model *store.Model, req *LLMReq, onContent func(string)) (*LLMResp, error) {
-	return CallLLMStreamForModelWith(ctx, model, req, onContent, DefaultRetryPolicy)
+func CallLLMStreamForModel(ctx context.Context, model *store.Model, req *LLMReq, onContent, onThinking func(string)) (*LLMResp, error) {
+	return CallLLMStreamForModelWith(ctx, model, req, onContent, onThinking, DefaultRetryPolicy)
 }
 
-func CallLLMStreamForModelWith(ctx context.Context, model *store.Model, req *LLMReq, onContent func(string), policy RetryPolicy) (*LLMResp, error) {
+// onThinking 可以传 nil（不启用 thinking / 不需要实时展示思考过程时）。
+// 两个回调必须分开：思考过程与回答正文在界面上是两个区域，混用同一条通道会让
+// 思考文字出现在回答气泡里（Anthropic 的 thinking_delta 与 text_delta 会交错下发）。
+func CallLLMStreamForModelWith(ctx context.Context, model *store.Model, req *LLMReq, onContent, onThinking func(string), policy RetryPolicy) (*LLMResp, error) {
 	url := ResolveEndpointURL(model)
 	anthropic := IsAnthropicEndpoint(model)
 
 	// emitted 记录本次调用是否已向前端吐出过内容。它跨尝试共享，
 	// 因为「吐过没有」问的是这次请求整体，不是某一次尝试。
+	//
+	// 思考分片同样算「已吐出」：前端对思考也是**追加**渲染的，重试会让同一段思考
+	// 出现两遍（甚至接上第二轮的不同思考），比报错更难看。
 	emitted := false
 	wrapped := func(s string) {
 		if s != "" {
@@ -124,12 +130,20 @@ func CallLLMStreamForModelWith(ctx context.Context, model *store.Model, req *LLM
 			onContent(s)
 		}
 	}
+	wrappedThinking := func(s string) {
+		if s != "" {
+			emitted = true
+		}
+		if onThinking != nil {
+			onThinking(s)
+		}
+	}
 
 	attempt := func() (*LLMResp, error) {
 		if anthropic {
-			return CallAnthropicStream(ctx, url, model.APIKey, req, wrapped)
+			return CallAnthropicStream(ctx, url, model.APIKey, req, wrapped, wrappedThinking)
 		}
-		return CallLLMStream(ctx, url, model.APIKey, req, wrapped)
+		return CallLLMStream(ctx, url, model.APIKey, req, wrapped, wrappedThinking)
 	}
 	return WithRetry(ctx, policy, func() bool { return emitted }, attempt)
 }
@@ -144,6 +158,15 @@ type anthropicReq struct {
 	Tools       []anthropicTool    `json:"tools,omitempty"`
 	Temperature float64            `json:"temperature,omitempty"`
 	Stream      bool               `json:"stream,omitempty"`
+
+	// [新增] extended thinking 参数
+	Thinking *anthropicThinking `json:"thinking,omitempty"`
+}
+
+// [新增] anthropicThinking Anthropic API 的 thinking 参数
+type anthropicThinking struct {
+	Type         string `json:"type"`
+	BudgetTokens int    `json:"budget_tokens"`
 }
 
 type anthropicMessage struct {
@@ -158,7 +181,7 @@ type anthropicTool struct {
 }
 
 // AnthropicContentBlock 兼容请求/响应两端的块结构（请求端用 text/tool_use/tool_result/image，
-// 响应端用 text/tool_use）。
+// 响应端用 text/tool_use/thinking）。
 type AnthropicContentBlock struct {
 	Type      string          `json:"type"`
 	Text      string          `json:"text,omitempty"`
@@ -167,6 +190,12 @@ type AnthropicContentBlock struct {
 	Input     json.RawMessage `json:"input,omitempty"`
 	ToolUseID string          `json:"tool_use_id,omitempty"`
 	Content   string          `json:"content,omitempty"`
+	// Thinking 思考块正文。注意字段名是 "thinking" 而**不是** "text"——
+	// 曾经这里只有 Text 字段、按 text 去读 thinking 块，于是永远解析出空串，
+	// 表现是"开了 thinking 但一个字都没记下来"。
+	Thinking string `json:"thinking,omitempty"`
+	// Signature 思考块签名，回传时必须原样带上（见 store.Message.ThinkingSignature）。
+	Signature string `json:"signature,omitempty"`
 	// Source 图片块专用。Anthropic 的图片块是 {"type":"image","source":{...}}，
 	// 与 OpenAI 的 data URL 形状完全不同——这正是需要适配器的那类差异。
 	Source *anthropicImageSource `json:"source,omitempty"`
@@ -188,6 +217,12 @@ type anthropicStreamDelta struct {
 	PartialJSON string         `json:"partial_json"`
 	StopReason  string         `json:"stop_reason"`
 	Usage       anthropicUsage `json:"usage"`
+	// Thinking 思考分片正文（delta.type == "thinking_delta" 时出现）。
+	// 字段名是 thinking 而**不是** text——这是流式路径漏掉 thinking 的原因：
+	// 旧代码只认 text_delta，thinking_delta 落到 default 分支被静默丢弃。
+	Thinking string `json:"thinking"`
+	// Signature 思考块签名（delta.type == "signature_delta" 时出现，整块一次给出）。
+	Signature string `json:"signature"`
 }
 
 // anthropicStreamError 流式帧里的错误对象
@@ -351,6 +386,7 @@ func ToAnthropicRequest(req *LLMReq) *anthropicReq {
 		Temperature: req.Temperature,
 		Stream:      req.Stream,
 		Tools:       toAnthropicTools(req.Tools),
+		Thinking:    toAnthropicThinking(req.Thinking), // [新增]
 	}
 
 	var systemParts []string
@@ -370,8 +406,20 @@ func ToAnthropicRequest(req *LLMReq) *anthropicReq {
 		case store.RoleAssistant:
 			// assistant 消息不带图（模型不会"发出"图片），呈现在这里会被静默丢掉；
 			// 若日后要做"模型生成图片"，必须在这里补分支而不是让它悄悄消失。
+			//
+			// thinking 块回传：启用 thinking 且该轮带工具调用时，Anthropic 要求把上一轮的
+			// thinking 块**连同签名**一起放回 assistant 消息里，否则下一次请求直接 400
+			// （"thinking.thinking: Field required"）。签名是服务端生成的，只能原样带回。
+			// 它必须排在 tool_use 之前——规范要求 thinking 块是该轮的第一个块。
+			blocks := make([]AnthropicContentBlock, 0, len(m.ToolCalls)+2)
+			if m.Thinking != "" && m.ThinkingSignature != "" {
+				blocks = append(blocks, AnthropicContentBlock{
+					Type:      "thinking",
+					Thinking:  m.Thinking,
+					Signature: m.ThinkingSignature,
+				})
+			}
 			if len(m.ToolCalls) > 0 {
-				blocks := make([]AnthropicContentBlock, 0, len(m.ToolCalls)+1)
 				if strings.TrimSpace(m.Content) != "" {
 					blocks = append(blocks, AnthropicContentBlock{Type: "text", Text: m.Content})
 				}
@@ -385,7 +433,11 @@ func ToAnthropicRequest(req *LLMReq) *anthropicReq {
 				}
 				AppendAnthropicMessage(out, store.RoleAssistant, blocks...)
 			} else if strings.TrimSpace(m.Content) != "" {
-				AppendAnthropicMessage(out, store.RoleAssistant, AnthropicContentBlock{Type: "text", Text: m.Content})
+				blocks = append(blocks, AnthropicContentBlock{Type: "text", Text: m.Content})
+				AppendAnthropicMessage(out, store.RoleAssistant, blocks...)
+			} else if len(blocks) > 0 {
+				// 只有 thinking 块、没有正文的 assistant 消息也要发出去（空正文但需回传签名）。
+				AppendAnthropicMessage(out, store.RoleAssistant, blocks...)
 			}
 		default: // user
 			// 有图但没文字的消息也必须发出去，所以判空条件是"两者皆空"
@@ -472,6 +524,17 @@ func rawJSONObject(s string) json.RawMessage {
 	return b
 }
 
+// [新增] toAnthropicThinking 将通用 thinking 配置转换为 Anthropic 格式
+func toAnthropicThinking(t *LLMThinking) *anthropicThinking {
+	if !t.IsThinkingEnabled() {
+		return nil
+	}
+	return &anthropicThinking{
+		Type:         "enabled",
+		BudgetTokens: t.BudgetTokens,
+	}
+}
+
 func toAnthropicTools(tools []LLMTool) []anthropicTool {
 	if len(tools) == 0 {
 		return nil
@@ -528,10 +591,23 @@ func fromAnthropicResponse(r *anthropicResp) *LLMResp {
 	msg := LLMMessage{Role: store.RoleAssistant}
 	var text strings.Builder
 	var calls []LLMToolCall
+	var thinkingText strings.Builder // [新增] 收集 thinking 内容
+	var thinkingSig string           // [新增] thinking 块签名（回传时必需）
+
 	for _, b := range r.Content {
 		switch b.Type {
 		case "text":
 			text.WriteString(b.Text)
+		case "thinking": // [新增] 处理 thinking 块
+			// 字段名是 thinking，不是 text。interleaved thinking 下可能有多块，累加。
+			thinkingText.WriteString(b.Thinking)
+			if b.Signature != "" {
+				thinkingSig = b.Signature
+			}
+		case "redacted_thinking": // 加密思考块：正文不可见，只有签名要回传
+			if b.Signature != "" {
+				thinkingSig = b.Signature
+			}
 		case "tool_use":
 			args := "{}"
 			if len(b.Input) > 0 {
@@ -555,9 +631,12 @@ func fromAnthropicResponse(r *anthropicResp) *LLMResp {
 		finish = FinishReasonToolCalls
 	}
 	return &LLMResp{
-		ID:     r.ID,
-		Model:  r.Model,
-		Object: "chat.completion",
+		ID:       r.ID,
+		Model:    r.Model,
+		Object:   "chat.completion",
+		Thinking: thinkingText.String(), // [新增] 思考内容
+		// 签名必须与正文一起带出去：主循环要把它落到消息上，下一轮回传。
+		ThinkingSignature: thinkingSig,
 		Choices: []LLMChoice{{
 			FinishReason: finish,
 			Message:      msg,
@@ -663,7 +742,7 @@ func CallAnthropic(ctx context.Context, url, token string, req *LLMReq) (*LLMRes
 // CallAnthropicStream 以 SSE 方式调用 Anthropic Messages 协议。
 // 文本分片实时回调 onContent；tool_use 的 input_json_delta 分片按 index 聚合，
 // 流结束后一次性返回完整 LLMResp，使主循环无需感知协议差异。
-func CallAnthropicStream(ctx context.Context, url, token string, req *LLMReq, onContent func(string)) (*LLMResp, error) {
+func CallAnthropicStream(ctx context.Context, url, token string, req *LLMReq, onContent, onThinking func(string)) (*LLMResp, error) {
 	areq := ToAnthropicRequest(req)
 	areq.Stream = true
 	logAnthropicImageShape(areq)
@@ -701,6 +780,9 @@ func CallAnthropicStream(ctx context.Context, url, token string, req *LLMReq, on
 		tcOrder    []int
 		tcByIdx    = map[int]*LLMToolCall{}
 		tcArgs     = map[int]*strings.Builder{}
+		// thinking 流式：正文分片累加，签名在 signature_delta 里整块给出。
+		thinking strings.Builder
+		thinkSig string
 	)
 
 	type anthropicStreamEvent struct {
@@ -789,6 +871,22 @@ func CallAnthropicStream(ctx context.Context, url, token string, req *LLMReq, on
 						onContent(ev.Delta.Text)
 					}
 				}
+			case "thinking_delta":
+				// 思考正文分片。**不**走 onContent——思考过程不该混进正文气泡里，
+				// 前端有独立的思考展示位。这里走 onThinking 让它边生成边显示：
+				// 只累加不回调的话，思考要等整轮结束才由 ChatResult.Thinking 一次性补上，
+				// 用户在模型"想"的这几十秒里看不到任何东西。
+				if ev.Delta.Thinking != "" {
+					thinking.WriteString(ev.Delta.Thinking)
+					if onThinking != nil {
+						onThinking(ev.Delta.Thinking)
+					}
+				}
+			case "signature_delta":
+				// 签名整块一次给出（在 thinking 块结束时）。回传时必需，见 ToAnthropicRequest。
+				if ev.Delta.Signature != "" {
+					thinkSig = ev.Delta.Signature
+				}
 			case "input_json_delta":
 				if b, ok := tcArgs[ev.Index]; ok {
 					b.WriteString(ev.Delta.PartialJSON)
@@ -851,5 +949,9 @@ func CallAnthropicStream(ctx context.Context, url, token string, req *LLMReq, on
 		Object:  "chat.completion",
 		Choices: []LLMChoice{{FinishReason: finish, Message: msg}},
 		Usage:   out,
+		// 流式路径此前完全不解析 thinking（旧代码只认 text_delta），
+		// 而主循环默认走流式——于是"开了 thinking 却一个字都没记下来"。
+		Thinking:          thinking.String(),
+		ThinkingSignature: thinkSig,
 	}, nil
 }

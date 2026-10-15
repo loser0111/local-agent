@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import { getDiffTurns, listCheckpoints, undoDiffTurn } from '@/api/session'
+import { onDiffUpdated } from '@/api/eventbus'
 import { useSessionStore } from '@/stores/session'
 
 /**
@@ -147,6 +148,10 @@ export const useDiffStore = defineStore('diff', () => {
     if (!sessionId) return
     activeTurnBySession.value = { ...activeTurnBySession.value, [sessionId]: t }
   }
+
+  // 进程级常驻订阅 diff:update：不绑任何组件生命周期。前端只有这一处消费，
+  // 且事件总线按进程只注册一次，切走界面/组件销毁都不影响接收。
+  onDiffUpdated((payload) => applyUpdate(payload))
 
   /** 清空某会话的差异视图（删会话时调用；不传则清当前会话） */
   function clear(sessionId = currentId.value) {

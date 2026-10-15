@@ -60,10 +60,16 @@ func (e *SubagentEnforcer) Enforce(ctx context.Context, t tool.ToolInterface, ar
 	}
 
 	subject, verdict, callErr := e.parent.Decide(t, args)
-	e.parent.RecordVerdict(subject, verdict)
 	if callErr != nil {
 		// 调用错误（如命令为空）直接回给模型改，它不是权限结论
+		e.parent.RecordVerdict(subject, verdict)
 		return callErr
+	}
+	// ask 路径**不在这里记原始结论**：子代理根本不弹窗，记一条 decision=ask 会让人
+	// 以为授权请求发出过。它下面会被降级成一条 subagent-declined，只记那条。
+	// 其余路径（allow / deny）就是最终结论，照记。
+	if verdict.Decision != permission.DecisionAsk {
+		e.parent.RecordVerdict(subject, verdict)
 	}
 
 	switch verdict.Decision {
@@ -127,6 +133,14 @@ type SubagentResult struct {
 	ToolCalls int      `json:"toolCalls"`
 	Declined  []string `json:"declined,omitempty"` // 因需要授权而被挡下的操作
 	Error     string   `json:"error,omitempty"`
+
+	// Truncated 本次运行**因轮次预算用尽**而结束（不是失败）。
+	//
+	// 为什么单独一个字段而不是把它算进 Status：轮次用尽时子代理往往已经做完大部分工作，
+	// 结论（收尾调用产出的那份）是可用的——把它记成 failed 会让父会话以为"什么都没做成"
+	// 而重做一遍。Status 仍是 completed，Truncated 只补充说明"结论可能不完整"。
+	// 主会话据此可以决定是否追加一轮更聚焦的派生。
+	Truncated bool `json:"truncated,omitempty"`
 }
 
 // DelegatedPaths 子代理改过、而父会话在派生之前没碰过的路径。

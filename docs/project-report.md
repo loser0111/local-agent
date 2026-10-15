@@ -1,5 +1,15 @@
 ﻿# local-agent 项目分析报告
 
+> **[已过时 · 仅作历史快照]** 本文写于项目早期，描述的是当时的代码形态。此后项目已大幅演进，**下文多处与现状不符**，请勿据此评估当前实现：
+> - 代码已按域拆包到 `internal/*`（`internal/app` / `internal/llm` / `internal/store` / `internal/agent` / `internal/permission` / `internal/tool` / `internal/diff` / `internal/snapshot` / `internal/skill` / `internal/memory` 等），根目录仅留 `main.go`；下文「目录与文件结构」里的 `app.go` / `chat.go` / `tools.go` 顶层路径已不存在。
+> - 工具早已不只暴露元工具：`read_file`/`write_file`/`edit_file`/`glob`/`grep`/`list_dir`/`exec_shell` 等直出给模型（见 `internal/tool/names.go` 的 `DirectToolOrder`），其余经 `tool_router` 发现。
+> - 「非流式调用」已不成立：现已支持 SSE 流式 + 扩展思考（thinking）流式展示。
+> - `MaxChatTurns` 现为 200（`internal/app/chat.go:43`），非 50。
+> - 下文「七、观察与建议」中的建议（权限白名单/确认、SSE 流式）**均已实现**；README 也已重写，不再是模板默认内容。
+> - 另：文中「项目路径 `E:\learn\local-agent`」是当时的 Windows 工作副本；当前工作区在 macOS（`/Users/temptrip/external/local-agent`）。
+>
+> 需要当前的实现盘点，请以 `docs/` 下带「实施记录/实施状态」的文档与代码为准。
+
 > 项目路径：E:\learn\local-agent
 > 技术栈：Go 1.25 + Wails v2.15 + Vue（前端模板）
 > 报告类型：源代码结构与功能分析
@@ -14,11 +24,11 @@ local-agent 是一个基于 Wails 框架构建的本地 AI Agent 桌面应用。
 | --- | --- |
 | main.go | 程序入口，创建 App 并以 1024x768 窗口启动 Wails |
 | app.go | 应用结构体与前端桥接层（模型/会话/对话方法） |
-| models.go | 模型配置的数据结构与 JSON 持久化存储 |
-| sessions.go | 会话数据模型与按文件持久化的会话存储 |
+| internal/store/models.go | 模型配置的数据结构与 JSON 持久化存储 |
+| internal/store/sessions.go | 会话数据模型与按文件持久化的会话存储 |
 | chat.go | LLM 请求/响应结构与多轮工具调用对话流程 |
 | tools.go | 工具接口、CLI 工具、元工具路由器与工具管理器 |
-| models_test.go / sessions_test.go | 单元测试 |
+| internal/store/models_test.go / internal/store/sessions_test.go | 单元测试 |
 | frontend/ | Vue 前端工程（Wails 模板） |
 | docs/ | 设计研究文档（claude-code-ui-research.md、frontend-design.md） |
 | wails.json | Wails 构建配置 |
@@ -30,11 +40,11 @@ local-agent 是一个基于 Wails 框架构建的本地 AI Agent 桌面应用。
 - startup 初始化用户目录下的 ~/.local-agent/，创建 models.json 与 sessions 目录。
 - 向前端暴露的方法：模型管理（GetModels/AddModel/DeleteModel 等）、会话管理（CreateSession/ListSessions/AppendMessage 等）、对话能力（Chat）。
 
-### 2. models.go — 模型配置存储
+### 2. internal/store/models.go — 模型配置存储
 - Model 字段：Name、Alias、ModelID、APIKey、URL。
 - ModelStore：基于 JSON 文件持久化，使用 sync.RWMutex 保证并发安全，增删查时带失败回滚。
 
-### 3. sessions.go — 会话存储
+### 3. internal/store/sessions.go — 会话存储
 - 数据结构：Session、Message、ToolCall、Conversation。
 - SessionStore：每个会话一个 JSON 文件；支持追加消息、更新元数据、按最近活跃倒序列表。
 - 首条用户消息自动作为会话标题（截断 30 字）。

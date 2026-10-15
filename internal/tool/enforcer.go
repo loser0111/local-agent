@@ -31,6 +31,18 @@ func (DenyAllEnforcer) Enforce(context.Context, ToolInterface, map[string]interf
 	return fmt.Errorf("权限网关未装配，已拒绝执行（fail closed）")
 }
 
+// PreDecider 网关可选实现的「只判定、不等待」入口，用于**执行前预检**。
+//
+// 目前唯一的用途：一轮里有多个 tool_call 时，判断"这次调用会不会弹授权窗"。
+// 需要弹窗的调用必须退回串行——前端一个会话只有**一个**挂起授权槽位
+// （见 frontend/src/stores/permissions.js 的 pendingBySession），并发弹两个会互相覆盖，
+// 前一个白等到超时。网关不实现本接口时视为"不会弹窗"（如子代理的自动拒绝网关、
+// 测试用的放行网关），并发因此不被无谓地挡住。
+type PreDecider interface {
+	// WouldAsk 这次调用是否需要向用户询问。实现方只判定，不得产生审计之外的副作用。
+	WouldAsk(t ToolInterface, args map[string]interface{}) bool
+}
+
 // GuardedTool 把工具包一层权限网关。
 // 装饰发生在 registry 装配期，因此 tool_router 的分发路径与直调路径都会经过同一个网关，
 // 不存在"某条路径忘了判定"的可能。
@@ -97,4 +109,65 @@ func (g *GuardedTool) JSONSchema() json.RawMessage {
 		return sp.JSONSchema()
 	}
 	return nil
+}
+
+// WouldAsk 透传内层网关的预检能力（见 PreDecider）。
+//
+// 与 RequiredParams / JSONSchema 同一个理由必须转发：工具循环拿到的是**装饰后**的
+// GuardedTool，不做这层转发，`t.(PreDecider)` 断言就会失败，预检退化成"从不询问"，
+// 于是需要授权的调用会被错误地放进并行组——正是要避免的那种并发弹窗。
+// 内层网关不实现 PreDecider 时返回 false（不弹窗）。
+func (g *GuardedTool) WouldAsk(args map[string]interface{}) bool {
+	if g.enf == nil {
+		return false
+	}
+	if pd, ok := g.enf.(PreDecider); ok {
+		return pd.WouldAsk(g.inner, args)
+	}
+	return false
+}
+
+// parallelSafeTools 可以与其他调用**并发执行**的内置只读工具。
+//
+// 判据（两条都要满足）：
+//  1. 不写工作区——因此不需要工具循环那套"调用前后各扫一次工作区"的归因窗口
+//     （见 diff.DiffService.NoteActivity），也不会与并发写操作互相踩；
+//  2. 不产生需要串行化的副作用——**read_image 刻意不在其中**：它是只读的，
+//     但它产出的图要经共用的 ImageCollector 取走，"执行一次、取一次"是串行假设
+//     （见 media.ImageCollector 的说明）。把它留在串行组，代价可忽略（通常单次调用），
+//     换来的是图片归因永远准确。
+//
+// 需要授权的调用即使工具本身只读（如用户配了 deny/ask 规则）也会退回串行——
+// 由调用方经 PreDecider 判定，见 runToolLoop。
+var parallelSafeTools = map[string]bool{
+	ToolReadFile:  true,
+	ToolGlob:      true,
+	ToolGrep:      true,
+	ToolListDir:   true,
+	ToolWebSearch: true,
+}
+
+// ParallelSafe 该工具是否可以并发执行（工具维度，不含权限判定）。
+func (g *GuardedTool) ParallelSafe() bool {
+	return parallelSafeTools[g.inner.GetName()]
+}
+
+// ParallelSafeTool 由工具视图对外回答"这次调用能否并发"：
+// 工具本身要属于并行安全集合，且本次调用**不需要**询问用户。
+//
+// 第二个条件必须在这里一并回答，而不是让调用方分别问：它依赖装饰器内层的网关，
+// 调用方（工具循环）手上只有 SessionView，拿不到网关。
+func (v *SessionView) ParallelSafeTool(name string, args map[string]interface{}) bool {
+	if v == nil {
+		return false
+	}
+	t, ok := v.nonMeta[name]
+	if !ok {
+		return false // 未找到 / tool_router：一律串行
+	}
+	g, ok := t.(*GuardedTool)
+	if !ok || !g.ParallelSafe() {
+		return false
+	}
+	return !g.WouldAsk(args)
 }

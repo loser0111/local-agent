@@ -25,7 +25,8 @@ import {
   SaveAttachment,
   GetAttachmentDataURL,
   FetchImageURL,
-} from '@/../wailsjs/go/main/App'
+  OpenExternalURL,
+} from '@/../wailsjs/go/app/App'
 import { EventsOn, EventsOff } from '@/../wailsjs/runtime/runtime'
 import { subscribeChat } from '@/api/eventbus'
 import { putMockPlan } from '@/api/plan'
@@ -35,7 +36,7 @@ import { DEFAULT_VIEW_MODE } from '@/types'
  * 判断是否运行在 Wails 桌面环境
  */
 function isWails() {
-  return typeof window !== 'undefined' && window.go && window.go.main && window.go.main.App
+  return typeof window !== 'undefined' && window.go && window.go.app && window.go.app.App
 }
 
 // ===== 浏览器开发模式 mock（localStorage 模拟后端会话文件存储） =====
@@ -212,7 +213,7 @@ export async function updateSession(id, patch) {
  * 后端会持久化所有中间消息（assistant+tool_calls, tool结果, 最终回复）
  * @param {string} sessionId
  * @param {string} query
- * @param {{stream?:boolean, plan?:boolean, onReplyDelta?:Function, onToolCallStart?:Function, onToolCallEnd?:Function, onPlanUpdate?:Function, }} callbacks
+ * @param {{stream?:boolean, plan?:boolean, onReplyDelta?:Function, onThinkingDelta?:Function, onToolCallStart?:Function, onToolCallEnd?:Function, onPlanUpdate?:Function, onTodoUpdate?:Function}} callbacks
  * @returns {Promise<{reply:string, toolCalls?:array, messages?:array, plan?:object, error?:string}>}
  */
 export async function chat(
@@ -222,12 +223,15 @@ export async function chat(
     stream = true,
     plan = false,
     onReplyDelta,
+    onThinkingDelta,
     onToolCallStart,
     onToolCallEnd,
     onPlanUpdate,
+    onTodoUpdate,
     onCancelled,
     onContextCompacted,
     onUsage,
+    onError,
   } = {}
 ) {
   if (isWails()) {
@@ -238,12 +242,15 @@ export async function chat(
     // 现在统一由 api/eventbus.js 做进程级单订阅 + 按 sessionId 路由，详见那里的说明。
     const off = subscribeChat(sessionId, {
       onReplyDelta,
+      onThinkingDelta,
       onToolCallStart,
       onToolCallEnd,
       onPlanUpdate,
+      onTodoUpdate,
       onContextCompacted,
       onUsage,
       onCancelled,
+      onError,
     })
 
     try {
@@ -299,6 +306,16 @@ export async function chat(
 
   const reply = `这是浏览器开发模式的模拟回复。\n\n你说的是："${query}"\n\n在 Wails 桌面环境中，这里会返回真正的 LLM 回复。`
 
+  // 模拟思考分片：与正文分片一样逐段回调（真实环境里来自 thinking_delta 事件）。
+  // 没有它，浏览器开发模式下思考块永远是空的，改前端时没法验证渲染。
+  const mockThinking = `先理解用户问的是「${(query || '').slice(0, 20)}」，\n再组织一段回复。`
+  if (stream && onThinkingDelta) {
+    for (const c of mockThinking.match(/[\s\S]{1,4}/g) || [mockThinking]) {
+      onThinkingDelta(c)
+      await new Promise((r) => setTimeout(r, 20))
+    }
+  }
+
   // 模拟 SSE：把回复切成小分片逐段回调
   if (stream && onReplyDelta) {
     const chunks = reply.match(/[\s\S]{1,6}/g) || [reply]
@@ -335,6 +352,7 @@ export async function chat(
         id: `msg-${now}-3`,
         role: 'assistant',
         content: reply,
+        thinking: mockThinking,
         createdAt: now + 1,
       },
     ],
@@ -727,4 +745,36 @@ export function onSubagentEvent(cb) {
   if (!isWails()) return () => {}
   EventsOn('subagent:event', cb)
   return () => EventsOff('subagent:event')
+}
+
+/**
+ * 用系统默认浏览器打开一个外部链接。
+ *
+ * **为什么不能直接用 `<a target="_blank">`**：Wails 的 WebView 不处理它——
+ * 既不会唤起系统浏览器，也不会在应用内开新窗口，而是**静默失败**（点了没反应）。
+ * 打开外部链接必须由 Go 侧调 `runtime.BrowserOpenURL`，所以这里转一道。
+ *
+ * 浏览器开发模式（`npm run dev`，非 Wails 环境）下退回 `window.open`，
+ * 否则本地调试时链接也点不动。
+ *
+ * 失败只记日志、不抛出：调用点是点击处理器，抛出去没人接，
+ * 反而会在控制台留一条未捕获的 Promise 警告。
+ *
+ * @param {string} url 目标链接（后端只放行 http/https）
+ */
+export async function openExternalURL(url) {
+  const target = String(url || '').trim()
+  if (!target) return
+  // 只处理 http/https：与后端白名单保持一致，锚点（#）等留在页内
+  if (!/^https?:\/\//i.test(target)) return
+
+  if (!isWails()) {
+    window.open(target, '_blank', 'noopener,noreferrer')
+    return
+  }
+  try {
+    await OpenExternalURL(target)
+  } catch (e) {
+    console.warn('[openExternalURL] 打开链接失败:', target, e)
+  }
 }

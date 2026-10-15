@@ -29,10 +29,13 @@ const chatSubs = new Map()
 // "B 的 run 序号比 A 大"完全正常，用一个全局最大值会把 A 的事件全判成陈旧。
 const latestRunBySession = new Map()
 
+// 进程级常驻，三条通道都只在这里 EventsOn 一次，之后永不解绑。
+// （diff:update 也被放在这里注册：它不绑任何组件生命周期，避免"切走界面/组件销毁
+//  时连根拔掉订阅、后台运行的 diff 事件无人接收"——曾导致改了文件面板却没动静。）
 let started = false
 
 function isWails() {
-  return typeof window !== 'undefined' && window.go && window.go.main && window.go.main.App
+  return typeof window !== 'undefined' && window.go && window.go.app && window.go.app.App
 }
 
 /** 解析 `run_<毫秒>_<序号>`；解析不出来返回 null */
@@ -82,6 +85,11 @@ function dispatchChat(ev) {
     case 'reply_delta':
       h.onReplyDelta?.(ev.reply, ev)
       break
+    // 思考分片。与 reply_delta 同属流式增量，但落在界面的另一个区域（思考块），
+    // 因此走独立回调：合并到 onReplyDelta 会让思考文字直接混进回答气泡。
+    case 'thinking_delta':
+      h.onThinkingDelta?.(ev.thinking, ev)
+      break
     case 'tool_call_start':
       h.onToolCallStart?.(ev.toolCall, ev)
       break
@@ -90,6 +98,11 @@ function dispatchChat(ev) {
       break
     case 'plan_update':
       h.onPlanUpdate?.(ev.plan, ev)
+      break
+    // 待办清单已变化（事件携带全量清单）。与 plan_update 同属"面板级"事件：
+    // 不依附某一轮，前端按 sessionId 归位到对应会话的桶里。
+    case 'todo_update':
+      h.onTodoUpdate?.(ev.todos, ev)
       break
     // 自动摘要压缩刚生效：用量会立刻下降。这是设计内行为，但用户只看到数字掉了一半，
     // 不解释一句就会以为对话被截断了。
@@ -107,6 +120,11 @@ function dispatchChat(ev) {
     case 'cancelled':
       h.onCancelled?.(ev.error, ev)
       break
+    // 本轮以错误结束（如模型返回空回复）。与 cancelled 同理：必须立刻收尾流式气泡，
+    // 否则它会永远停在"正在输入"——而这条错误的正文同时经 ChatResult.error 返回。
+    case 'error':
+      h.onError?.(ev.error, ev)
+      break
     // 授权请求 / 模型提问走独立的 user:interaction 通道（由 App.vue 统一订阅），
     // 不在这里分发 —— 否则计划执行等入口会漏（详见 api/interaction.js 的说明）
     default:
@@ -119,6 +137,7 @@ function ensureStarted() {
   if (started || !isWails()) return
   started = true
   EventsOn('chat:event', dispatchChat)
+  EventsOn('diff:update', dispatchDiff)
 }
 
 /**
@@ -128,8 +147,9 @@ function ensureStarted() {
  * 所以按 sessionId 路由是无歧义的。返回退订函数，**只退自己这一份**。
  *
  * @param {string} sessionId
- * @param {object} handlers 见 dispatchChat 的 switch：onReplyDelta / onToolCallStart /
- *   onToolCallEnd / onPlanUpdate / onContextCompacted / onUsage / onCancelled
+ * @param {object} handlers 见 dispatchChat 的 switch：onReplyDelta / onThinkingDelta /
+ *   onToolCallStart / onToolCallEnd / onPlanUpdate / onTodoUpdate / onContextCompacted /
+ *   onUsage / onCancelled
  * @returns {() => void}
  */
 export function subscribeChat(sessionId, handlers = {}) {
@@ -155,6 +175,37 @@ export function belongsTo(ev, sessionId) {
 /** 测试与排障用：当前有哪些会话挂着聊天订阅 */
 export function activeChatSubscriptions() {
   return [...chatSubs.keys()]
+}
+
+// ===== diff:update 通道（常驻订阅，见 ensureStarted）=====
+// 与 chat:event 相同：进程级只 EventsOn 一次，回调分发给所有已注册的消费者。
+// 不绑组件生命周期（ChatPane mount/unmount），切走界面也不会丢事件。
+
+const diffConsumers = new Set()
+
+function dispatchDiff(payload) {
+  if (!payload || !payload.diff) return
+  for (const fn of diffConsumers) {
+    try {
+      fn(payload)
+    } catch (e) {
+      console.error('[事件总线] diff:update 消费异常:', e)
+    }
+  }
+}
+
+/**
+ * 订阅 diff:update 事件（payload: { diff, turn, sessionId, runId }）。
+ * 进程级常驻注册，永不因调用方销毁而连根摘除；返回的退订函数只退自己这一份。
+ * @param {(payload: object) => void} cb
+ * @returns {() => void}
+ */
+export function onDiffUpdated(cb) {
+  ensureStarted()
+  diffConsumers.add(cb)
+  return () => {
+    diffConsumers.delete(cb)
+  }
 }
 
 /** 测试用：清空内部状态（进程级常驻，生产代码不该调用） */

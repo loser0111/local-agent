@@ -204,6 +204,7 @@ const hiddenLabelCount = computed(() => {
   &.running {
     border-color: rgb(var(--color-primary-rgb) / 0.45);
     background-color: rgb(var(--color-primary-rgb) / 0.06);
+    box-shadow: $glow-primary;
   }
 
   &.error {

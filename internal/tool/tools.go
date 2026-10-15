@@ -396,9 +396,10 @@ func (v *SessionView) DirectNames() []string {
 //
 // 必须在**每次 ExecuteToolCtx 之后立刻**调用：一次装配的工具共用同一个收集器，
 // 中间不取走的话，"这两张图是哪一次调用产的"就再也分不出来了。
-// 循环是串行执行 tool_calls 的，所以"执行一次、取一次"能保证归因准确。
+// 循环里**产图工具是串行执行的**（read_image 不在 parallelSafeTools 里），
+// 所以"执行一次、取一次"能保证归因准确。
 func (v *SessionView) TakeImages() []media.Attachment {
-	if v == nil {
+	if v == nil || v.images == nil {
 		return nil
 	}
 	return v.images.Take()
@@ -418,14 +419,17 @@ func (v *SessionView) GetToolsForLLM() []llm.LLMTool {
 			defs = append(defs, llmToolFor(t))
 		}
 	}
-	defs = append(defs, llm.LLMTool{
-		Type: "function",
-		Function: llm.LLMToolDef{
-			Name:        v.meta.GetName(),
-			Description: v.meta.GetDescription(),
-			Parameters:  json.RawMessage(routerToolSchema),
-		},
-	})
+	// 路由器未装配时（收窄后一个工具都不剩）不追加它的定义，避免给模型一个空壳
+	if v.meta != nil {
+		defs = append(defs, llm.LLMTool{
+			Type: "function",
+			Function: llm.LLMToolDef{
+				Name:        v.meta.GetName(),
+				Description: v.meta.GetDescription(),
+				Parameters:  json.RawMessage(routerToolSchema),
+			},
+		})
+	}
 	return defs
 }
 
@@ -449,6 +453,9 @@ func (v *SessionView) ExecuteToolCtx(ctx context.Context, name string, args map[
 		ctx = context.Background()
 	}
 	if name == "tool_router" {
+		if v.meta == nil {
+			return "", fmt.Errorf("未找到工具: %s", name)
+		}
 		return v.meta.Execute(ctx, args)
 	}
 	t, ok := v.nonMeta[name]

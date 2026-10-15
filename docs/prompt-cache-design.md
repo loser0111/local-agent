@@ -14,7 +14,7 @@
 - 两条路径的共同约束只有一句话:**每轮变化的内容必须严格待在最末尾**。
 - 最容易翻车的不是断点,而是**前缀稳定性**:任何对已发出过的内容的非幂等变换,都会让缓存失效且**没有任何报错**。
 - **先做统计、再开缓存**:没有命中率可观测,就无法区分「没生效」「结构不对」「网关不支持」。这与本项目历史上几次静默失败是同一种形状。
-- ⚠️ **一个必须先修的既有缺陷**:`anthropic.go:391/647` 把 `usage.input_tokens` 直接映射成 `PromptTokens`,而 Anthropic 的 `input_tokens` **不含**缓存读写部分。一旦开启缓存,这个锚点会严重偏小 → 上下文占比被低估 → 压缩阈值 70% 该触发时不触发 → 撞 API 超限。详见 §5.6。
+- ⚠️ **一个必须先修的既有缺陷**:`internal/llm/anthropic.go:391/647` 把 `usage.input_tokens` 直接映射成 `PromptTokens`,而 Anthropic 的 `input_tokens` **不含**缓存读写部分。一旦开启缓存,这个锚点会严重偏小 → 上下文占比被低估 → 压缩阈值 70% 该触发时不触发 → 撞 API 超限。详见 §5.6。
 
 ---
 
@@ -22,22 +22,22 @@
 
 | 位置 | 现状 |
 |---|---|
-| `anthropic.go:89` `anthropicReq.System` | **`string`** —— 无法承载 `cache_control`(Anthropic 要求 system 为 block 数组) |
-| `anthropic.go:104` `anthropicTool` | 无 `cache_control` 字段 |
-| `anthropic.go:112` `anthropicContentBlock` | 无 `cache_control` 字段 |
-| `anthropic.go:172` `toAnthropicRequest` | 把多条 system 消息 `strings.Join(systemParts, "\n\n")` 合成一个字符串 |
-| `anthropic.go:300` `toAnthropicTools` | 每轮全量转换工具 schema,无断点 |
-| `anthropic.go:157` `anthropicUsage` | 只有 `input_tokens` / `output_tokens`,**无 cache 字段** |
-| `anthropic.go:391` / `:647` | `PromptTokens: r.Usage.InputTokens` —— **语义陷阱**,见 §5.6 |
-| `anthropic.go:24` | `anthropicDefaultMaxTokens = 8192` 对所有模型硬编码 |
+| `internal/llm/anthropic.go:89` `anthropicReq.System` | **`string`** —— 无法承载 `cache_control`(Anthropic 要求 system 为 block 数组) |
+| `internal/llm/anthropic.go:104` `anthropicTool` | 无 `cache_control` 字段 |
+| `internal/llm/anthropic.go:112` `anthropicContentBlock` | 无 `cache_control` 字段 |
+| `internal/llm/anthropic.go:172` `toAnthropicRequest` | 把多条 system 消息 `strings.Join(systemParts, "\n\n")` 合成一个字符串 |
+| `internal/llm/anthropic.go:300` `toAnthropicTools` | 每轮全量转换工具 schema,无断点 |
+| `internal/llm/anthropic.go:157` `anthropicUsage` | 只有 `input_tokens` / `output_tokens`,**无 cache 字段** |
+| `internal/llm/anthropic.go:391` / `:647` | `PromptTokens: r.Usage.InputTokens` —— **语义陷阱**,见 §5.6 |
+| `internal/llm/anthropic.go:24` | `anthropicDefaultMaxTokens = 8192` 对所有模型硬编码 |
 | `chat.go:746` `buildLLMMessages` | **系统提示词作为 messages[0]** —— OpenAI 侧失效的根因 |
 | `chat.go:160` `LLMReq` | 无 `MaxTokens` 字段,OpenAI 路径**完全不发**该参数 |
 | `chat.go:175` `LLMUsage` | 只有 `prompt_tokens` / `completion_tokens`,**不解析 cached_tokens** |
 | `chat.go:830` `buildBasePrompt` | 字符串拼接产出整个系统提示词 |
 | `chat.go:898` `buildBasePromptWithSkill` | 末尾追加「显式技能正文」,再交给 `attachMemoryRecall` |
 | `memoryinject.go:43` `attachMemoryRecall` | L2 召回块**追加在系统提示词末尾,且不落盘** |
-| `filetools.go:42` `directToolOrder` | 注释已写明「固定顺序便于断言与提示缓存」—— 顺序基础已具备 |
-| `contextmgmt.go:281` `applyToolResultBudget` | 用**常量** 24000 截断工具结果(常量 → 幂等,安全) |
+| `internal/tool/filetools.go:42` `directToolOrder` | 注释已写明「固定顺序便于断言与提示缓存」—— 顺序基础已具备 |
+| `internal/agent/contextmgmt.go:281` `applyToolResultBudget` | 用**常量** 24000 截断工具结果(常量 → 幂等,安全) |
 | 前端 `ChatPane.vue:1090` | 上下文指示器,点击**触发压缩**;tooltip 只有 `≈N/M token` |
 | 前端 `RequestPreviewDialog.vue:44` | 请求快照,显示估算值与工具 schema token |
 | 前端 | **无任何用量明细界面** |
@@ -201,7 +201,7 @@ func (a *App) buildBasePromptWithSkill(session *Session, dir, query string) (sys
 
 ⚠️ **计划执行路径是唯一需要动脑的一处,而且本文早先把它写反了。** 原先写的是「`buildPlanSystemPrompt`
 应整体归入 `Stable`,因为它在一次 plan 执行内不变」——**这是错的**:`buildPlanSystemPrompt(base, plan, step)`
-会把**当前计划进度与当前步骤标题/要点**追加到 base 之后(见 `plan.go`),而 `[已完成]/[当前步骤]`
+会把**当前计划进度与当前步骤标题/要点**追加到 base 之后(见 `internal/store/plan.go`),而 `[已完成]/[当前步骤]`
 标记与 `本步任务:…` 是**每步都在变**的。正确的切法是:
 
 ```
@@ -279,7 +279,7 @@ func buildLLMMessages(history []Message, systemPrompt string, loader imageLoader
 
 ### 4.4 顺带修掉 `max_tokens` 缺失
 
-`LLMReq`(`chat.go:160`)没有 `MaxTokens` 字段,OpenAI 路径直接 `json.Marshal(req)` 发出去,实际输出上限完全由网关默认值决定 —— 客户端不可控。这与 `anthropic.go:24` 的 8192 硬编码是同一个问题,改动面完全重合,建议一起把 `MaxTokens` 提到 `LLMReq` / `Model` 上,省得做两遍。
+`LLMReq`(`chat.go:160`)没有 `MaxTokens` 字段,OpenAI 路径直接 `json.Marshal(req)` 发出去,实际输出上限完全由网关默认值决定 —— 客户端不可控。这与 `internal/llm/anthropic.go:24` 的 8192 硬编码是同一个问题,改动面完全重合,建议一起把 `MaxTokens` 提到 `LLMReq` / `Model` 上,省得做两遍。
 
 ---
 
@@ -429,7 +429,7 @@ func (t UsageTotals) CacheHitRate() float64 { /* 同上 */ }
 
 ### 5.6 ⚠️ 必须先修的既有缺陷:`tokenAnchor` 语义
 
-`anthropic.go:391` 与 `:647` 现在这样映射:
+`internal/llm/anthropic.go:391` 与 `:647` 现在这样映射:
 
 ```go
 PromptTokens:     r.Usage.InputTokens,   // ← 开缓存后这里会变成"只有未命中部分"
@@ -457,7 +457,7 @@ if resp.Usage.PromptTokens > 0 {
 
 ### 5.7 落盘与接口
 
-- `Session` 增加 `UsageTotals` 字段(随 `sessions.go` 现有的整份覆盖写一起落盘)。
+- `Session` 增加 `UsageTotals` 字段(随 `internal/store/sessions.go` 现有的整份覆盖写一起落盘)。
 - 保留 `GetContextStat(sessionID)` 作为**轻量高频**接口(切会话即拉,服务于指示器),新增独立的 `GetUsageDetail(sessionID) UsageDetail` 供弹窗按需拉取 —— 不要把明细塞进 `ContextStat`,那会拖慢每次切会话。
 - 每轮 LLM 响应后 `emitChatEvent` 一个 `chat:usage` 事件,带上本轮 `TokenUsage` 与会话累计,让开着的弹窗实时更新。
 
@@ -722,7 +722,7 @@ system + tools 合计需达到最小 token 数(约 1024,部分模型 2048)才真
 - **不做自动 TTL 探测**。5 分钟 vs 1 小时的取舍是用户场景问题,不是能自动推断的。
 - **不给每条历史消息打断点**。上限 4 个,且 P1 与 P3 内容有重叠,过多断点会让写入费用翻倍。
 - **不做美元成本估算**。需要维护一份跨厂商、跨时期的单价表,且各家改价频繁(见 §8 的 TTL 变更);一旦表过期,展示的数字比没有更糟。本期只做 token 与「相对倍数」,倍数不依赖绝对价格。
-- **不重构压缩策略**。缓存与压缩互补而非替代,本次只加 §10.1 的稳定性注释,不碰 `contextmgmt.go` 的压缩逻辑。
+- **不重构压缩策略**。缓存与压缩互补而非替代,本次只加 §10.1 的稳定性注释,不碰 `internal/agent/contextmgmt.go` 的压缩逻辑。
 - **不为缓存调整系统提示词内容**。只调整**装配顺序**,不改写文案 —— 文案变更应走独立的提示词迭代流程,否则会混淆「缓存没生效」和「提示词改了」两类回归。
 
 
@@ -761,7 +761,7 @@ system + tools 合计需达到最小 token 数(约 1024,部分模型 2048)才真
 - `UsageDialog.vue`：五个分区（本轮 / 缓存 / 会话累计 / 上下文构成 / 估算可信度）+ 原始 usage 折叠区。打开时向后端拉完整明细，运行期间由 `live` 事件按**轮次**（不是时间戳——前后端时钟不同源）增量刷新。
 - `ChatPane.vue`：指示器点击改为打开明细；压缩挪成独立的「压缩」按钮；新增**缓存状态点**（未启用时不渲染——显示灰点会让人误以为「开了但没命中」）。
 - `eventbus` / `chat()` / `chatStore` 三处打通 `onUsage`；`format.js` 新增 `formatTokens` / `formatPercent`。
-- `wailsjs/go/main/App.js` 与 `App.d.ts` **手工同步**（生成器在本环境跑不了）。
+- `wailsjs/go/app/App.js` 与 `App.d.ts` **手工同步**（生成器在本环境跑不了）。
 
 ### 尚未做
 

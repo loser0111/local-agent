@@ -6,7 +6,8 @@ import { usePaneStore } from '@/stores/pane'
 import { useDiffStore } from '@/stores/diff'
 import { useSettingStore } from '@/stores/setting'
 import { usePlanStore } from '@/stores/plan'
-import { appendMessage, appendConversation, chat, stopChat, getContextStat, onDiffUpdate, saveAttachment, fetchImageURL, getAttachmentDataURL } from '@/api/session'
+import { useTodoStore } from '@/stores/todo'
+import { appendMessage, appendConversation, chat, stopChat, getContextStat, saveAttachment, fetchImageURL, getAttachmentDataURL } from '@/api/session'
 import { fetchPendingInteraction } from '@/api/interaction'
 import { DEFAULT_VIEW_MODE } from '@/types'
 import { usePermissionStore } from '@/stores/permissions'
@@ -25,6 +26,7 @@ const paneStore = usePaneStore()
 const diffStore = useDiffStore()
 const settingStore = useSettingStore()
 const planStore = usePlanStore()
+const todoStore = useTodoStore()
 const permissionStore = usePermissionStore()
 const askStore = useAskStore()
 const skillsStore = useSkillsStore()
@@ -113,15 +115,13 @@ function requestCompact() {
 }
 const plan = computed(() => planStore.plan)
 
-// 订阅后端 diff 实时推送（有文件改动时刷新差异数据）
-let offDiff = null
+// diff:update 的消费已收口到 diff store 的进程级常驻订阅（见 stores/diff.js），
+// 不再绑 ChatPane 生命周期：切走界面也不会丢事件。
 onMounted(() => {
-  offDiff = onDiffUpdate((payload) => diffStore.applyUpdate(payload))
   // 「/技能名」补全需要技能清单；加载失败不影响正常聊天
   skillsStore.load().catch(() => {})
 })
 onUnmounted(() => {
-  if (offDiff) offDiff()
   stopInteractionPolling()
   // 还没发出去的图片预览用的是 object URL，组件销毁时要还回去，否则这一份内存不释放
   clearPendingFiles()
@@ -621,6 +621,7 @@ async function sendMessage() {
         stream: false, // 规划器固定非流式；免计划直答取完整回复
         plan: true,
         onPlanUpdate: (p) => planStore.applyUpdate(sid, p),
+        onTodoUpdate: (items) => todoStore.setTodos(sid, items),
       })
       updateContextStat(sid, result?.context)
       if (result?.plan) {
@@ -672,12 +673,21 @@ async function sendMessage() {
       onReplyDelta: (chunk) => {
         chatStore.appendStreamContent(sid, localMsg.id, chunk)
       },
+      // 思考分片：边生成边写进占位消息的 thinking 字段，由 MessageBubble 实时渲染。
+      // 后端同时会在整轮结束时用持久化消息替换占位（含完整 thinking），两者一致。
+      onThinkingDelta: (chunk) => {
+        chatStore.appendStreamThinking(sid, localMsg.id, chunk)
+      },
       onToolCallStart: (tc) => {
         chatStore.addToolCall(sid, localMsg.id, tc)
         // 派生子代理时自动打开子代理面板：子代理的中间过程不在聊天流里（它跑在自己
         // 独立的上下文里，只有结论会回到聊天），不打开面板用户就完全看不到它在做什么。
         // 同样走后台打开：右侧收起时不强行铺开，图标会出现在窄条上。
         if (tc?.name === 'spawn_agent') paneStore.openPaneBackground(sid, 'subagent')
+        // todo 工具第一次被调用时打开待办面板：清单是"长任务做到哪了"的对外窗口，
+        // 模型一建清单用户就该看得到（否则清单只存在于模型与上下文里）。
+        // 同样不强行铺开——收起时面板以图标出现在窄条上，也是一种可见的提示。
+        if (tc?.name === 'todo') paneStore.openPaneBackground(sid, 'todo')
       },
       onToolCallEnd: (tc) => {
         chatStore.updateToolCall(sid, localMsg.id, tc.id, {
@@ -707,12 +717,18 @@ async function sendMessage() {
       onCancelled: () => {
         chatStore.updateLocalMessage(sid, localMsg.id, { streaming: false })
       },
+      // 本轮以错误结束（如模型返回空回复）：同样立刻收尾流式气泡，
+      // 否则它会一直转圈。可读原因同时经 result.error 落成一条错误消息（见下方第 6 步）。
+      onError: () => {
+        chatStore.updateLocalMessage(sid, localMsg.id, { streaming: false })
+      },
       // 本轮 token 用量已产生：推进 store，供「用量明细」弹窗与缓存状态点使用。
       // 与 result.context 分开——那个是"上下文还剩多少空间"，这个是"已经花了多少"，
       // 后者每轮模型调用就会产生（一轮里可能有多次请求），不能等整轮结束。
       onUsage: (ev) => {
         chatStore.setUsage(sid, ev)
       },
+      onTodoUpdate: (items) => todoStore.setTodos(sid, items),
     })
     updateContextStat(sid, result?.context)
 
@@ -765,7 +781,7 @@ async function sendMessage() {
     try {
       const changed = await diffStore.load(sid)
       // 后台自动打开：收起状态下不强行铺开（图标出现在窄条上）
-      if (changed > 0) paneStore.openPaneBackground(sid, 'diff')
+      if (changed > 0) paneStore.openPaneBackground(sid, 'diff', true)
     } catch (diffErr) {
       console.warn('加载 diff 失败:', diffErr)
     }
@@ -977,6 +993,18 @@ function openDiff() {
     paneStore.openPane(sessionId.value, 'diff')
   }
 }
+
+function openTodo() {
+  if (sessionId.value) {
+    paneStore.openPane(sessionId.value, 'todo')
+  }
+}
+
+function openTasks() {
+  if (sessionId.value) {
+    paneStore.openPane(sessionId.value, 'tasks')
+  }
+}
 </script>
 
 <template>
@@ -1121,6 +1149,32 @@ function openDiff() {
           计划
         </button>
         <button
+          class="tool-btn todo-btn"
+          :class="{ active: todoStore.todosOf(sessionId).length > 0 }"
+          :disabled="!sessionId"
+          title="待办清单：模型在多步骤任务里列出的步骤与进度"
+          @click="openTodo"
+        >
+          <svg width="15" height="15" viewBox="0 0 16 16" fill="none">
+            <path d="M3 4.5l1.2 1.2L6.5 3.4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" />
+            <path d="M3 9.5l1.2 1.2 2.3-2.3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" />
+            <path d="M9 5h4M9 10h4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" />
+          </svg>
+          待办
+        </button>
+        <button
+          class="tool-btn"
+          :disabled="!sessionId"
+          title="定时任务：一次性提醒、间隔执行、计划任务（Reminder / Interval / Cron）"
+          @click="openTasks"
+        >
+          <svg width="15" height="15" viewBox="0 0 16 16" fill="none">
+            <circle cx="8" cy="8" r="6" stroke="currentColor" stroke-width="1.3" />
+            <path d="M8 4.5V8l2.5 1.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" />
+          </svg>
+          任务
+        </button>
+        <button
           class="tool-btn"
           :disabled="!sessionId"
           title="查看实际发给模型的 message 列表（压缩与工具结果预算之后的那一份）"
@@ -1232,6 +1286,18 @@ function openDiff() {
   display: flex;
   gap: $space-md;
   padding: 6px $space-lg;
+  animation: msg-in 0.3s ease;
+}
+
+@keyframes msg-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 .process-row-body {
@@ -1277,14 +1343,20 @@ function openDiff() {
   text-align: center;
 
   .welcome-icon {
-    font-size: 48px;
+    font-size: 56px;
     margin-bottom: $space-lg;
+    filter: drop-shadow(0 2px 8px rgb(var(--color-primary-rgb) / 0.3));
+    animation: welcome-float 3s ease-in-out infinite;
   }
 
   h2 {
     font-size: $font-size-xl;
     font-weight: $font-weight-bold;
     margin-bottom: $space-sm;
+    background: linear-gradient(135deg, $color-text-primary 0%, $color-text-secondary 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
   }
 
   p {
@@ -1294,11 +1366,21 @@ function openDiff() {
   }
 }
 
+@keyframes welcome-float {
+  0%, 100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-6px);
+  }
+}
+
 .quick-actions {
   display: flex;
   flex-wrap: wrap;
   gap: $space-sm;
   justify-content: center;
+  max-width: 480px;
 }
 
 .quick-btn {
@@ -1308,18 +1390,25 @@ function openDiff() {
   border: 1px solid $color-border;
   border-radius: $radius-md;
   color: $color-text-primary;
-  transition: all $transition-fast;
+  transition: all $transition-normal;
 
   &:hover {
     border-color: $color-primary;
     background-color: rgb(var(--color-primary-rgb) / 0.1);
+    box-shadow: $glow-primary;
+    transform: translateY(-1px);
+  }
+
+  &:active {
+    transform: translateY(0);
   }
 }
 
 .prompt-box {
   position: relative;
   border-top: 1px solid $color-border;
-  background-color: $color-bg-secondary;
+  background: $glass-bg;
+  backdrop-filter: blur($glass-blur);
   padding: $space-md;
 }
 
@@ -1586,5 +1675,13 @@ function openDiff() {
 
 .send-btn {
   min-width: 64px;
+
+  &:not(:disabled):hover {
+    box-shadow: $glow-primary;
+  }
+
+  &:not(:disabled):active {
+    transform: scale(0.97);
+  }
 }
 </style>
