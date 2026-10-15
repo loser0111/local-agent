@@ -137,6 +137,8 @@ export function ListTasks():Promise<Array<plugin.TaskView>>;
 
 export function ListTools():Promise<Array<tool.ToolInfo>>;
 
+export function OpenExternalURL(arg1:string):Promise<void>;
+
 export function PauseAllTasks(arg1:boolean):Promise<void>;
 
 export function PickDirectory():Promise<string>;

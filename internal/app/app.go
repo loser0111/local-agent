@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -601,6 +602,43 @@ func (a *App) PickSkillZip() (string, error) {
 	return wailsRuntime.OpenFileDialog(a.ctx, wailsRuntime.OpenDialogOptions{
 		Title: "选择技能压缩包",
 	})
+}
+
+// OpenExternalURL 用系统默认浏览器打开一个外部链接。
+//
+// **为什么必须由后端来做**：Wails 的 WebView 不处理 `target="_blank"`——
+// 它既不会唤起系统浏览器，也不会在应用内开新窗口（未注册新窗口处理器时是**静默失败**，
+// 表现为"点了没反应"）。打开外部链接是宿主进程的能力，只能由 Go 侧调 runtime 完成。
+//
+// **安全约束**：只放行 http / https。
+// 聊天内容来自模型输出与用户输入，属于不可信内容；若不校验 scheme，
+// `file:///etc/passwd`、`javascript:`、以及各家自定义 scheme（如 `x-app://`）
+// 都会被原样交给操作系统去处理——那等于把"点一下就在本机触发动作"的能力交出去。
+// 白名单而非黑名单：未知 scheme 一律拒绝，新增危险 scheme 时不会漏。
+func (a *App) OpenExternalURL(rawURL string) error {
+	raw := strings.TrimSpace(rawURL)
+	if raw == "" {
+		return fmt.Errorf("链接为空")
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("链接格式无效: %w", err)
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "http", "https":
+		// 放行
+	default:
+		return fmt.Errorf("只允许打开 http/https 链接，实际为 %q", u.Scheme)
+	}
+	if strings.TrimSpace(u.Host) == "" {
+		return fmt.Errorf("链接缺少主机名: %q", raw)
+	}
+	if !a.HasUI() {
+		// 无界面（无头测试）时不做任何事，也不报错——它不是错误，只是没有浏览器可开
+		return nil
+	}
+	wailsRuntime.BrowserOpenURL(a.ctx, u.String())
+	return nil
 }
 
 // enabledSkillsForSession 按会话白名单过滤技能；白名单为空=全部技能

@@ -2,6 +2,7 @@
 import { computed, ref, watch } from 'vue'
 import { formatClock } from '@/utils/format'
 import { renderMarkdown } from '@/utils/markdown'
+import { useExternalLink } from '@/utils/useExternalLink'
 import { useSessionStore } from '@/stores/session'
 import { useChatStore } from '@/stores/chat'
 
@@ -11,6 +12,9 @@ const props = defineProps({
 
 const sessionStore = useSessionStore()
 const chatStore = useChatStore()
+
+// v-html 里的链接要经后端唤起系统浏览器（WebView 不处理 target="_blank"，见该 composable）
+const onContentClick = useExternalLink()
 
 const isUser = computed(() => props.message.role === 'user')
 const isSystem = computed(() => props.message.role === 'system')
@@ -142,7 +146,7 @@ function openPreview(id) {
       </div>
 
       <!-- AI 消息：Markdown 渲染 -->
-      <div v-else-if="!isUser && hasContent" class="message-content markdown-body" v-html="renderedHtml"></div>
+      <div v-else-if="!isUser && hasContent" class="message-content markdown-body" v-html="renderedHtml" @click="onContentClick"></div>
 
       <!-- 流式等待光标 -->
       <span v-if="message.streaming && !hasContent" class="cursor">▊</span>

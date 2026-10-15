@@ -25,6 +25,7 @@ import {
   SaveAttachment,
   GetAttachmentDataURL,
   FetchImageURL,
+  OpenExternalURL,
 } from '@/../wailsjs/go/app/App'
 import { EventsOn, EventsOff } from '@/../wailsjs/runtime/runtime'
 import { subscribeChat } from '@/api/eventbus'
@@ -744,4 +745,36 @@ export function onSubagentEvent(cb) {
   if (!isWails()) return () => {}
   EventsOn('subagent:event', cb)
   return () => EventsOff('subagent:event')
+}
+
+/**
+ * 用系统默认浏览器打开一个外部链接。
+ *
+ * **为什么不能直接用 `<a target="_blank">`**：Wails 的 WebView 不处理它——
+ * 既不会唤起系统浏览器，也不会在应用内开新窗口，而是**静默失败**（点了没反应）。
+ * 打开外部链接必须由 Go 侧调 `runtime.BrowserOpenURL`，所以这里转一道。
+ *
+ * 浏览器开发模式（`npm run dev`，非 Wails 环境）下退回 `window.open`，
+ * 否则本地调试时链接也点不动。
+ *
+ * 失败只记日志、不抛出：调用点是点击处理器，抛出去没人接，
+ * 反而会在控制台留一条未捕获的 Promise 警告。
+ *
+ * @param {string} url 目标链接（后端只放行 http/https）
+ */
+export async function openExternalURL(url) {
+  const target = String(url || '').trim()
+  if (!target) return
+  // 只处理 http/https：与后端白名单保持一致，锚点（#）等留在页内
+  if (!/^https?:\/\//i.test(target)) return
+
+  if (!isWails()) {
+    window.open(target, '_blank', 'noopener,noreferrer')
+    return
+  }
+  try {
+    await OpenExternalURL(target)
+  } catch (e) {
+    console.warn('[openExternalURL] 打开链接失败:', target, e)
+  }
 }

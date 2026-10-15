@@ -250,6 +250,10 @@ export function ListTools() {
   return window['go']['app']['App']['ListTools']();
 }
 
+export function OpenExternalURL(arg1) {
+  return window['go']['app']['App']['OpenExternalURL'](arg1);
+}
+
 export function PauseAllTasks(arg1) {
   return window['go']['app']['App']['PauseAllTasks'](arg1);
 }
