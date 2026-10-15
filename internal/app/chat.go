@@ -337,7 +337,9 @@ func appendNote(content, note string) string {
 	return strings.TrimRight(content, "\n") + "\n" + note
 }
 
-// appendToolResultMessages 追加一次工具结果：先文本，再（若有图）一条承载图片的 user 消息。
+// appendToolResultMessages 追加一次工具结果：tool 文本立刻写入 messages；若这次结果带图，
+// 那条承载图片的 user 消息**不进 messages，而是挂到 pending**，等本轮工具消息写完再补
+// （见 appendToolResultImages）。
 //
 // 这个形状由两条协议的硬约束逼出来，所以不能让调用方各写一份：
 //   - OpenAI 的 tool 消息 content 只能是字符串，塞数组会被网关直接拒；
@@ -345,11 +347,25 @@ func appendNote(content, note string) string {
 //     user 回合（见 appendAnthropicMessage）——那条 user 消息于是自动并进 tool_result
 //     所在的那一轮，不会多出一个回合。
 //
+// **为什么图片必须挂起、而不能当场追加**：OpenAI 系（含各家网关）要求 assistant(tool_calls)
+// 之后紧跟**连续**的 tool 消息，且覆盖它声明的每一个 tool_call_id。一轮里若有多个工具调用，
+// 而产出图片的又不是最后一个，图片 user 消息就会插在两条 tool 消息中间——网关只数到它前面
+// 那一条 tool，于是整条请求被拒：
+//
+//	An assistant message with 'tool_calls' must be followed by tool messages
+//	responding to each 'tool_call_id'. (insufficient tool messages following tool_calls message)
+//
+// 它**不在当次报错**：断裂的序列已经落库，之后每次从历史重建请求都会被拒，那个会话就再也
+// 发不出消息了。触发条件很窄（多工具调用 + 产图的不是最后一个），所以真机上看起来像"偶发
+// 失败"，实际是"这个会话从此废掉"。所以图片一律先挂起，由调用方在本轮最后一条工具结果
+// 写完后补上。
+//
 // **两处必须共用它**：工具循环（运行中刚产生的这条结果）与 buildLLMMessages
 // （下一轮从会话重建的同一批历史）。各写一份的话，第二轮请求里的这条消息就会与
-// 第一轮长得不一样——而人只有在"图片突然不见了"时才会发现。
-func appendToolResultMessages(messages []llm.LLMMessage, toolName, content, toolCallID string,
-	atts []media.Attachment, loader imageLoader) []llm.LLMMessage {
+// 第一轮长得不一样——而人只有在"图片突然不见了"时才会发现。同理，"先挂起、最后补"这件事
+// 两处也必须一致：顺序只要写错一处，断裂的序列就已经落进会话记录了，另一处再对也没用。
+func appendToolResultMessages(messages, pending []llm.LLMMessage, toolName, content, toolCallID string,
+	atts []media.Attachment, loader imageLoader) ([]llm.LLMMessage, []llm.LLMMessage) {
 
 	images, note := resolveImages(loader, atts)
 	if note != "" {
@@ -357,13 +373,25 @@ func appendToolResultMessages(messages []llm.LLMMessage, toolName, content, tool
 	}
 	messages = append(messages, llm.LLMMessage{Role: store.RoleTool, Content: content, ToolCallID: toolCallID})
 	if len(images) > 0 {
-		messages = append(messages, llm.LLMMessage{
+		pending = append(pending, llm.LLMMessage{
 			Role:    store.RoleUser,
 			Content: toolImageNote(toolName),
 			Images:  images,
 		})
 	}
-	return messages
+	return messages, pending
+}
+
+// appendToolResultImages 把挂起的图片 user 消息补到 messages 尾部，返回 (messages, nil)。
+//
+// 调用时机是硬约束：必须在**本轮最后一条 tool 消息之后**（理由见 appendToolResultMessages）。
+// 返回两个值而不是就地改一个变量，是为了让两处调用点长得一模一样——"flushed 之后忘了清空"
+// 这种错会表现为图片重发一遍，而"flush 早了"会表现为整条请求被网关拒绝。
+func appendToolResultImages(messages, pending []llm.LLMMessage) ([]llm.LLMMessage, []llm.LLMMessage) {
+	if len(pending) == 0 {
+		return messages, pending
+	}
+	return append(messages, pending...), nil
 }
 
 // countImages 统计消息序列里一共带了几张图（排障日志用）
@@ -405,8 +433,18 @@ func buildLLMMessages(history []store.Message, systemPrompt string, loader image
 	// 恰恰是模型最需要的上下文，只能从前面那条 assistant(tool_calls) 里反查。
 	toolNames := map[string]string{}
 
+	// 本轮工具结果里"带图的那些"挂在这儿，等这一段连续的 tool 消息走完再补上。
+	// 边收边发会把 assistant(tool_calls) 与 tool 的配对切断（见 appendToolResultMessages）。
+	var pendingImages []llm.LLMMessage
+
 	// 添加历史消息
 	for _, msg := range history {
+		// 一段连续的 tool 消息到头了（本条不是工具结果），先把挂起的图片消息补在它后面。
+		// 放在循环开头而不是"看到 tool 时看下一条"，是为了连"历史以工具结果收尾"也一并覆盖。
+		if msg.Role != store.RoleTool {
+			messages, pendingImages = appendToolResultImages(messages, pendingImages)
+		}
+
 		m := llm.LLMMessage{
 			Role:    msg.Role,
 			Content: msg.Content,
@@ -442,9 +480,9 @@ func buildLLMMessages(history []store.Message, systemPrompt string, loader image
 		}
 
 		if msg.Role == store.RoleTool {
-			// 工具结果（可能带图）固定走同一个追加函数
-			messages = appendToolResultMessages(messages, toolNames[msg.ToolCallID],
-				m.Content, m.ToolCallID, msg.Attachments, loader)
+			// 工具结果（可能带图）固定走同一个追加函数；带图的那条只挂起，下一轮循环开头补
+			messages, pendingImages = appendToolResultMessages(messages, pendingImages,
+				toolNames[msg.ToolCallID], m.Content, m.ToolCallID, msg.Attachments, loader)
 			continue
 		}
 
@@ -455,6 +493,9 @@ func buildLLMMessages(history []store.Message, systemPrompt string, loader image
 		m.Images = images
 		messages = append(messages, m)
 	}
+
+	// 历史以 tool 结果收尾时，上面那次 flush 不会被触发（它挂在"非 tool 消息"上）
+	messages, _ = appendToolResultImages(messages, pendingImages)
 
 	return messages
 }
@@ -964,6 +1005,11 @@ func runToolLoop(ar *agentRun) *ChatResult {
 			})
 
 			// 持久化每个工具结果消息（role=tool, tool_call_id）
+			//
+			// 图片消息**不跟着每条工具结果立刻追加**：一轮里若有多个调用、而产图的不是最后一个，
+			// 它就会插在两条 tool 消息之间，把 assistant(tool_calls) 与 tool 的配对切断。
+			// 见 appendToolResultMessages。
+			var pendingImages []llm.LLMMessage
 			for _, tc := range choice.Message.ToolCalls {
 				// 从执行记录中找到对应结果
 				var toolContent string
@@ -992,9 +1038,11 @@ func runToolLoop(ar *agentRun) *ChatResult {
 				// 同步到内存消息列表。**必须走 appendToolResultMessages**：它与下一轮
 				// 从会话重建出来的那条结果形状完全一致（工具文本 + 承载图片的 user 消息）。
 				// 这里手写一遍的话，本轮与下一轮的请求序列就会不一样。
-				messages = appendToolResultMessages(messages, tc.Function.Name, toolContent, tc.ID,
-					producedByCall[tc.ID], imageLoaderFor(ar.Attachments))
+				messages, pendingImages = appendToolResultMessages(messages, pendingImages,
+					tc.Function.Name, toolContent, tc.ID, producedByCall[tc.ID], imageLoaderFor(ar.Attachments))
 			}
+			// 本轮工具结果全部写完，挂起的图片消息现在才补——顺序与 buildLLMMessages 一致
+			messages, _ = appendToolResultImages(messages, pendingImages)
 
 			// 继续循环，重新调用 LLM（带工具结果）
 			continue
