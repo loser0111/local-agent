@@ -396,7 +396,8 @@ func (v *SessionView) DirectNames() []string {
 //
 // 必须在**每次 ExecuteToolCtx 之后立刻**调用：一次装配的工具共用同一个收集器，
 // 中间不取走的话，"这两张图是哪一次调用产的"就再也分不出来了。
-// 循环是串行执行 tool_calls 的，所以"执行一次、取一次"能保证归因准确。
+// 循环里**产图工具是串行执行的**（read_image 不在 parallelSafeTools 里），
+// 所以"执行一次、取一次"能保证归因准确。
 func (v *SessionView) TakeImages() []media.Attachment {
 	if v == nil || v.images == nil {
 		return nil

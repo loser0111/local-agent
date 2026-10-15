@@ -64,6 +64,26 @@ func (g toolEnforcer) Enforce(ctx context.Context, t tool.ToolInterface, args ma
 	return g.e.Enforce(ctx, t, args)
 }
 
+// WouldAsk 实现 tool.PreDecider：只判定、不等待，回答"这次调用会不会弹授权窗"。
+//
+// 用途只有一个：一轮里有多个 tool_call 时，把"需要用户应答"的调用挡在并行组之外。
+// 前端每个会话只有**一个**挂起授权槽位，并发弹两个会互相覆盖，先到的那个白等到超时——
+// 那是用户可见的故障，必须在派发前就避免。
+//
+// 走的是 Enforcer.Decide（不写审计、不阻塞），因此它**没有副作用**：预检本身不该在
+// 审计里留下一条"询问"——真正执行时 Enforce 会照常记一次。
+func (g toolEnforcer) WouldAsk(t tool.ToolInterface, args map[string]interface{}) bool {
+	if g.e == nil {
+		return true // 拿不准就当作要询问（fail closed：宁可串行）
+	}
+	_, verdict, callErr := g.e.Decide(t, args)
+	if callErr != nil {
+		// 调用错误（如命令为空）不是权限结论，执行时会直接报错、不会弹窗
+		return false
+	}
+	return verdict.Decision == permission.DecisionAsk
+}
+
 // ensurePermissionState 懒初始化权限相关组件（容忍测试里手工构造的 App）
 func (a *App) ensurePermissionState() {
 	if a.permissionGrants == nil {

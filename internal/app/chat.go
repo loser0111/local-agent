@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 	"wails-tmp/internal/agent"
 	"wails-tmp/internal/diff"
@@ -13,6 +14,7 @@ import (
 	"wails-tmp/internal/skill"
 	"wails-tmp/internal/snapshot"
 	"wails-tmp/internal/store"
+	"wails-tmp/internal/tool"
 )
 
 // ChatResult 对话结果（返回给前端）
@@ -925,83 +927,11 @@ func runToolLoop(ar *agentRun) *ChatResult {
 		if choice.FinishReason == llm.FinishReasonToolCalls && len(choice.Message.ToolCalls) > 0 {
 			// === 持久化 assistant 消息（含 tool_calls 记录）===
 			// 先执行所有工具，收集执行记录，再持久化 assistant 消息
-			var executedToolCalls []store.ToolCall
-			// 本次轮次里"哪次工具调用产出了哪些图"。工具结果消息要靠它挂上附件——
-			// 组装下一轮请求时读的正是那份附件，而不是这里的临时变量。
-			producedByCall := map[string][]media.Attachment{}
-
-			for _, tc := range choice.Message.ToolCalls {
-				var args map[string]interface{}
-				_ = json.Unmarshal([]byte(tc.Function.Arguments), &args)
-
-				startTime := time.Now()
-
-				// 推送工具调用开始事件
-				toolCallRecord := store.ToolCall{
-					ID:     tc.ID,
-					Name:   tc.Function.Name,
-					Args:   args,
-					Status: "running",
-				}
-				ar.Recorder.Emit(ChatEvent{
-					Type:     ChatEventToolCallStart,
-					ToolCall: &toolCallRecord,
-				})
-
-				// 执行工具（记录改动游标，执行后取本次调用改了哪些文件）
-				mark := ar.Changes.Mark(sessionID)
-				// 前后各扫一次工作区：执行窗口内的改动归因给本会话（含 exec_shell 改的文件）
-				ar.Diff.NoteActivity(sessionID, dir, false)
-				// 执行工具：必须传运行 ctx —— 硬取消靠它切断权限等待、子进程与在途请求
-				result, execErr := toolView.ExecuteToolCtx(run.Ctx(), tc.Function.Name, args)
-				// 立刻取走本次调用产出的图片（read_image 之类）：收集器是整个工具视图共用的，
-				// 中间不取走就再也分不清哪张图是哪次调用产的。
-				producedImages := toolView.TakeImages()
-				ar.Diff.NoteActivity(sessionID, dir, true)
-				// 子代理在本次调用期间改的文件不该算作本会话的改动（见 runSubagent 与
-				// agent.RunControl.noteExcludedPaths）。剔除必须放在这里——归因是上面这一句
-				// 按时间窗口扫全工作区写进去的，早一步剔除就会被重新记上。
-				if excluded := run.TakeExcludedPaths(sessionID); len(excluded) > 0 {
-					ar.Diff.DropTouched(sessionID, excluded)
-				}
-				duration := time.Since(startTime).Seconds()
-				if changed := ar.Changes.Since(sessionID, mark); len(changed) > 0 {
-					files := make([]string, 0, len(changed))
-					for _, c := range changed {
-						files = append(files, c.Rel)
-					}
-					toolCallRecord.Files = files
-				}
-				// 产出的图片：卡片上挂 ID（界面画缩略图），消息上挂完整引用（组装请求时用）
-				if len(producedImages) > 0 {
-					toolCallRecord.Images = media.AttachmentIDs(producedImages)
-					producedByCall[tc.ID] = producedImages
-				}
-
-				if execErr != nil {
-					toolCallRecord.Status = "error"
-					toolCallRecord.Duration = duration
-					if run.Kind() == agent.CancelKindHard {
-						// 硬取消会让未跑完的工具统一报 "context canceled"，
-						// 换成可读说明——工具卡片与审计记录都要看得懂
-						toolCallRecord.Result = "已取消：运行被用户停止"
-					} else {
-						toolCallRecord.Result = fmt.Sprintf("执行失败: %v", execErr)
-					}
-				} else {
-					toolCallRecord.Status = "success"
-					toolCallRecord.Duration = duration
-					toolCallRecord.Result = result
-				}
-				toolCallRecords = append(toolCallRecords, toolCallRecord)
-				executedToolCalls = append(executedToolCalls, toolCallRecord)
-
-				// 推送工具调用完成事件
-				ar.Recorder.Emit(ChatEvent{
-					Type:     ChatEventToolCallEnd,
-					ToolCall: &toolCallRecord,
-				})
-			}
+			// 执行分两组：**只读且无需授权**的调用并发执行，其余按原序串行。
+			// 判据与理由见 executeToolCalls。
+			executedToolCalls, producedByCall := ar.executeToolCalls(run, toolView, sessionID, dir, choice.Message.ToolCalls)
+			// 累加到本次运行的汇总记录（ChatResult.ToolCalls / 取消与失败路径都要用它）
+			toolCallRecords = append(toolCallRecords, executedToolCalls...)
 
 			// 持久化 assistant 消息（含 tool_calls 执行记录）
 			assistantMsg := store.Message{
@@ -1318,6 +1248,166 @@ func wrapUpAfterTurnExhausted(ar *agentRun, run *agent.RunControl, sessionID, mo
 		return "", false
 	}
 	return text, true
+}
+
+// ===== 一轮内多个工具调用的执行（并发安全子集）=====
+//
+// 背景：模型一轮可以返回多个 tool_call（如同时读 5 个文件）。原先一律串行执行，
+// 一轮里的 N 次只读 I/O 要排成 N 个往返，是长任务里最明显的等待来源。
+//
+// 为什么不能简单地对所有调用 go func()：
+//  1. **图片归因**：ImageCollector 是整个工具视图共享的，"执行一次、取一次"是串行假设
+//     （media.ImageCollector 的说明）。并发时两张图会混在一起，再也分不清来源。
+//  2. **文件归因**：DiffService.NoteActivity 是"调用前后各扫一次全工作区、窗口内的改动
+//     算这次调用的"。两个窗口重叠 → 改动被重复归因或错配。
+//  3. **改动游标**：FileChangeLog.Mark/Since 是单会话单游标，并发写入会交错。
+//  4. **授权弹窗**：前端每个会话只有**一个**挂起槽位（permissions.js 的 pendingBySession）。
+//     两个并发请求都要授权时，后一个覆盖前一个，先到的那个白等到超时。
+//
+// 解法：**只并发"不写工作区、不需要授权"的只读工具**。不变式 1–3 只在工具会写工作区时
+// 才被触发（只读调用不产生归因，压根不需要窗口扫描），不变式 4 由派发前的权限预检挡掉。
+// 其余调用（写文件 / exec_shell / MCP / ask_user / spawn_agent / 需要授权的只读调用）
+// 保持原序串行——它们本就该独占工作区。
+//
+// 结果一律**按原始下标回填**：协议要求 tool 结果与 assistant.tool_calls 同序
+// （Anthropic 尤其严格），并发只改变执行顺序，不改变上报顺序。
+const maxParallelToolCalls = 4
+
+// executeToolCalls 执行一轮里的全部工具调用，返回执行记录与"哪次调用产了哪些图"。
+func (ar *agentRun) executeToolCalls(run *agent.RunControl, toolView *tool.SessionView,
+	sessionID, dir string, calls []llm.LLMToolCall) ([]store.ToolCall, map[string][]media.Attachment) {
+
+	records := make([]store.ToolCall, len(calls))
+	producedByCall := map[string][]media.Attachment{}
+	parallel := make([]bool, len(calls))
+
+	// 派发前预检：只读 + 无需授权的才进并行组。
+	// 预检是纯判定（不写审计、不阻塞），因此这里问一遍、执行时 Enforce 再判一遍不算浪费
+	// ——后者才是权威结论，前者只是调度决策。
+	for i, tc := range calls {
+		args := parseToolArgs(tc.Function.Arguments)
+		parallel[i] = toolView.ParallelSafeTool(tc.Function.Name, args)
+	}
+
+	// 并发组：只读工具，彼此无副作用。用信号量限制并发数，避免模型一次返回几十个调用时
+	// 打爆磁盘或触发网关限流。
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, maxParallelToolCalls)
+	imagesByIndex := make([][]media.Attachment, len(calls))
+	for i, tc := range calls {
+		if !parallel[i] {
+			continue
+		}
+		wg.Add(1)
+		go func(i int, tc llm.LLMToolCall) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			rec, imgs := ar.runOneTool(run, toolView, sessionID, dir, tc, true)
+			records[i] = rec
+			imagesByIndex[i] = imgs
+		}(i, tc)
+	}
+	wg.Wait()
+
+	// 串行组：按原序执行写操作与需授权调用。
+	for i, tc := range calls {
+		if parallel[i] {
+			continue
+		}
+		rec, imgs := ar.runOneTool(run, toolView, sessionID, dir, tc, false)
+		records[i] = rec
+		imagesByIndex[i] = imgs
+	}
+
+	// 产图按**原始下标**归位：工具结果消息要靠它挂附件（组装下一轮请求时读的正是那份附件）。
+	for i, imgs := range imagesByIndex {
+		if len(imgs) > 0 {
+			producedByCall[calls[i].ID] = imgs
+		}
+	}
+	return records, producedByCall
+}
+
+// runOneTool 执行单次工具调用，返回它的记录与产出的图片。
+//
+// parallel=true 表示它在并发组里：**跳过工作区归因**（只读调用不写工作区，不需要窗口扫描；
+// 而且并发窗口重叠会让归因错乱，见本段顶部说明）。图片取用与归因剔除只发生在串行组。
+func (ar *agentRun) runOneTool(run *agent.RunControl, toolView *tool.SessionView,
+	sessionID, dir string, tc llm.LLMToolCall, parallel bool) (store.ToolCall, []media.Attachment) {
+
+	args := parseToolArgs(tc.Function.Arguments)
+	startTime := time.Now()
+
+	rec := store.ToolCall{
+		ID:     tc.ID,
+		Name:   tc.Function.Name,
+		Args:   args,
+		Status: "running",
+	}
+	ar.Recorder.Emit(ChatEvent{
+		Type:     ChatEventToolCallStart,
+		ToolCall: &rec,
+	})
+
+	// 归因只在串行组做：写操作才需要"调用前后各扫一次工作区"的窗口
+	mark := 0
+	if !parallel {
+		mark = ar.Changes.Mark(sessionID)
+		ar.Diff.NoteActivity(sessionID, dir, false)
+	}
+
+	result, execErr := toolView.ExecuteToolCtx(run.Ctx(), tc.Function.Name, args)
+
+	var producedImages []media.Attachment
+	if !parallel {
+		// 立刻取走本次调用产出的图片：收集器是共用的，"执行一次、取一次"是串行假设
+		producedImages = toolView.TakeImages()
+		ar.Diff.NoteActivity(sessionID, dir, true)
+		// 子代理在本次调用期间改的文件不该算作本会话的改动（见 runSubagent）。
+		// 剔除必须放在归因之后——早一步会被重新记上。
+		if excluded := run.TakeExcludedPaths(sessionID); len(excluded) > 0 {
+			ar.Diff.DropTouched(sessionID, excluded)
+		}
+		if changed := ar.Changes.Since(sessionID, mark); len(changed) > 0 {
+			files := make([]string, 0, len(changed))
+			for _, c := range changed {
+				files = append(files, c.Rel)
+			}
+			rec.Files = files
+		}
+		if len(producedImages) > 0 {
+			rec.Images = media.AttachmentIDs(producedImages)
+		}
+	}
+
+	rec.Duration = time.Since(startTime).Seconds()
+	switch {
+	case execErr != nil:
+		rec.Status = "error"
+		if run.Kind() == agent.CancelKindHard {
+			// 硬取消会让未跑完的工具统一报 "context canceled"，换成可读说明
+			rec.Result = "已取消：运行被用户停止"
+		} else {
+			rec.Result = fmt.Sprintf("执行失败: %v", execErr)
+		}
+	default:
+		rec.Status = "success"
+		rec.Result = result
+	}
+
+	ar.Recorder.Emit(ChatEvent{
+		Type:     ChatEventToolCallEnd,
+		ToolCall: &rec,
+	})
+	return rec, producedImages
+}
+
+// parseToolArgs 解析工具调用参数；解析失败返回空表（工具自己会报参数缺失）。
+func parseToolArgs(raw string) map[string]interface{} {
+	var args map[string]interface{}
+	_ = json.Unmarshal([]byte(raw), &args)
+	return args
 }
 
 // ===== Plan & Execute（规划-执行模式）=====

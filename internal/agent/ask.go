@@ -113,7 +113,8 @@ func (b *AskBroker) Register(sessionID string, req AskRequest) (string, chan Ask
 }
 
 // Pending 返回某会话挂起的提问（切换会话后回到该会话时，弹窗据此重现）。
-// 一个会话同时只可能有一个挂起提问——工具调用是串行的。
+// 一个会话同时只可能有一个挂起提问——**需要用户应答的工具一律串行执行**
+// （见 internal/tool 的 parallelSafeTools：并发组只收不需要授权的只读工具）。
 func (b *AskBroker) Pending(sessionID string) *AskRequest {
 	b.mu.Lock()
 	defer b.mu.Unlock()

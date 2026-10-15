@@ -310,8 +310,10 @@ func DecodeUpload(payload string) ([]byte, error) {
 //	工具 → collector.add(Attachment) → 工具循环在调用返回后 take() → 落到该次
 //	工具结果消息的 Attachments 上 → 与用户贴的图走**完全相同**的存储与协议路径。
 //
-// 一次性取走（take）而不是只读：工具循环是串行执行 tool_calls 的，
-// 每次执行完立刻取走，就不会出现"这两张图是哪一次调用产的"这种无法回答的问题。
+// 一次性取走（take）而不是只读：**产图工具（read_image）在工具循环里是串行执行的**
+// （它不在 parallelSafeTools 里），每次执行完立刻取走，就不会出现"这两张图是哪一次调用产的"
+// 这种无法回答的问题。若将来要让产图工具也并发，必须先给每次调用配独立的收集器——
+// 共用一个收集器时，两个并发调用的图会被混在一起。
 type ImageCollector struct {
 	mu    sync.Mutex
 	items []Attachment
