@@ -69,9 +69,9 @@ func NewCLITool(name, description string, params map[string]*ToolArgDef, require
 func (t *CLITool) RequiredParams() []string { return t.required }
 
 func (t *CLITool) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
-	cmdStr, ok := args["cmd"].(string)
+	cmdStr, ok := args["command"].(string)
 	if !ok {
-		return "", fmt.Errorf("cmd 参数是必需的")
+		return "", fmt.Errorf("command 参数是必需的")
 	}
 	if ctx == nil {
 		ctx = context.Background() // exec.CommandContext 不接受 nil ctx

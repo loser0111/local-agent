@@ -1,6 +1,7 @@
 <script setup>
 import { ref } from 'vue'
 import PaneHeader from '@/components/layout/PaneHeader.vue'
+import { isImeKeyEvent } from '@/utils/imeGuard'
 
 const terminalRef = ref(null)
 const command = ref('')
@@ -24,6 +25,8 @@ function runCommand() {
 }
 
 function handleKeydown(e) {
+  // 输入法确认候选词的回车不该执行命令（同 ChatPane 输入框，见 utils/imeGuard.js）
+  if (isImeKeyEvent(e)) return
   if (e.key === 'Enter') {
     runCommand()
   }

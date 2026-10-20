@@ -2,6 +2,7 @@
 import { computed, nextTick, ref, watch } from 'vue'
 import { useAskStore } from '@/stores/asks'
 import { useSessionStore } from '@/stores/session'
+import { isImeKeyEvent } from '@/utils/imeGuard'
 
 /**
  * 模型提问弹窗（ask_user 工具）
@@ -38,7 +39,10 @@ function onText(qIndex, value) {
   askStore.setText(qIndex, value)
 }
 
-function onTextEnter() {
+function onTextEnter(e) {
+  // @keyup.enter 不带原生修饰判断：输入法确认候选词的那次回车也会触发它，
+  // 会把候选词连同「提交答复」一起送出去。同样走统一守卫。
+  if (isImeKeyEvent(e)) return
   if (canSubmit.value) askStore.submit()
 }
 

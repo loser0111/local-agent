@@ -8,10 +8,15 @@ import './assets/styles/tokens.css'
 import './assets/styles/global.scss'
 import { useUiStore } from '@/stores/ui'
 import { useSettingStore } from '@/stores/setting'
+import { installImeGuard } from '@/utils/imeGuard'
 
 const app = createApp(App)
 app.use(createPinia())
 app.use(router)
+
+// 输入法守卫：记录 compositionend 时间戳，供各键盘处理入口识别「确认候选词的那次按键」。
+// 必须尽早安装——macOS WebKit 的 compositionend 先于 keydown，晚装就可能漏掉第一次。
+installImeGuard()
 
 // 应用已保存的主题与字号（index.html 里的内联脚本已抢先应用过一次，
 // 这里做一次权威同步，并挂上「跟随系统」的监听）

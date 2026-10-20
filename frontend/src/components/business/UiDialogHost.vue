@@ -2,6 +2,7 @@
 import { onMounted, onUnmounted } from 'vue'
 import { AlertTriangle, CheckCircle2, Info, X } from 'lucide-vue-next'
 import { useUiStore } from '@/stores/ui'
+import { isImeKeyEvent } from '@/utils/imeGuard'
 
 /**
  * 应用内对话框宿主：确认框 + 提示条
@@ -12,6 +13,10 @@ const ui = useUiStore()
 const ICONS = { info: Info, success: CheckCircle2, error: AlertTriangle }
 
 function onKeydown(e) {
+  // 输入法组字中的回车/Esc（确认候选词、取消候选词）属于输入法，不该触发
+  // 弹窗的「确定 / 取消」。这一层是 window 级监听，最容易误伤，必须先拦。
+  if (isImeKeyEvent(e)) return
+
   if (ui.promptState) {
     if (e.key === 'Escape') {
       e.preventDefault()

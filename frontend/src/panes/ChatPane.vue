@@ -19,6 +19,7 @@ import UsageDialog from '@/components/business/UsageDialog.vue'
 import PaneHeader from '@/components/layout/PaneHeader.vue'
 import MessageBubble from '@/components/business/MessageBubble.vue'
 import ToolProcess from '@/components/business/ToolProcess.vue'
+import { isImeKeyEvent } from '@/utils/imeGuard'
 
 const sessionStore = useSessionStore()
 const chatStore = useChatStore()
@@ -956,6 +957,12 @@ function applySkillCommand(s) {
 }
 
 function handleKeydown(e) {
+  // 输入法组字期间的按键（含「用回车确认候选词」那一下）一律放行给输入法：
+  // 不然拼音打一半按回车选字，消息就被发出去了。macOS WebKit 下 isComposing
+  // 已失效，只能靠 imeGuard 的时间窗兜底，故必须走这个统一判断。
+  // 注意这里**不能** preventDefault：得让输入法自己消费这次按键，候选词才上屏。
+  if (isImeKeyEvent(e)) return
+
   if (skillMenuOpen.value) {
     if (e.key === 'ArrowDown') {
       e.preventDefault()
