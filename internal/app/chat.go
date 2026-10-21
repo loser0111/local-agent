@@ -710,6 +710,17 @@ func runToolLoop(ar *agentRun) *ChatResult {
 		maxTurns = MaxChatTurns
 	}
 
+	// trace 的创建与收尾都用 defer：循环里有十几处 return，逐个补 Finish 必然漏。
+	// Finish 传空 output：根 observation 的 output 由最后一轮的回复决定，
+	// 而从 defer 里拿不到它——Langfuse 的真正价值在于「每轮/每个工具的明细」，
+	// 根节点只承担"这一次运行有多长、是成功还是失败"这两件事。
+	ar.trace = ar.traceRun(traceRunName(ar.PlanID))
+	defer func() {
+		if ar.trace != nil {
+			ar.trace.Finish("", "")
+		}
+	}()
+
 	// 1. 重新加载会话：确保包含调用方刚持久化的用户消息以及此前全部消息（跨步骤上下文连续）
 	session, err := ar.Store.GetSession(sessionID)
 	if err != nil {
@@ -850,6 +861,12 @@ func runToolLoop(ar *agentRun) *ChatResult {
 			}
 		}
 
+		// 先 flush 上一轮：长任务（几十轮）如果只在结束时发一次，
+		// Langfuse 里要等到整轮跑完才看得到数据，而恰恰是"跑到一半卡住"最需要看。
+		if ar.trace != nil {
+			ar.trace.Flush()
+		}
+
 		// 记录**真实发出的那一份**（摘要替换 + 工具结果预算之后），供界面排障查看。
 		// 快照内部做浅拷贝；这里不阻断任何逻辑，失败了也不影响对话。
 		ar.ReqLog.Record(snapshotLLMRequest(run, session, turn, modelID, systemPrompt, messages, tools, ctxStat, compactedThisTurn))
@@ -871,6 +888,7 @@ func runToolLoop(ar *agentRun) *ChatResult {
 			flushThinking func(string)
 			flushShutdown func()
 		)
+		llmStart := time.Now()
 		if useStream {
 			// 正文与思考各一条节流通道：它们落在界面不同区域，合并推送前端无法分开。
 			flusher, flushThinking, flushShutdown = ar.Recorder.FlushStream()
@@ -879,6 +897,9 @@ func runToolLoop(ar *agentRun) *ChatResult {
 		} else {
 			resp, err = llm.CallLLMForModel(run.Ctx(), model, req)
 		}
+		// 模型调用埋点。放在这里（而非在成功分支里）是为了把**失败的那一次**也记下来：
+		// 「这一轮为什么没出结果」在 Langfuse 里应当能看到，否则只剩成功样本。
+		ar.traceGeneration(ar.trace, turn, model, req, resp, err, llmStart)
 		if err != nil {
 			// 硬取消会让在途请求以 "context canceled" 失败：按"已取消"返回，
 			// 而不是当成一次真实失败——前端对这两者的处理不同（取消不该提示重试）。
@@ -1448,6 +1469,8 @@ func (ar *agentRun) runOneTool(run *agent.RunControl, toolView *tool.SessionView
 		Type:     ChatEventToolCallEnd,
 		ToolCall: &rec,
 	})
+	// 工具埋点：rec 此时已含最终状态、耗时与改动的文件，直接复用不必重算。
+	ar.traceTool(ar.trace, &rec, ar.Model, startTime, execErr)
 	return rec, producedImages
 }
 

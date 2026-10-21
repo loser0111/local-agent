@@ -172,6 +172,10 @@ func (a *App) runSubagent(parentRun *agent.RunControl, parent *store.Session, di
 		VisionUnsupported: a.visionVerdicts.Unsupported(child.Model, store.ModelCallID(model), model.URL),
 		Compactor:         nil, // 子代理不做摘要压缩：多条运行同改一份会话摘要会互相打架
 		Recorder:          &subagentRecorder{app: a, runID: child.ID},
+		// 子代理也上报：它走的是同一个 runToolLoop，天然形成独立的 trace。
+		// sessionID 归属子代理自己的会话，因此在 Langfuse 里与父会话分开聚合——
+		// 这正是"不污染父会话"这条约定在遥测上的自然结果，不需要额外的归因键。
+		Trace: a.tracer,
 	})
 
 	raw := strings.TrimSpace(res.Reply)

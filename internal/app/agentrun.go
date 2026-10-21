@@ -8,6 +8,7 @@ import (
 	"wails-tmp/internal/diff"
 	"wails-tmp/internal/llm"
 	"wails-tmp/internal/media"
+	"wails-tmp/internal/observability"
 	"wails-tmp/internal/store"
 	"wails-tmp/internal/tool"
 )
@@ -71,6 +72,16 @@ type agentRun struct {
 	// UsageLog 每会话最近一次的用量（内存态排障视图）。为 nil 时跳过记录——
 	// 测试里会直接构造零值 agentRun，那一路径不该 panic。
 	UsageLog *usageLog
+	// Trace Langfuse 遥测导出器（internal/observability）。为 nil 表示未启用，
+	// 所有埋点都是空操作——与 ReqLog / UsageLog 同一个 nil 安全模式，
+	// 测试里构造零值 agentRun 不会 panic。
+	//
+	// 它是**纯旁路**：遥测这侧的任何失败都只打日志，绝不能让这一轮对话失败。
+	// 与 noteUsage 顶部那条注释是同一条原则。
+	Trace *observability.Tracer
+	// trace 本次运行的 Langfuse trace 句柄（由 runToolLoop 开头创建、收尾时 Finish）。
+	// 不导出：它是循环内部的一次性上下文，外部（子代理装配、测试）不该碰它。
+	trace *observability.Run
 	// PromptCache 本次运行生效的提示缓存偏好**快照**。
 	//
 	// 刻意用快照而不是实时读取配置：一次运行可能持续几分钟、几十轮，
@@ -262,5 +273,6 @@ func (a *App) newMainAgentRun(run *agent.RunControl, session *store.Session, dir
 		Recorder:          &appRecorder{app: a, sessionID: sessionID, runID: runID},
 		UsageLog:          a.usageLog,
 		PromptCache:       a.GetPromptCachePrefs(),
+		Trace:             a.tracer,
 	}
 }

@@ -14,6 +14,7 @@ import (
 	"wails-tmp/internal/llm"
 	"wails-tmp/internal/media"
 	"wails-tmp/internal/memstore"
+	"wails-tmp/internal/observability"
 	"wails-tmp/internal/permission"
 	"wails-tmp/internal/skill"
 	"wails-tmp/internal/snapshot"
@@ -86,6 +87,11 @@ type App struct {
 	// 内存态，与 reqLog 同一个定位：它是排障视图，不是审计日志——
 	// 需要看的时候通常就是刚跑完那次，而落盘会让每轮都多一次写 I/O。
 	usageLog *usageLog
+	// tracer Langfuse 遥测导出器（~/.local-agent/tracing.json）。
+	// **默认关闭**：这是本项目唯一会把对话内容发到网络上的功能，
+	// 且发出去的内容包含系统提示词（长期记忆召回、AGENTS.md），属于工作区内容的二次留存。
+	// nil 表示未启用，所有埋点退化为一次判空（见 internal/observability）。
+	tracer *observability.Tracer
 }
 
 // HasUI 当前是否有可应答 / 可推送事件的界面。
@@ -185,6 +191,20 @@ func (a *App) Startup(ctx context.Context) {
 
 	// 提示缓存偏好：不存在 = 关闭（失败方向是"更保守"，不是"更激进"）
 	a.promptCachePrefs = store.NewPromptCachePrefsStore(filepath.Join(baseDir, "prompt-cache.json"))
+
+	// Langfuse 遥测：不存在 = 关闭。这是本项目唯一会把对话内容发到网络上的功能，
+	// 因此失败方向同样是"关闭"（见 internal/observability/tracecfg.go 的说明）。
+	//
+	// 启动时打一行是刻意的：当前阶段不做设置界面，配置错了用户唯一的线索就是日志。
+	// 把「打到哪个端点」「是否含正文」显式写出来，能把配置错误的发现时间从半天降到 30 秒。
+	traceCfg := observability.NewStore(filepath.Join(baseDir, "tracing.json")).Get()
+	if tr := observability.New(traceCfg); tr != nil {
+		a.tracer = tr
+		fmt.Printf("[tracing] 已启用：%s\n", tr.Describe())
+	} else if traceCfg.Enabled {
+		// Enabled 为真却没建出 Tracer，只有一种可能：配置不可用（New 里已打具体原因）。
+		fmt.Printf("[tracing] tracing.json 里 enabled=true 但配置不可用，遥测未启用\n")
+	}
 
 	// 各会话最近一次用量（内存态排障视图）
 	a.usageLog = &usageLog{}
