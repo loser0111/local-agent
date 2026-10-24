@@ -68,10 +68,18 @@ func NewCLITool(name, description string, params map[string]*ToolArgDef, require
 // RequiredParams 透传来源配置声明的必填参数
 func (t *CLITool) RequiredParams() []string { return t.required }
 
+// ShellArgCommand exec_shell 的参数名。
+//
+// 必须与「来源配置里声明的参数名」保持一致：toolstore.DefaultSources 里
+// exec_shell 声明的是 cmd，模型据此生成参数（{"cmd": "..."}）。
+// 历史 bug：Execute 曾读 "command"，于是模型按 schema 传 cmd、执行时取不到，
+// 直接报「command 参数是必需的」——参数列表与给大模型的不一致即由此而来。
+const ShellArgCommand = "cmd"
+
 func (t *CLITool) Execute(ctx context.Context, args map[string]interface{}) (string, error) {
-	cmdStr, ok := args["command"].(string)
+	cmdStr, ok := args[ShellArgCommand].(string)
 	if !ok {
-		return "", fmt.Errorf("command 参数是必需的")
+		return "", fmt.Errorf("%s 参数是必需的", ShellArgCommand)
 	}
 	if ctx == nil {
 		ctx = context.Background() // exec.CommandContext 不接受 nil ctx
@@ -94,7 +102,9 @@ func (t *CLITool) Execute(ctx context.Context, args map[string]interface{}) (str
 
 // PermissionSubject 声明判定主体：命令类，判定发生在真正要执行的命令上（逐段分解）
 func (t *CLITool) PermissionSubject(args map[string]interface{}) permission.Subject {
-	cmdStr, _ := args["cmd"].(string)
+	// 与 Execute 读同一个键：权限判定必须看着"真正要执行的那条命令"。
+	// 两处读不同键时，会出现"判定的命令是空的、执行的却是另一条"的漏洞。
+	cmdStr, _ := args[ShellArgCommand].(string)
 	return permission.NewCommandSubject(t.GetName(), cmdStr)
 }
 

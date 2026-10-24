@@ -70,7 +70,7 @@ func DefaultSources() []*ToolSource {
 			Description: "在本机终端执行shell/终端命令，用于运行构建、测试、git 等；读写文件请优先用文件工具",
 			Kind:        SourceBuiltin, Icon: "terminal", Enabled: true, Builtin: true,
 			Parameters: []ToolParamConfig{
-				{Name: "cmd", Description: "要执行的终端命令，linux/mac用bash指令，windows用cmd/powershell指令", Required: true},
+				{Name: ShellArgCommand, Description: "要执行的终端命令，linux/mac用bash指令，windows用cmd/powershell指令", Required: true},
 			},
 		},
 		{

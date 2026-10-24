@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 	"wails-tmp/internal/diff"
 	"wails-tmp/internal/media"
 	"wails-tmp/internal/permission"
@@ -460,6 +461,22 @@ func (s *SessionStore) AppendMessage(id string, msg Message) (*Message, error) {
 		return nil, fmt.Errorf("消息角色不能为空")
 	}
 
+	// 工具结果在会话文件里被存了两份：assistant.toolCalls[i].result 与紧随其后的
+	// tool 消息 content。实测两者逐字节相同，是同一个大文件被 read_file 读出来后
+	// 复制了两遍（单个会话因此涨到 4.9 MB，其中 96% 是这种重复）。
+	//
+	// 这两份的**消费者不同**，所以不能删任一份：
+	//   - tool 消息 content → 发给模型（buildLLMMessages），必须保持完整；
+	//   - toolCalls[].result → 只给前端工具卡片渲染（ToolProcess.vue），
+	//     而它从不展示完整正文，1 MB 的输出塞进 DOM 本身就是卡顿源。
+	// 因此这里只截断前者之外的**持久化副本**，且只截 toolCalls 里那份。
+	//
+	// 注意必须深拷贝：msg 与内存里的 messages/executedToolCalls 共享同一个
+	// []ToolCall 底层数组（chat.go 里 assistantMsg.ToolCalls 直接取自
+	// executedToolCalls）。若原地改 Result，会把同一份执行记录的 Result 也改掉，
+	// 进而污染随后的 tool 消息内容与 trace 上报。
+	msg.ToolCalls = truncateToolCallResults(msg.ToolCalls)
+
 	session.Messages = append(session.Messages, msg)
 	session.EndAt = msg.CreatedAt
 	session.Status = "active"
@@ -824,18 +841,128 @@ func (s *SessionStore) UpdateSession(id string, patch SessionPatch) (*Session, e
 	return session, nil
 }
 
-// saveSession 调用方需持有锁
+// ===== 工具结果持久化截断 =====
+//
+// 背景：read_file 能返回任意大小的文件内容，而这份内容在会话里出现两次
+// （toolCalls[].result 与 tool 消息 content）。实测一个会话因此到 4.9 MB，
+// 其中前 4 条消息（两次 read_file）占了 4.7 MB。
+//
+// 这里只管 toolCalls[].result —— 前端工具卡片展示用。真正的原文仍完整保留在
+// tool 消息的 content 里（模型靠它工作），所以截断不损失任何模型可见信息。
+const (
+	// MaxPersistedToolResult 单条工具结果在 toolCalls[].result 里保留的字节上限。
+	// 16 KB 足够前端展示卡片与展开查看常规输出；更大的输出（整份源码、长日志）
+	// 用户本来也不会在工具卡片里读完。
+	MaxPersistedToolResult = 16 * 1024
+)
+
+// truncateToolCallResults 返回 ToolCalls 的深拷贝，其中过长的 Result 被截断。
+//
+// 必须深拷贝：入参的切片常与内存中的执行记录共享底层数组，原地修改会连带
+// 改掉 tool 消息内容与 trace 上报所用的 Result。
+//
+// 完全在限额内时返回原切片（零分配），只读调用方可安全共享。
+func truncateToolCallResults(calls []ToolCall) []ToolCall {
+	if len(calls) == 0 {
+		return calls
+	}
+	needCopy := false
+	for i := range calls {
+		if len(calls[i].Result) > MaxPersistedToolResult {
+			needCopy = true
+			break
+		}
+	}
+	if !needCopy {
+		return calls
+	}
+	out := make([]ToolCall, len(calls))
+	copy(out, calls)
+	for i := range out {
+		if len(out[i].Result) > MaxPersistedToolResult {
+			out[i].Result = truncateToolResult(out[i].Result)
+		}
+	}
+	return out
+}
+
+// truncateToolResult 截断到 MaxPersistedToolResult，并附一行说明。
+//
+// 按 rune 边界回退，避免把一个多字节字符切成两半——切坏后前端会显示乱码方块，
+// 且整份 JSON 里该字符串不再是合法 UTF-8。
+//
+// 回退判据用 DecodeLastRuneInString：对"尾部是不完整/非法序列"它返回
+// (RuneError, 1)，据此逐字节回退直到尾部是一个完整字符。
+// （不能只判断末字节是否为 RuneStart——那样会把以起始字节开头、但缺后续字节的
+// 半个字符留在末尾，正是本函数最初写错的地方，已由 UTF8Boundary 测试覆盖。）
+func truncateToolResult(s string) string {
+	if len(s) <= MaxPersistedToolResult {
+		return s
+	}
+	head := s[:MaxPersistedToolResult]
+	for len(head) > 0 {
+		r, size := utf8.DecodeLastRuneInString(head)
+		// RuneError 且长度 1 = 非法/不完整的尾部，回退一字节再看。
+		// 注意真正的 U+FFFD 编码为 3 字节，size > 1，属于合法内容，不能误退。
+		if r != utf8.RuneError || size > 1 {
+			break
+		}
+		head = head[:len(head)-1]
+	}
+	return head + fmt.Sprintf("\n\n[已截断：原文 %d 字节，此处仅保留前 %d 字节。完整内容见该工具调用的执行结果]",
+		len(s), len(head))
+}
+
+// saveSession 调用方需持有锁。
+//
+// 写入采用「临时文件 + rename」的原子替换：
+//
+//	会话文件是这份数据的唯一副本，而它已经能到 MB 级（实测单个会话 4.9 MB），
+//	原先的 os.WriteFile 会在写入过程中把原文件截断——此时崩溃/断电/磁盘满，
+//	留下的是半个 JSON，会话直接打不开。rename 在同一分区上是原子的：
+//	要么还是旧文件，要么已经是完整新文件，不存在中间态。
+//
+// 不缩进（json.Marshal 而非 MarshalIndent）：这份文件只给程序读，缩进纯属
+//
+//	浪费空间与序列化时间——实测去掉缩进可省约 15% 体积。
 func (s *SessionStore) saveSession(session *Session) error {
 	if err := os.MkdirAll(s.dir, 0o755); err != nil {
 		return fmt.Errorf("创建会话目录失败: %w", err)
 	}
-	data, err := json.MarshalIndent(session, "", "  ")
+	data, err := json.Marshal(session)
 	if err != nil {
 		return fmt.Errorf("序列化会话失败: %w", err)
 	}
-	if err := os.WriteFile(s.sessionPath(session.ID), data, 0o644); err != nil {
-		return fmt.Errorf("写入会话文件失败: %w", err)
+	target := s.sessionPath(session.ID)
+	// 临时文件放在同目录，保证 rename 不跨文件系统（跨分区 rename 会退化成拷贝，不原子）。
+	// 加随机后缀：同名后缀在极端情况下（两次并发写同一会话）会互相覆盖。
+	tmp, err := os.CreateTemp(s.dir, session.ID+".*.tmp")
+	if err != nil {
+		return fmt.Errorf("创建会话临时文件失败: %w", err)
 	}
+	tmpPath := tmp.Name()
+	// 任何一步失败都要清掉临时文件，否则崩溃残留会堆积在会话目录里。
+	defer func() {
+		if tmpPath != "" {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("写入会话临时文件失败: %w", err)
+	}
+	// Sync 之后再 rename：否则断电可能留下「rename 成功但内容还在页缓存里」的空文件。
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("同步会话临时文件失败: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("关闭会话临时文件失败: %w", err)
+	}
+	if err := os.Rename(tmpPath, target); err != nil {
+		return fmt.Errorf("替换会话文件失败: %w", err)
+	}
+	tmpPath = "" // rename 成功，临时文件已不存在，不必再删
 	return nil
 }
 
