@@ -16,3 +16,7 @@ frontend/dist
 /qwen38_collection.json
 /cache/
 
+# 项目本地权限配置：个人放宽设置，不该随仓库提交（团队共享的规则放
+# permissions.json，那一份是要提交的）。不忽略时程序每次启动都会提示一次。
+/.local-agent/permissions.local.json
+

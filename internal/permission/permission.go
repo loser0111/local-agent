@@ -677,8 +677,7 @@ func matchBuiltinDeny(s Subject) (string, bool) {
 
 // ===== 敏感内容：需要显式询问，但不拒绝 =====
 var sensitivePatterns = []*regexp.Regexp{
-	// 敏感文件：凭据与环境变量
-	regexp.MustCompile(`(^|[\s/='"])\.env(\.[a-zA-Z0-9]+)?($|[\s'";|&>)])`),
+	// 敏感文件：凭据
 	regexp.MustCompile(`(^|[\s/=])\.ssh/`),
 	regexp.MustCompile(`\bid_(rsa|dsa|ecdsa|ed25519)\b`),
 	regexp.MustCompile(`\.aws/credentials`),
@@ -690,11 +689,97 @@ var sensitivePatterns = []*regexp.Regexp{
 	regexp.MustCompile(`\|\s*(sudo\s+)?(sh|bash|zsh|dash)(\s|$)`),
 	// 强制推送（可覆盖远端历史）
 	regexp.MustCompile(`(^|[\s;&|])git\s+push\b[^;&|]*--force`),
-	// 提权
-	regexp.MustCompile(`(^|[\s;&|])(sudo|doas|su)(\s|$)`),
+}
+
+// envFilePattern 敏感环境变量文件。
+//
+// 只认「.env 本身」与「.env.<真正的环境名>」，**模板文件一律豁免**——
+// `.env.example` / `.env.sample` / `.env.template` 是提交进仓库的空壳，内容本来就是公开的，
+// 对它们弹窗只会训练用户"闭眼点允许"。旧实现用 `.env(\.[a-zA-Z0-9]+)?` 一把抓，
+// 连 .env.example 也被当成凭据，属于误伤。
+//
+// 前后缀的判定交给边界函数，这里只负责"是不是 .env 形态"。
+//
+// 组 1 = 前边界（必填一个字符，否则 `foo.env` 里的 .env 会被误认）；
+// 组 2 = `.` 之后的后缀（不含点）；组 3 = 后边界。
+var envFilePattern = regexp.MustCompile(`(^|[\s/='"])\.env(?:\.([A-Za-z0-9_.-]+))?($|[\s'";|&>),])`)
+
+// envTemplateSuffixes .env 后面跟这些后缀时是模板/示例文件，不按凭据处理
+var envTemplateSuffixes = map[string]bool{
+	"example":  true,
+	"sample":   true,
+	"template": true,
+	"tmpl":     true,
+	"dist":     true,
+	"defaults": true,
+	"skeleton": true,
+}
+
+// isSensitiveEnvFile 判断一段文本里的 .env 引用是否指向真正的凭据文件。
+// 返回 true 表示敏感（需要询问）。
+func isSensitiveEnvFile(text string) bool {
+	locs := envFilePattern.FindAllStringSubmatchIndex(text, -1)
+	if len(locs) == 0 {
+		return false
+	}
+	for _, loc := range locs {
+		// 组 2 = ".env." 之后的完整后缀（不含点）；未参与匹配时为 -1
+		suffix := ""
+		if loc[4] >= 0 && loc[5] >= 0 {
+			suffix = text[loc[4]:loc[5]]
+		}
+		if suffix == "" {
+			return true // 裸 .env：一定是凭据
+		}
+		// .env.example.local 这类组合取第一段判断（example 就够豁免了）
+		head := suffix
+		if i := strings.IndexAny(head, ".-"); i > 0 {
+			head = head[:i]
+		}
+		if envTemplateSuffixes[strings.ToLower(head)] {
+			continue // 模板文件，跳过
+		}
+		return true
+	}
+	return false
+}
+
+// privilegeEscalationPatterns 提权命令，**只在命令段的第一个词**匹配。
+//
+// 旧实现是 `(^|[\s;&|])(sudo|doas|su)(\s|$)`，于是
+// `git commit -m "fix: sudo detection bug"` 这种把 sudo 写进提交信息、
+// `grep -rn sudo .` 这种搜代码的命令都会被当成提权去弹窗。
+// 提权的语义是"这条命令以 root 身份执行"，即它必须是段的**命令名**，
+// 出现在参数里没有任何提权效果。
+var privilegeEscalationNames = map[string]bool{
+	"sudo": true, "doas": true, "su": true,
+}
+
+// hasPrivilegeEscalation 是否存在"以提权命令开头"的段
+func hasPrivilegeEscalation(units []string) bool {
+	for _, u := range units {
+		fields := strings.Fields(strings.TrimSpace(u))
+		if len(fields) == 0 {
+			continue
+		}
+		name := fields[0]
+		// 裸名判定：/usr/bin/sudo 这类带路径的写法也要认出来
+		if i := strings.LastIndex(name, "/"); i >= 0 {
+			name = name[i+1:]
+		}
+		if privilegeEscalationNames[name] {
+			return true
+		}
+	}
+	return false
 }
 
 // matchSensitive 命中敏感内容。整行与逐段都判（管道给 shell 需要看整行）。
+//
+// 三类判定的侵入性不同，所以分开实现：
+//   - sensitivePatterns：与位置无关的凭据/管道/强制推送，对整行与每段都正则匹配；
+//   - .env：需要区分真凭据与模板文件，见 isSensitiveEnvFile；
+//   - 提权：只认段首的命令名，见 hasPrivilegeEscalation。
 func matchSensitive(s Subject) (string, bool) {
 	candidates := make([]string, 0, len(s.Units)+1)
 	candidates = append(candidates, s.Raw)
@@ -704,11 +789,17 @@ func matchSensitive(s Subject) (string, bool) {
 		if n == "" {
 			continue
 		}
+		if isSensitiveEnvFile(n) {
+			return ".env", true
+		}
 		for _, p := range sensitivePatterns {
 			if p.MatchString(n) {
 				return p.String(), true
 			}
 		}
+	}
+	if hasPrivilegeEscalation(s.Units) {
+		return "提权命令", true
 	}
 	return "", false
 }
