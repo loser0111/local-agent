@@ -1,0 +1,27 @@
+{
+  "_说明": [
+    "把这个文件放到 ~/.local-agent/tracing.json 即可启用 Langfuse 遥测。",
+    "不存在此文件 = 完全关闭，这是默认状态，不影响任何现有功能。",
+    "",
+    "自建 Langfuse 的 endpoint 定为 http://<host>:3000/api/public/otel/v1/traces",
+    "  - 必须带 /v1/traces：本项目用 net/http 直发，不像官方 SDK 那样自动补路径；",
+    "  - OTLP 端点需要 Langfuse >= v3.22.0。",
+    "",
+    "publicKey / secretKey 在 Langfuse 项目的 Settings > API Keys 里取（pk-lf-… / sk-lf-…）。",
+    "",
+    "captureContent 默认 false，只上报元数据（模型、token、耗时、状态、工具名）。",
+    "打开后系统提示词（含长期记忆召回内容、AGENTS.md）会一并入库，",
+    "应视为工作区内容的二次留存——确认合规后再打开。",
+    "",
+    "已知：本项目走内网网关 + 自定义模型名，Langfuse 内置价格表里没有，cost 会是空。",
+    "这是预期行为，token 量本身已经够用。要算成本需在 Project Settings > Models",
+    "里逐个建 model definition（regex 匹配模型名 + 每种 token 类型单价）。"
+  ],
+  "enabled": false,
+  "endpoint": "http://localhost:3000/api/public/otel/v1/traces",
+  "publicKey": "pk-lf-xxxxxxxx",
+  "secretKey": "sk-lf-xxxxxxxx",
+  "captureContent": false,
+  "maxTextBytes": 4096,
+  "timeoutMs": 5000
+}
