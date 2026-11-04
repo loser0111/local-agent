@@ -1,6 +1,14 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
-import { getPlan, savePlan, executePlan, cancelPlan, reopenPlan } from '@/api/plan'
+import {
+  getPlan,
+  savePlan,
+  executePlan,
+  resumePlan,
+  retryPlan,
+  cancelPlan,
+  reopenPlan,
+} from '@/api/plan'
 import { useChatStore } from '@/stores/chat'
 import { useSessionStore } from '@/stores/session'
 import { useTodoStore } from '@/stores/todo'
@@ -78,9 +86,23 @@ export const usePlanStore = defineStore('plan', () => {
    *
    * sessionId 必传：这条计划属于哪个会话由事件（或调用方持有的计划对象）给出，
    * 不能拿"当前显示的会话"顶替——那正是 A 的计划显示在 B 上的原因。
+   *
+   * **按 revision 单调接受**：事件是异步推送的，旧运行（如续跑前那次）的迟到事件
+   * 可能在新状态之后到达。接受它会把"已完成"刷回"执行中"。
+   * revision 缺省（旧后端/旧数据）当 0 处理——那时还没这层保护，只能按到达顺序。
    */
   function applyUpdate(sessionId, p) {
-    if (p) setPlan(sessionId, p)
+    if (!p) return
+    const cur = planBySession.value[sessionId]
+    const nextRev = Number(p.revision) || 0
+    const curRev = Number(cur?.revision) || 0
+    if (cur && cur.id === p.id && nextRev < curRev) return
+    setPlan(sessionId, p)
+  }
+
+  /** 规划器判定"无需计划"：后端丢弃了占位记录，这里同步清空 */
+  function clearPlan(sessionId) {
+    setPlan(sessionId, null)
   }
 
   /**
@@ -98,8 +120,9 @@ export const usePlanStore = defineStore('plan', () => {
    * @param {string} sessionId 计划所属会话
    * @param {string} planId
    * @param {boolean} useStream
+   * @param {Function} runner 实际调用（executePlan / resumePlan），两者过程完全一致
    */
-  async function execute(sessionId, planId, useStream) {
+  async function runPlanFlow(sessionId, planId, useStream, runner) {
     if (!sessionId || executingBySession.value[sessionId]) return null
     const chatStore = useChatStore()
     setExecuting(sessionId, true)
@@ -117,9 +140,9 @@ export const usePlanStore = defineStore('plan', () => {
     }
 
     try {
-      const result = await executePlan(sessionId, planId, useStream, {
+      const result = await runner(sessionId, planId, useStream, {
         onPlanUpdate: (p) => {
-          setPlan(sessionId, p)
+          applyUpdate(sessionId, p)
           const running = p?.steps?.find((s) => s.status === 'running')
           if (running) {
             // 新步骤开始：先补步骤用户消息（与后端持久化内容一致），再建流式占位
@@ -178,7 +201,7 @@ export const usePlanStore = defineStore('plan', () => {
 
       finalizePlaceholder(null)
 
-      if (result?.plan) setPlan(sessionId, result.plan)
+      if (result?.plan) applyUpdate(sessionId, result.plan)
       if (result?.reply) {
         chatStore.addLocalMessage(sessionId, {
           id: `plan-reply-${Date.now()}`,
@@ -212,6 +235,40 @@ export const usePlanStore = defineStore('plan', () => {
     } finally {
       setExecuting(sessionId, false)
       chatStore.markRunEnded(sessionId)
+    }
+  }
+
+  /** 批准并执行（仅待审核的计划） */
+  function execute(sessionId, planId, useStream) {
+    return runPlanFlow(sessionId, planId, useStream, executePlan)
+  }
+
+  /**
+   * 从断点续跑（失败/中断/取消过的计划）。
+   *
+   * 不需要先退回待审核：用户的诉求就是"接着跑完"，多一次"改计划再批准"
+   * 只是在中间加一道没有信息量的手续。
+   */
+  function resume(sessionId, planId, useStream) {
+    return runPlanFlow(sessionId, planId, useStream, resumePlan)
+  }
+
+  /**
+   * 重试规划（规划失败后）。
+   *
+   * 不占 executing 标志：它是一次普通的模型调用，而"执行中"的语义是
+   * "计划步骤正在逐步跑"——混用会让停止按钮在规划期也走计划取消那条路。
+   */
+  async function retry(sessionId, planId, useStream) {
+    try {
+      const result = await retryPlan(sessionId, planId, useStream, {
+        onPlanUpdate: (p) => applyUpdate(sessionId, p),
+      })
+      if (result?.plan) applyUpdate(sessionId, result.plan)
+      return result
+    } catch (e) {
+      console.error('重试规划失败:', e)
+      return { error: e?.message || String(e) }
     }
   }
 
@@ -252,8 +309,11 @@ export const usePlanStore = defineStore('plan', () => {
     setPlan,
     loadForSession,
     applyUpdate,
+    clearPlan,
     save,
     execute,
+    resume,
+    retry,
     reopen,
     cancel,
     reset,

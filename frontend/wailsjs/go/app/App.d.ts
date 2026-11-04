@@ -159,6 +159,10 @@ export function ResolveAskUser(arg1:agent.AskAnswer):Promise<void>;
 
 export function ResolvePermission(arg1:string,arg2:string,arg3:string,arg4:string,arg5:string):Promise<void>;
 
+export function ResumePlan(arg1:string,arg2:boolean):Promise<app.ChatResult>;
+
+export function RetryPlan(arg1:string,arg2:boolean):Promise<app.ChatResult>;
+
 export function RunTaskNow(arg1:string):Promise<plugin.RunRecord>;
 
 export function SaveAttachment(arg1:string,arg2:string,arg3:string,arg4:string):Promise<media.Attachment>;
@@ -176,6 +180,8 @@ export function SetExposure(arg1:string,arg2:string):Promise<void>;
 export function SetPromptCachePrefs(arg1:store.PromptCachePrefs):Promise<store.PromptCachePrefs>;
 
 export function SetSessionPermissionMode(arg1:string,arg2:string):Promise<store.Session>;
+
+export function SetSessionPlanMode(arg1:string,arg2:boolean):Promise<store.Session>;
 
 export function SetSubToolEnabled(arg1:string,arg2:string,arg3:boolean):Promise<void>;
 

@@ -1724,6 +1724,14 @@ func (a *App) planWith(run *agent.RunControl, session *store.Session, dir string
 		return a.failPlanning(plan, &ChatResult{Error: "规划器返回空响应"})
 	}
 
+	// 用户在请求在途期间点了停止：不要把它变成一份"刚刚才出现"的新计划。
+	//
+	// 这一步必须做，否则「取消」看起来毫无作用：请求照样返回，记录照样转成待审核，
+	// 用户还得再拒绝一次——"点了没反应"正是本项目在别处反复避免的那类体感缺陷。
+	if run.SoftRequested() {
+		return a.finishPlanningCancelled(plan, run)
+	}
+
 	d, err := store.ParsePlanDraft(resp.Choices[0].Message.Content)
 	if err != nil {
 		return a.failPlanning(plan, &ChatResult{Error: fmt.Sprintf("规划失败: %v", err)})

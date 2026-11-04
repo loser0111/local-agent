@@ -7,7 +7,7 @@ import { useDiffStore } from '@/stores/diff'
 import { useSettingStore } from '@/stores/setting'
 import { usePlanStore } from '@/stores/plan'
 import { useTodoStore } from '@/stores/todo'
-import { appendMessage, appendConversation, chat, stopChat, getContextStat, saveAttachment, fetchImageURL, getAttachmentDataURL } from '@/api/session'
+import { appendMessage, appendConversation, chat, stopChat, getContextStat, saveAttachment, setPlanMode, fetchImageURL, getAttachmentDataURL } from '@/api/session'
 import { fetchPendingInteraction } from '@/api/interaction'
 import { DEFAULT_VIEW_MODE } from '@/types'
 import { usePermissionStore } from '@/stores/permissions'
@@ -33,8 +33,37 @@ const askStore = useAskStore()
 const skillsStore = useSkillsStore()
 const ui = useUiStore()
 
-// 计划模式（单次意图，非全局偏好）：开启后下一条消息走规划流程
-const planMode = ref(false)
+// 计划模式：**会话级、粘性**（存在会话字段里，不是组件内存态）。
+//
+// 改造前它是本组件的一个 ref：刷新页面、切会话、重开应用就丢。而"这条会话要用计划模式"
+// 本身是一条需要跨重启保持的意图——计划模式丢了，用户正在做的事就丢了。
+// 也刻意不再"生成计划后自动复位"：模式就该是模式，不是一次性开关。
+const planMode = computed(() => !!sessionStore.currentSession?.planMode)
+const planBusy = computed(() => {
+  const sid = sessionId.value
+  return !sid ? false : chatStore.isGeneratingIn(sid) || planStore.isExecutingIn(sid)
+})
+
+/**
+ * 切换计划模式：乐观更新 + 失败回滚。
+ *
+ * 为什么乐观：切换开关不该等一次 IPC 往返（体感上是"点了没反应"）。
+ * 为什么必须回滚：后端会在会话运行中拒绝切换，若不回滚，界面会显示成已开、
+ * 而后端仍是关——正是这一整套改造要消灭的那种状态分叉。
+ */
+async function togglePlanMode() {
+  const sid = sessionId.value
+  if (!sid || planBusy.value) return
+  const next = !planMode.value
+  sessionStore.touchSession(sid, { planMode: next })
+  try {
+    const saved = await setPlanMode(sid, next)
+    sessionStore.touchSession(sid, { planMode: !!saved?.planMode })
+  } catch (e) {
+    sessionStore.touchSession(sid, { planMode: !next })
+    ui.notify(`切换计划模式失败：${e?.message || e}`, 'error')
+  }
+}
 
 // 停止请求已发出、正在等后端收尾。此时再点「停止」升级为硬取消。
 //
@@ -576,6 +605,46 @@ async function sendMessage() {
   let placeholderId = null
 
   try {
+    // 0. 计划模式：**不在这里落用户消息**。后端 ChatPlan 会把请求作为计划记录的
+    //    Query 落盘（重试规划要复用它）；前端再写一条会让聊天流出现两条一样的请求，
+    //    也会让"规划失败后重试"看起来像又发了一次。
+    if (usePlan) {
+      const result = await chat(sid, text, {
+        stream: false, // 规划器固定非流式；免计划直答取完整回复
+        plan: true,
+        onPlanUpdate: (p) => planStore.applyUpdate(sid, p),
+        onPlanCleared: () => planStore.clearPlan(sid),
+        onTodoUpdate: (items) => todoStore.setTodos(sid, items),
+      })
+      updateContextStat(sid, result?.context)
+      if (result?.plan) {
+        planStore.applyUpdate(sid, result.plan)
+        // 后台自动打开：不动用户的右侧收起状态（收起时计划以图标出现在窄条上）
+        paneStore.openPaneBackground(sid, 'plan')
+      } else if (result?.reply) {
+        // 平凡请求免计划：后端直接给了回复
+        chatStore.addLocalMessage(sid, {
+          id: `assistant-${Date.now()}`,
+          role: 'assistant',
+          content: result.reply,
+          createdAt: Date.now(),
+          streaming: false,
+        })
+      } else if (result?.error) {
+        // 规划失败：计划面板上有「重试规划」，这里只补一句说明，
+        // 免得用户面对一屏"什么也没发生"。
+        chatStore.addLocalMessage(sid, {
+          id: `plan-gen-error-${Date.now()}`,
+          role: 'assistant',
+          content: `生成计划失败：${result.error}（可在计划面板点「重试规划」）`,
+          createdAt: Date.now(),
+          streaming: false,
+        })
+      }
+      sessionStore.touchSession(sid)
+      return
+    }
+
     // 1. 先落附件、再落消息：消息里挂的引用因此一定是完整的，
     //    不会出现"消息已入库、图还在路上"这种读了会报错的中间态。
     const attachments = []
@@ -614,42 +683,6 @@ async function sendMessage() {
       })
     } else {
       sessionStore.touchSession(sid)
-    }
-
-    // 计划模式：走规划流程产出可审核的计划（平凡请求由后端直接回复）
-    if (usePlan) {
-      const result = await chat(sid, text, {
-        stream: false, // 规划器固定非流式；免计划直答取完整回复
-        plan: true,
-        onPlanUpdate: (p) => planStore.applyUpdate(sid, p),
-        onTodoUpdate: (items) => todoStore.setTodos(sid, items),
-      })
-      updateContextStat(sid, result?.context)
-      if (result?.plan) {
-        planStore.applyUpdate(sid, result.plan)
-        // 计划是单次意图，生成后自动复位（只复位当前正在看的这条会话的开关）
-        if (sessionId.value === sid) planMode.value = false
-        // 后台自动打开：不动用户的右侧收起状态（收起时计划以图标出现在窄条上）
-        paneStore.openPaneBackground(sid, 'plan')
-      } else if (result?.reply) {
-        chatStore.addLocalMessage(sid, {
-          id: `assistant-${Date.now()}`,
-          role: 'assistant',
-          content: result.reply,
-          createdAt: Date.now(),
-          streaming: false,
-        })
-      } else if (result?.error) {
-        chatStore.addLocalMessage(sid, {
-          id: `plan-gen-error-${Date.now()}`,
-          role: 'assistant',
-          content: `生成计划失败：${result.error}`,
-          createdAt: Date.now(),
-          streaming: false,
-        })
-      }
-      sessionStore.touchSession(sid)
-      return
     }
 
     // 2. 创建本地 AI 消息占位（流式显示用，展示工具调用中间状态）
@@ -1144,10 +1177,14 @@ function openTasks() {
         </button>
         <button
           class="tool-btn plan-btn"
-          :class="{ active: planMode }"
+          :class="{ active: planMode, disabled: planBusy }"
           :disabled="chatStore.isGenerating"
-          :title="planMode ? '计划模式已开启：本条消息将先生成可审核的计划' : '计划模式：复杂任务先生成可审核的计划'"
-          @click="planMode = !planMode"
+          :title="planBusy
+            ? '会话正在运行，结束后可切换计划模式'
+            : planMode
+              ? '计划模式已开启（按会话保存）：本条消息会先生成可审核的计划'
+              : '计划模式：复杂任务先生成可审核的计划'"
+          @click="togglePlanMode"
         >
           <svg width="15" height="15" viewBox="0 0 16 16" fill="none">
             <path d="M3 2.5h7l3 3v8a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1v-10a1 1 0 0 1 1-1z" stroke="currentColor" stroke-width="1.3" />

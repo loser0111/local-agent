@@ -2,6 +2,8 @@ import {
   GetSessionPlan,
   SavePlan,
   ExecutePlan,
+  ResumePlan,
+  RetryPlan,
   CancelPlan,
   ReopenPlan,
   ListPlans,
@@ -215,6 +217,96 @@ export async function reopenPlan(planId) {
   plan.updatedAt = Date.now()
   writeMockPlan(plan.sessionId, plan)
   return clone(plan)
+}
+
+/**
+ * 复用计划里保存的原始请求重新规划（规划失败后的一键重试）。
+ *
+ * 不重新发一条消息：那段需求已经在会话历史里，重发会让聊天流出现两条一样的
+ * 用户消息、模型上下文里也会重复一遍。
+ * @param {string} sessionId 计划所属会话（事件按会话路由）
+ * @param {string} planId
+ * @param {boolean} useStream 仅影响"无需计划"时直答是否流式
+ * @param {{onPlanUpdate?:Function}} handlers
+ * @returns {Promise<{plan?:object, reply?:string, error?:string, cancelled?:boolean}>}
+ */
+export async function retryPlan(sessionId, planId, useStream, handlers = {}) {
+  if (isWails()) {
+    const off = subscribeChat(sessionId, { onPlanUpdate: handlers.onPlanUpdate })
+    try {
+      return await RetryPlan(planId, !!useStream)
+    } finally {
+      off()
+    }
+  }
+
+  // ===== mock：模拟"规划失败 → 重试成功" =====
+  const found = findMockPlanById(planId)
+  if (!found) throw new Error('计划不存在')
+  const plan = found.plan
+  if (plan.status !== 'plan_failed') throw new Error('计划当前状态不可重试规划')
+  plan.status = 'planning'
+  plan.error = ''
+  plan.revision = (plan.revision || 0) + 1
+  handlers.onPlanUpdate?.(clone(plan))
+  await sleep(600)
+  plan.status = 'awaiting_approval'
+  plan.title = plan.title || '重试后生成的计划'
+  plan.steps = (plan.steps || []).length
+    ? plan.steps
+    : [
+        { index: 0, title: '第一步', detail: '', status: 'pending' },
+        { index: 1, title: '第二步', detail: '', status: 'pending' },
+      ]
+  plan.revision = (plan.revision || 0) + 1
+  plan.updatedAt = Date.now()
+  writeMockPlan(plan.sessionId, plan)
+  handlers.onPlanUpdate?.(clone(plan))
+  return { plan: clone(plan) }
+}
+
+/**
+ * 从断点续跑：保留已完成步骤，从第一个未完成步骤接着执行。
+ *
+ * 与 executePlan 分开：一个表示"批准这份计划"，一个表示"把没跑完的接着跑完"，
+ * 两者对用户是不同的事（按钮、文案、可用状态都不同）。
+ * @param {string} sessionId
+ * @param {string} planId
+ * @param {boolean} useStream
+ * @param {object} handlers 与 executePlan 相同的回调
+ */
+export async function resumePlan(sessionId, planId, useStream, handlers = {}) {
+  if (isWails()) {
+    const off = subscribeChat(sessionId, {
+      onPlanUpdate: handlers.onPlanUpdate,
+      onReplyDelta: handlers.onReplyDelta,
+      onThinkingDelta: handlers.onThinkingDelta,
+      onToolCallStart: handlers.onToolCallStart,
+      onToolCallEnd: handlers.onToolCallEnd,
+      onTodoUpdate: handlers.onTodoUpdate,
+    })
+    try {
+      return await ResumePlan(planId, !!useStream)
+    } finally {
+      off()
+    }
+  }
+
+  // mock：续跑等价于"把非 done 的步骤重新跑一遍"
+  const found = findMockPlanById(planId)
+  if (!found) throw new Error('计划不存在')
+  const plan = found.plan
+  if (!['failed', 'interrupted', 'cancelled'].includes(plan.status)) {
+    throw new Error('计划状态不允许继续执行')
+  }
+  for (const st of plan.steps || []) {
+    if (st.status === 'done') continue
+    st.status = 'pending'
+    st.error = ''
+  }
+  plan.error = ''
+  writeMockPlan(plan.sessionId, plan)
+  return await executePlan(sessionId, planId, useStream, handlers)
 }
 
 /**

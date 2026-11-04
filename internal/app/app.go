@@ -1126,6 +1126,26 @@ func (a *App) CancelPlan(planID string) error {
 	if err != nil {
 		return err
 	}
+
+	// 规划阶段：那是会话级的运行登记（BeginExclusive(sessionID, "")，不带 planID），
+	// 因此按 planID 找不到它，要按会话再查一次。
+	//
+	// 用户看到的都是"这个计划还没完成，我要停掉"，不该因为内部把规划与执行分成两种
+	// 运行就让「取消」在规划期失效（原先它会直接报"计划未在执行中"）。
+	if plan.Status == store.PlanPlanning {
+		if hit, _ := a.runs.StopSession(plan.SessionID, false); hit {
+			return nil // 规划协程会走 finishPlanningCancelled 收尾
+		}
+		// 没有活跃规划（协程已消失）：就地收尾，别把它留成"永远规划中"。
+		plan.Status = store.PlanCancelled
+		plan.Error = "规划已取消"
+		if err := a.planStore.Save(plan); err != nil {
+			return err
+		}
+		a.emitPlanUpdate(plan, -1)
+		return nil
+	}
+
 	if plan.Status != store.PlanRunning {
 		return fmt.Errorf("计划未在执行中: %s", planID)
 	}
