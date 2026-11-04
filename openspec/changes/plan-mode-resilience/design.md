@@ -51,6 +51,8 @@
 4. 成功且 `needPlan=true` → 该记录转 `awaiting_approval` 并写入步骤；
 5. 成功但 `needPlan=false` → 删除该记录，走普通 `runToolLoop` 直答；
 6. 失败 → 该记录转 `plan_failed`，写入 `Error`，`emitPlanUpdate`，返回 `ChatResult{Plan: plan, Error: ...}`（注意：`App.Chat` 目前把「有 error 且无 reply」转成 Go error 返回，需为 `plan != nil` 的情况放行，让前端能拿到计划对象）。
+   - 用户中途停止时转 `PlanCancelled` + `Error="规划已取消"` 并带 `Cancelled=true`：取消是主动行为，不该给一个「重试规划」按钮，也不该显示成失败。这类记录不可重试，下次发送会新建一条（它不是「未完成记录」）。
+   - 应用在规划中途退出会留下永久 `planning` 的幽灵记录：`PlanStore.loadAll` 把它转成 `plan_failed`（可重试、且 `Query` 已落盘）。
 
 备选：单独的 `pending-plan.json` 或给用户消息挂标记——前者多一套文件生命周期，后者要动消息渲染；复用 Plan 能直接复用 `GetSessionPlan`、`plan_update` 事件与 PlanPane。
 
@@ -156,7 +158,7 @@ StepInterrupted  = "interrupted"
 | 方法 | 变更 |
 | --- | --- |
 | `SetSessionPlanMode(sessionID, enabled) (*Session, error)` | 新增 |
-| `RetryPlan(planID) (*ChatResult, error)` | 新增（复用 `Plan.Query` 重规划） |
+| `RetryPlan(planID, useStream) (*ChatResult, error)` | 新增（复用 `Plan.Query` 重规划；`useStream` 只影响「无需计划」直答是否流式） |
 | `ResumePlan(planID, useStream) (*ChatResult, error)` | 新增（从断点续跑） |
 | `GetSessionPlan(sessionID) *Plan` | 语义扩展：读取时惰性对账 `running` |
 | `ExecutePlan(planID, useStream) *ChatResult` | 状态校验收窄为 `awaiting_approval` |

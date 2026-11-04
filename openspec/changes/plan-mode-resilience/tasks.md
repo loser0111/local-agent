@@ -16,10 +16,10 @@
 
 ## 3. 规划流程（会话级计划模式）
 
-- [ ] 3.1 `App.SetSessionPlanMode(sessionID, enabled) (*store.Session, error)`：校验会话存在、执行中拒绝切换（`runs.BySession` 非空且该运行是计划执行时返回可读错误）。验证：`internal/app/permission_test.go` 同级新增 `planmode_test.go` 用例
-- [ ] 3.2 `ChatPlan` 重构：先落 `planning` 记录（同会话未完成记录复用/覆盖）→ 调规划器 → 成功转 `awaiting_approval` / 失败转 `plan_failed` / `needPlan=false` 丢弃记录并直答。验证：`plan_test.go` 用 httptest 覆盖三条路径，断言 `GetSessionPlan` 结果与历史中用户消息条数
-- [ ] 3.3 `App.RetryPlan(planID) (*ChatResult, error)`：仅接受 `plan_failed`，复用 `Plan.Query` 重新规划、不追加用户消息、走 `BeginExclusive` 互斥。验证：单测断言「重试成功转 awaiting_approval」「再次失败仍为 plan_failed 且错误更新」「并发重试被拒绝」
-- [ ] 3.4 `App.Chat` 对 `Plan != nil` 的失败结果放行（不再转成 Go error），使前端能拿到失败计划对象。验证：单测断言「规划失败时返回 result 而非 error」
+- [x] 3.1 `App.SetSessionPlanMode(sessionID, enabled) (*store.Session, error)`：校验会话存在、执行中拒绝切换（`runs.BySession` 非空且该运行是计划执行时返回可读错误）。验证：`internal/app/permission_test.go` 同级新增 `planmode_test.go` 用例
+- [x] 3.2 `ChatPlan` 重构：先落 `planning` 记录（同会话未完成记录复用/覆盖）→ 调规划器 → 成功转 `awaiting_approval` / 失败转 `plan_failed` / `needPlan=false` 丢弃记录并直答。验证：`plan_test.go` 用 httptest 覆盖三条路径，断言 `GetSessionPlan` 结果与历史中用户消息条数
+- [x] 3.3 `App.RetryPlan(planID) (*ChatResult, error)`：仅接受 `plan_failed`，复用 `Plan.Query` 重新规划、不追加用户消息、走 `BeginExclusive` 互斥。验证：单测断言「重试成功转 awaiting_approval」「再次失败仍为 plan_failed 且错误更新」「并发重试被拒绝」
+- [x] 3.4 `App.Chat` 对 `Plan != nil` 的失败结果放行（不再转成 Go error），使前端能拿到失败计划对象。验证：单测断言「规划失败时返回 result 而非 error」
 
 ## 4. 执行器（续跑 + 自动重试 + 幂等）
 

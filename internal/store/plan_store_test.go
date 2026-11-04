@@ -195,3 +195,60 @@ func TestPlanStoreReopenFromInterrupted(t *testing.T) {
 		t.Fatalf("中断步骤应重置为待执行并清空原因，实际: %+v", reopened.Steps[1])
 	}
 }
+
+// TestPlanStoreStartupRecoversStuckPlanning 进程在规划中途退出：
+// 记录会永远停在 planning（没有任何东西会把它推下去），启动时必须转成可重试的 plan_failed。
+func TestPlanStoreStartupRecoversStuckPlanning(t *testing.T) {
+	dir := t.TempDir()
+	writeRawPlanFile(t, dir, &Plan{
+		ID: "plan_stuck", SessionID: "s1", Status: PlanPlanning,
+		Query: "帮我升级依赖并跑通测试",
+	})
+
+	s := NewPlanStore(dir)
+	got, err := s.Get("plan_stuck")
+	if err != nil {
+		t.Fatalf("加载计划失败: %v", err)
+	}
+	if got.Status != PlanPlanFailed {
+		t.Fatalf("卡住的 planning 应恢复为 %q，实际: %q", PlanPlanFailed, got.Status)
+	}
+	if got.Error == "" {
+		t.Fatal("恢复时应写明原因")
+	}
+	if got.Query == "" {
+		t.Fatal("原始请求必须保留，否则无法重试规划")
+	}
+
+	// 恢复结果要落盘：否则每次启动都要重新"发现"一次这条幽灵记录
+	onDisk := readRawPlanFile(t, dir, "plan_stuck")
+	if onDisk.Status != PlanPlanFailed {
+		t.Fatalf("恢复结果未落盘，磁盘上仍是: %q", onDisk.Status)
+	}
+}
+
+// TestPlanStoreDelete 删除只用于丢弃占位记录；不存在时报错（便于调用方发现 ID 写错）。
+func TestPlanStoreDelete(t *testing.T) {
+	dir := t.TempDir()
+	s := NewPlanStore(dir)
+	p := &Plan{ID: "plan_tmp", SessionID: "s1", Status: PlanPlanning, Query: "q"}
+	if err := s.Save(p); err != nil {
+		t.Fatalf("Save 失败: %v", err)
+	}
+
+	if err := s.Delete(p.ID); err != nil {
+		t.Fatalf("Delete 失败: %v", err)
+	}
+	if _, err := s.Get(p.ID); err == nil {
+		t.Fatal("删除后不应还能取到")
+	}
+	if got := s.GetBySession("s1"); got != nil {
+		t.Fatalf("按会话也不应再取到，实际 %+v", got)
+	}
+	if _, err := os.Stat(filepath.Join(dir, p.ID+".json")); !os.IsNotExist(err) {
+		t.Fatal("删除后文件应已移除（否则重启会把它读回来）")
+	}
+	if err := s.Delete(p.ID); err == nil {
+		t.Fatal("删除不存在的计划应报错")
+	}
+}

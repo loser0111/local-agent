@@ -206,6 +206,12 @@ const (
 	// ChatEventTodoUpdate 待办清单已变化（事件携带全量清单）。
 	// 与 plan_update 一样是"面板级"事件：它不依附某一轮，因此前端要按 sessionId 归位。
 	ChatEventTodoUpdate = "todo_update"
+	// ChatEventPlanCleared 会话不再有计划（规划判定"无需计划"时丢弃了占位记录）。
+	//
+	// 为什么需要独立事件而不是发一条 Plan=nil 的 plan_update：Plan 带 omitempty，
+	// nil 在 JSON 里就是"没有这个字段"，前端无法与"事件没带计划"区分——
+	// 于是"清空"这个语义会静默丢失，面板会一直停在"规划中"。
+	ChatEventPlanCleared = "plan_cleared"
 )
 
 // emitChatEvent 向前端推送一个聊天事件（无 Wails 上下文时静默跳过）。
@@ -1488,8 +1494,13 @@ func (a *App) emitPlanUpdate(plan *store.Plan, stepIndex int) {
 	})
 }
 
-// ChatPlan 规划流程：调用规划器产出结构化计划（或平凡请求直答）。
+// ChatPlan 规划流程：产出结构化计划（或平凡请求直答）。
 // 用户消息已由前端持久化，此处不再落库；规划器过程消息不持久化（对用户无信息量）。
+//
+// **先落一条 planning 记录，再调规划器**。这条记录是「这次请求还没被处理完」的唯一凭据：
+// 在此之前规划失败是彻底的静默——用户消息已经进了会话，却没有任何东西说明这条消息
+// 本该产出一份计划，于是用户只能把整段需求重打一遍、再开一次开关。有了它，
+// 前端可以给一个「重试规划」按钮（见 RetryPlan），复用 Plan.Query 重来。
 func (a *App) ChatPlan(sessionID, query string, useStream bool) *ChatResult {
 	// 1. 会话与模型解析（与 executeChat 一致）
 	session, err := a.sessionStore.GetSession(sessionID)
@@ -1499,10 +1510,6 @@ func (a *App) ChatPlan(sessionID, query string, useStream bool) *ChatResult {
 	model, err := a.modelStore.GetModelForCall(session.Model)
 	if err != nil {
 		return &ChatResult{Error: fmt.Sprintf("获取模型配置失败: %v", err)}
-	}
-	modelID := model.ModelID
-	if modelID == "" {
-		modelID = model.Name
 	}
 	dir, _ := a.resolveProjectDir(sessionID)
 
@@ -1514,61 +1521,220 @@ func (a *App) ChatPlan(sessionID, query string, useStream bool) *ChatResult {
 	}
 	defer a.runs.End(run)
 
-	// 2. 规划器调用：无工具、非流式、低温。
+	// 2. 先把这次请求落盘为 planning 记录（复用会话里那条尚未完成的记录）
+	plan, perr := a.ensurePlanningRecord(sessionID, query)
+	if perr != nil {
+		return &ChatResult{Error: fmt.Sprintf("创建计划记录失败: %v", perr)}
+	}
+
+	// 3. 交给与 RetryPlan 共用的规划流程
+	return a.planWith(run, session, dir, &model, plan, useStream)
+}
+
+// ensurePlanningRecord 取会话里那条「尚未完成的规划记录」，没有就新建一条 planning 记录。
+//
+// 复用而不是每次新建：规划失败后用户直接再发一条新需求、或连点两次发送，
+// 会话里都不该堆着一串"规划中"（规格 session-plan-mode 要求同一会话只有一条未完成记录）。
+// 复用时的 Query 必须覆盖：这条记录代表的是"最近这一次请求"，不是历史上任何一次。
+func (a *App) ensurePlanningRecord(sessionID, query string) (*store.Plan, error) {
+	if cur := a.planStore.GetBySession(sessionID); cur != nil &&
+		(cur.Status == store.PlanPlanning || cur.Status == store.PlanPlanFailed) {
+		cur.Query = query
+		cur.Error = ""
+		cur.Title = ""
+		cur.Steps = nil
+		cur.Status = store.PlanPlanning
+		if err := a.planStore.Save(cur); err != nil {
+			return nil, err
+		}
+		a.emitPlanUpdate(cur, -1)
+		return cur, nil
+	}
+
+	now := time.Now().UnixMilli()
+	p := &store.Plan{
+		ID:        store.GeneratePlanID(),
+		SessionID: sessionID,
+		Status:    store.PlanPlanning,
+		Query:     query,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := a.planStore.Save(p); err != nil {
+		return nil, err
+	}
+	a.emitPlanUpdate(p, -1)
+	return p, nil
+}
+
+// failPlanning 把规划失败写回记录，并把计划对象挂到结果上。
+//
+// 计划对象必须随结果返回：前端要靠它渲染「规划失败 + 重试」这一屏，
+// 而 App.Chat 也正是靠"结果里有 plan"来区分"规划失败"（可重试）与
+// "这轮对话本身失败"（原来一律转成 Go error）。
+func (a *App) failPlanning(plan *store.Plan, res *ChatResult) *ChatResult {
+	plan.Status = store.PlanPlanFailed
+	plan.Error = res.Error
+	plan.Steps = nil
+	if err := a.planStore.Save(plan); err != nil {
+		// 写盘失败不改变返回值：内存里已是 plan_failed，用户至少看得到原因；
+		// 但要在日志里点名，否则重启后这条记录会退回磁盘上的旧状态。
+		fmt.Printf("[plan] 写回规划失败状态失败（计划 %s）: %v\n", plan.ID, err)
+	}
+	a.emitPlanUpdate(plan, -1)
+	res.Plan = plan
+	return res
+}
+
+// finishPlanningCancelled 规划被用户停止时的收尾。
+//
+// 记为 cancelled 而不是 failed：用户刚刚就是不要它了，再给一个「重试规划」按钮
+// 是在跟他的动作唱反调。Cancelled=true 让前端显示"已停止"而不是"失败"。
+func (a *App) finishPlanningCancelled(plan *store.Plan, run *agent.RunControl) *ChatResult {
+	plan.Status = store.PlanCancelled
+	plan.Error = "规划已取消"
+	plan.Steps = nil
+	if err := a.planStore.Save(plan); err != nil {
+		fmt.Printf("[plan] 写回规划取消状态失败（计划 %s）: %v\n", plan.ID, err)
+	}
+	a.emitPlanUpdate(plan, -1)
+	return &ChatResult{
+		Plan:       plan,
+		Error:      "执行已取消",
+		Cancelled:  true,
+		CancelKind: run.Kind(),
+	}
+}
+
+// discardPlanningRecord 丢弃占位记录（规划器判定"无需计划"时）。
+//
+// 用删除而不是留一条空计划：空计划会让面板显示一个"没有步骤的计划"，用户会以为是失败。
+// 这条记录也从未承载过任何用户可见的语义，没有保留价值。
+func (a *App) discardPlanningRecord(plan *store.Plan) {
+	if plan == nil {
+		return
+	}
+	if err := a.planStore.Delete(plan.ID); err != nil {
+		fmt.Printf("[plan] 丢弃占位计划失败（%s）: %v\n", plan.ID, err)
+		return
+	}
+	if a.HasUI() {
+		a.eventsEmit("chat:event", ChatEvent{Type: ChatEventPlanCleared, SessionID: plan.SessionID})
+	}
+}
+
+// RetryPlan 复用计划里保存的原始请求重新规划（规划失败后的一键重试）。
+//
+// 为什么不"重新发一条消息"：那段需求已经进了会话历史，重发会在聊天流里出现两条
+// 一模一样的用户消息，模型上下文里也会重复一遍。
+//
+// useStream 只影响"规划器判定无需计划"时直答是否流式；规划器本身永远非流式。
+func (a *App) RetryPlan(planID string, useStream bool) (*ChatResult, error) {
+	plan, err := a.planStore.Get(planID)
+	if err != nil {
+		return nil, err
+	}
+	if plan.Status != store.PlanPlanFailed {
+		return nil, fmt.Errorf("计划当前状态不可重试规划: %s", plan.Status)
+	}
+	if strings.TrimSpace(plan.Query) == "" {
+		// 旧版本写下的计划没有 query（字段是本次才加的）。这时只能让用户自己重发——
+		// 凭空造一个请求比直接拒绝更糟。
+		return nil, fmt.Errorf("该计划没有保存原始请求，无法重试")
+	}
+
+	session, err := a.sessionStore.GetSession(plan.SessionID)
+	if err != nil {
+		return nil, fmt.Errorf("加载会话失败: %v", err)
+	}
+	model, err := a.modelStore.GetModelForCall(session.Model)
+	if err != nil {
+		return nil, fmt.Errorf("获取模型配置失败: %v", err)
+	}
+	dir, _ := a.resolveProjectDir(plan.SessionID)
+
+	// 与普通发送、计划执行共用同一套会话级互斥：并发重试同一份计划在这里被拒，
+	// 而不是两条规划在后台一起写同一条记录。
+	run, berr := a.runs.BeginExclusive(plan.SessionID, plan.ID)
+	if berr != nil {
+		return nil, berr
+	}
+	defer a.runs.End(run)
+
+	// 回到 planning 并落盘：前端据此从"规划失败"切回"规划中"，
+	// 也让第二次失败仍然写回同一条记录（而不是又长出一条）。
+	plan.Status = store.PlanPlanning
+	plan.Error = ""
+	if err := a.planStore.Save(plan); err != nil {
+		return nil, fmt.Errorf("更新计划状态失败: %v", err)
+	}
+	a.emitPlanUpdate(plan, -1)
+
+	return a.planWith(run, session, dir, &model, plan, useStream), nil
+}
+
+// planWith 用已落盘的 planning 记录调一次规划器，并把结果写回这份记录。
+//
+// ChatPlan 与 RetryPlan 共用它：两者的差别只在"记录是怎么来的"（新建 vs 复用失败记录），
+// 调规划器与写回状态这两段必须完全一致——各写一份的话，重试路径迟早会悄悄少写一次状态
+// （本项目在权限网关与工具曝光策略上已经各吃过一次这种亏）。
+func (a *App) planWith(run *agent.RunControl, session *store.Session, dir string, model *store.Model, plan *store.Plan, useStream bool) *ChatResult {
+	modelID := model.ModelID
+	if modelID == "" {
+		modelID = model.Name
+	}
+
+	// 规划器调用：无工具、非流式、低温。
 	//
 	// 重试交给 llm.CallLLMForModelWith 里的统一重试层。原先这里是「固定试两次、
 	// 不区分错误类型」：一次 400（请求本身有问题）也要白白再打一次，
 	// 而真正该重试的 429 却只多试一次就放弃——正好把两种情况的处理弄反了。
 	// giveUp 传 run.SoftRequested：用户点了停止之后不该还在后台重试。
 	if run.SoftRequested() {
-		return &ChatResult{Error: "执行已取消", Cancelled: true, CancelKind: run.Kind()}
+		return a.finishPlanningCancelled(plan, run)
 	}
 	req := &llm.LLMReq{
 		Model:       modelID,
 		Temperature: 0.2,
 		Messages: []llm.LLMMessage{
 			{Role: store.RoleSystem, Content: store.PlannerSystemPrompt},
-			{Role: store.RoleUser, Content: store.BuildPlannerUserPrompt(query, dir)},
+			{Role: store.RoleUser, Content: store.BuildPlannerUserPrompt(plan.Query, dir)},
 		},
 	}
-	resp, lastErr := llm.CallLLMForModelWith(run.Ctx(), &model, req, llm.DefaultRetryPolicy, run.SoftRequested)
+	resp, lastErr := llm.CallLLMForModelWith(run.Ctx(), model, req, llm.DefaultRetryPolicy, run.SoftRequested)
 	if lastErr != nil {
 		// ErrorKind 让上层能分辨"重试可能有用的网络错误"与"配置/密钥不对"，
 		// 前者值得给一个「重试规划」按钮，后者重试一百次也一样。
-		return &ChatResult{
+		return a.failPlanning(plan, &ChatResult{
 			Error:     fmt.Sprintf("规划失败: %v", lastErr),
 			ErrorKind: string(llm.ClassifyError(lastErr)),
-		}
+		})
 	}
 	if len(resp.Choices) == 0 {
-		return &ChatResult{Error: "规划器返回空响应"}
+		return a.failPlanning(plan, &ChatResult{Error: "规划器返回空响应"})
 	}
 
-	// 3. 解析规划输出
 	d, err := store.ParsePlanDraft(resp.Choices[0].Message.Content)
 	if err != nil {
-		return &ChatResult{Error: fmt.Sprintf("规划失败: %v", err)}
+		return a.failPlanning(plan, &ChatResult{Error: fmt.Sprintf("规划失败: %v", err)})
 	}
 
-	// 4. 平凡请求免计划（G8）：走普通工具循环直答
+	// 平凡请求免计划（G8）：丢弃占位记录，走普通工具循环直答。
+	// 原始请求取记录里那份（与落盘一致）——RetryPlan 复用这条代码时，请求只在磁盘上。
 	if !d.NeedPlan {
-		prompt, allowedTools, err := a.buildBasePromptWithSkill(session, dir, query)
-		if err != nil {
-			return &ChatResult{Error: err.Error()}
+		a.discardPlanningRecord(plan)
+		prompt, allowedTools, berr := a.buildBasePromptWithSkill(session, dir, plan.Query)
+		if berr != nil {
+			return &ChatResult{Error: berr.Error()}
 		}
-		return runToolLoop(a.newMainAgentRun(run, session, dir, prompt, allowedTools, &model, useStream, false))
+		return runToolLoop(a.newMainAgentRun(run, session, dir, prompt, allowedTools, model, useStream, false))
 	}
 
-	// 5. 组装计划并落盘（待审核状态）
-	now := time.Now().UnixMilli()
-	plan := &store.Plan{
-		ID:        store.GeneratePlanID(),
-		SessionID: sessionID,
-		Title:     d.Title,
-		Status:    store.PlanAwaitingApproval,
-		CreatedAt: now,
-		UpdatedAt: now,
-	}
+	// 把规划结果写回那条 planning 记录，转为待审核
+	plan.Title = d.Title
+	plan.Status = store.PlanAwaitingApproval
+	plan.Error = ""
+	plan.Steps = nil
 	for i, s := range d.Steps {
 		plan.Steps = append(plan.Steps, &store.PlanStep{
 			Index:  i,
@@ -1578,10 +1744,8 @@ func (a *App) ChatPlan(sessionID, query string, useStream bool) *ChatResult {
 		})
 	}
 	if err := a.planStore.Save(plan); err != nil {
-		return &ChatResult{Error: fmt.Sprintf("保存计划失败: %v", err)}
+		return &ChatResult{Error: fmt.Sprintf("保存计划失败: %v", err), Plan: plan}
 	}
-
-	// 6. 推送计划事件并返回
 	a.emitPlanUpdate(plan, -1)
 	return &ChatResult{Plan: plan}
 }

@@ -810,7 +810,11 @@ func (a *App) Chat(sessionID string, query string, useStream bool, usePlan bool)
 	}
 	// 取消不走错误路径：它是用户的主动行为，结果照常返回（前端据 cancelled 字段
 	// 显示"已停止"）。否则用户点一下停止会看到"发送失败：执行已取消"。
-	if result.Error != "" && result.Reply == "" && !result.Cancelled {
+	//
+	// 带 Plan 的失败同样不走错误路径：规划失败时结果里挂着那条 plan_failed 记录，
+	// 前端要靠它渲染「规划失败 + 重试」。转成 Go error 的话，前端拿到的只有一句话，
+	// 重试按钮就没有依据了（计划 ID 都没了）。
+	if result.Error != "" && result.Reply == "" && !result.Cancelled && result.Plan == nil {
 		return result, fmt.Errorf("%s", result.Error)
 	}
 	return result, nil
@@ -983,6 +987,23 @@ func (a *App) SetPromptCachePrefs(p store.PromptCachePrefs) (store.PromptCachePr
 // GetSessionPlan 返回会话当前（最新创建的）计划；无计划时返回 nil
 func (a *App) GetSessionPlan(sessionID string) *store.Plan {
 	return a.planStore.GetBySession(sessionID)
+}
+
+// SetSessionPlanMode 设置某会话的计划模式（会话级、粘性）。
+//
+// 运行中直接拒绝：计划执行或规划进行时切换开关，会让"界面上的开关"与"实际在跑的东西"
+// 分叉——而这一整套改造要修的正是状态分叉。
+func (a *App) SetSessionPlanMode(sessionID string, enabled bool) (*store.Session, error) {
+	if strings.TrimSpace(sessionID) == "" {
+		return nil, fmt.Errorf("会话 ID 不能为空")
+	}
+	if _, err := a.sessionStore.GetSession(sessionID); err != nil {
+		return nil, err
+	}
+	if r := a.runs.BySession(sessionID); r != nil {
+		return nil, fmt.Errorf("会话正在运行，请等它结束后再切换计划模式")
+	}
+	return a.sessionStore.UpdateSession(sessionID, store.SessionPatch{PlanMode: &enabled})
 }
 
 // ListPlans 返回会话全部历史计划（按创建时间倒序）

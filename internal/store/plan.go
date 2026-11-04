@@ -168,6 +168,14 @@ func (s *PlanStore) loadAll() {
 		if json.Unmarshal(data, &p) != nil {
 			continue // 损坏文件跳过，不影响其他计划
 		}
+		if p.Status == PlanPlanning {
+			// 规划中途进程退出：这条记录会永远停在 planning——没有任何东西会把它推下去，
+			// 界面上就是一个"永远规划中"的幽灵。转成 plan_failed 才既可解释又可重试
+			// （Plan.Query 在落盘时就已保存）。
+			p.Status = PlanPlanFailed
+			p.Error = "规划中断（应用退出），可重试"
+			_ = s.saveLocked(&p)
+		}
 		if p.Status == PlanRunning {
 			// 进程退出/崩溃留下的 running 不代表失败，只代表"没人接着跑"。
 			// 置为 interrupted（可从断点续跑）而不是 failed（要改计划再批准）。
@@ -210,6 +218,23 @@ func (s *PlanStore) Save(p *Plan) error {
 		return err
 	}
 	s.plans[p.ID] = p
+	return nil
+}
+
+// Delete 删除一条计划（文件与内存条目一起删）。
+//
+// 目前只有一个用途：规划器判定"无需计划"时丢弃 planning 占位记录。
+// 刻意不提供"删除失败计划"的能力——失败计划是可续跑、可重试的资产，不是垃圾。
+func (s *PlanStore) Delete(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.plans[id]; !ok {
+		return fmt.Errorf("计划不存在: %s", id)
+	}
+	if err := os.Remove(filepath.Join(s.dir, id+".json")); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	delete(s.plans, id)
 	return nil
 }
 
