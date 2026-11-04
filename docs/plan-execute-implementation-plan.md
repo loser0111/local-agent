@@ -837,7 +837,8 @@ go test ./... -run Plan      # 计划相关单测
 ## 十二、计划的状态机与韧性设计（增量，覆盖前文的简化描述）
 
 > 本章记录「网络/进程中断后计划模式不丢」这一轮改造后的**权威**状态定义。
-> 规划产物与决策依据见 `openspec/changes/plan-mode-resilience/`（proposal / specs / design / tasks）。
+> 规划产物与决策依据见 `openspec/changes/archive/2026-11-04-plan-mode-resilience/`（proposal / specs / design / tasks），
+> 能力规范已归档进 `openspec/specs/session-plan-mode/` 与 `openspec/specs/plan-execution-recovery/`。
 
 ### 12.1 状态定义
 

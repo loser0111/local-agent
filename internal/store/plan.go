@@ -42,7 +42,7 @@ const (
 	PlanCancelled        = "cancelled"
 )
 
-// 韧性相关的计划状态（见 openspec/changes/plan-mode-resilience）。
+// 韧性相关的计划状态（能力规范见 openspec/specs/plan-execution-recovery）。
 //
 // 与上面那组分开放：上面那组是一次正常执行的生命周期，这三个解决的是
 // "中断之后还能接着走"——混在一起会让人误以为 planning 是执行阶段的细分。
