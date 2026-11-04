@@ -24,6 +24,15 @@ const (
 	StepSkipped = "skipped" // 因前序失败/取消跳过
 )
 
+// StepInterrupted 步骤执行被外部原因打断（进程退出、运行登记丢失）。
+//
+// 与 StepFailed 刻意分开：失败是"这一步跑过并且错了"，中断是"这一步没跑完就没了"。
+// 两者的恢复动作也不同——失败过后重跑要防重复副作用，中断则通常还没产生副作用。
+//
+// 单独一个 const 块而不并入上面那块：并进去会让 gofmt 重新对齐整块，
+// 制造与本次改动无关的 diff。
+const StepInterrupted = "interrupted"
+
 // PlanStatus 计划状态
 const (
 	PlanAwaitingApproval = "awaiting_approval" // 待审核（可编辑）
@@ -31,6 +40,31 @@ const (
 	PlanCompleted        = "completed"
 	PlanFailed           = "failed"
 	PlanCancelled        = "cancelled"
+)
+
+// 韧性相关的计划状态（见 openspec/changes/plan-mode-resilience）。
+//
+// 与上面那组分开放：上面那组是一次正常执行的生命周期，这三个解决的是
+// "中断之后还能接着走"——混在一起会让人误以为 planning 是执行阶段的细分。
+const (
+	// PlanPlanning 已收到计划请求，正在调用规划器。
+	//
+	// 这个中间态必须落盘：规划失败时，它就是"用户的请求还没被处理完"的唯一凭据。
+	// 在此之前规划失败是彻底的静默——用户消息已入库，却没有任何记录说明
+	// 这条消息本该产出一份计划，于是用户只能把需求重打一遍。
+	PlanPlanning = "planning"
+
+	// PlanPlanFailed 规划失败（网络错误、规划器输出不可解析等）。
+	//
+	// 与 PlanFailed（执行失败）刻意分开：恢复动作完全不同——
+	// plan_failed 是"拿着原始请求重新规划"，failed 是"接着执行剩下的步骤"。
+	PlanPlanFailed = "plan_failed"
+
+	// PlanInterrupted 执行被外部原因打断（应用退出、运行登记丢失）。
+	//
+	// 与 PlanFailed 分开：它不包含"这一步做错了"的判断，恢复动作是从断点续跑。
+	// 应用重启时由 PlanStore.loadAll 统一置入，也会在读取计划时惰性对账置入。
+	PlanInterrupted = "interrupted"
 )
 
 // PlanStep 计划步骤
@@ -43,6 +77,18 @@ type PlanStep struct {
 	Error      string `json:"error,omitempty"`   // 失败原因
 	StartedAt  int64  `json:"startedAt,omitempty"`
 	FinishedAt int64  `json:"finishedAt,omitempty"`
+
+	// Attempt 本步骤已开始的尝试次数（1 表示第一次执行）。
+	//
+	// 续跑与步骤内自动重试都靠它区分"这是新的一次尝试"；构造模型请求时也用它
+	// 只保留最后一次尝试的 assistant/tool 消息（否则上下文里会堆满失败过程）。
+	Attempt int `json:"attempt,omitempty"`
+
+	// ContextMark 本步骤开始时会话里的消息条数。
+	//
+	// 它是"这一步从第几条消息开始"的锚点。不用时间戳：同一毫秒内可能写入多条消息，
+	// 用它切片会切偏。
+	ContextMark int `json:"contextMark,omitempty"`
 }
 
 // Plan 计划
@@ -54,6 +100,22 @@ type Plan struct {
 	Steps     []*PlanStep `json:"steps"`
 	CreatedAt int64       `json:"createdAt"`
 	UpdatedAt int64       `json:"updatedAt"`
+
+	// Query 触发生成这份计划的原始用户请求。
+	//
+	// 落盘是为了恢复：规划失败时用户消息已经进了会话，但"这条请求是要做计划的"
+	// 只存在于那次调用的参数里。有了它，「重试规划」才能复用原请求，
+	// 不必让用户重打一遍，也不会在会话里留下第二条同样的用户消息。
+	Query string `json:"query,omitempty"`
+
+	// Error 计划级失败原因（planning / plan_failed 时为规划错误）。
+	Error string `json:"error,omitempty"`
+
+	// Revision 每次落盘自增的版本号。
+	//
+	// 唯一用途是让前端丢弃乱序到达的旧事件：事件是异步推送的，而"计划现在是什么状态"
+	// 的权威来源是磁盘上的这份文件，版本号是两者之间的序。
+	Revision int `json:"revision,omitempty"`
 }
 
 // GeneratePlanID 生成计划 ID：plan_<毫秒时间戳>_<随机4位hex>
@@ -88,7 +150,7 @@ func NewPlanStore(dir string) *PlanStore {
 	return s
 }
 
-// loadAll 启动时加载全部计划；running 状态的计划置为失败（应用重启不支持断点续跑）
+// loadAll 启动时加载全部计划；running 状态的计划置为中断（可从断点续跑）
 func (s *PlanStore) loadAll() {
 	entries, err := os.ReadDir(s.dir)
 	if err != nil {
@@ -107,13 +169,22 @@ func (s *PlanStore) loadAll() {
 			continue // 损坏文件跳过，不影响其他计划
 		}
 		if p.Status == PlanRunning {
-			p.Status = PlanFailed
+			// 进程退出/崩溃留下的 running 不代表失败，只代表"没人接着跑"。
+			// 置为 interrupted（可从断点续跑）而不是 failed（要改计划再批准）。
+			//
+			// 必须立刻落盘：否则第二次重启会把这份文件重新读成 running，
+			// 而它其实是上一次重启就该收尾的残留。
+			p.Status = PlanInterrupted
 			for _, st := range p.Steps {
 				if st.Status == StepRunning {
-					st.Status = StepFailed
+					st.Status = StepInterrupted
 					st.Error = "应用重启，执行中断"
+					if st.FinishedAt == 0 {
+						st.FinishedAt = time.Now().UnixMilli()
+					}
 				}
 			}
+			_ = s.saveLocked(&p)
 		}
 		s.plans[p.ID] = &p
 	}
@@ -121,6 +192,9 @@ func (s *PlanStore) loadAll() {
 
 func (s *PlanStore) saveLocked(p *Plan) error {
 	p.UpdatedAt = time.Now().UnixMilli()
+	// 自增必须在写盘之前：版本号要与这次落盘的内容同属一份，
+	// 否则前端可能收到"版本变新、内容还是旧的"的事件。
+	p.Revision++
 	data, err := json.MarshalIndent(p, "", "  ")
 	if err != nil {
 		return err
@@ -191,8 +265,8 @@ func (s *PlanStore) Reopen(id string) (*Plan, error) {
 		return nil, fmt.Errorf("计划不存在: %s", id)
 	}
 	switch p.Status {
-	case PlanFailed, PlanCancelled, PlanCompleted:
-		// 可重开
+	case PlanFailed, PlanCancelled, PlanCompleted, PlanInterrupted:
+		// 可重开（interrupted 同样允许：用户可能想改完步骤再跑，而不是原地续跑）
 	case PlanAwaitingApproval:
 		return p, nil // 已经是可编辑状态，幂等
 	case PlanRunning:

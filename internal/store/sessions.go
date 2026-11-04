@@ -55,6 +55,16 @@ type Message struct {
 	// 会话文件因此保持轻量——它是每次追加消息都要整体重写的那份数据。
 	Attachments []media.Attachment `json:"attachments,omitempty"`
 
+	// PlanStepIndex 本条消息属于哪个计划步骤（0/缺省表示不属于任何计划步骤）。
+	//
+	// 计划执行时每步会写一条"【计划步骤 i/N】…"的 user 消息，其后的 assistant/tool
+	// 消息都属于这一步。步骤重试要"只保留最后一次尝试的过程"时，靠这个字段就能定位，
+	// 不必去解析消息文本——文本是给模型看的，不是给程序判断的。
+	PlanStepIndex int `json:"planStepIndex,omitempty"`
+
+	// Attempt 本条消息属于该步骤的第几次尝试（1 起；0 表示未标注）。
+	Attempt int `json:"attempt,omitempty"`
+
 	// [新增] 模型生成的思考过程（仅当 role=assistant 且启用 thinking 时）
 	// 这是只读字段，不会被修改或重新处理，仅作历史记录供 UI 展示。
 	Thinking string `json:"thinking,omitempty"`
@@ -127,6 +137,13 @@ type Session struct {
 	DiffTouched    []string        `json:"diffTouched,omitempty"`
 	EnabledTools   []string        `json:"enabledTools,omitempty"`  // 本会话可用的工具 ID 白名单（空=全部已启用工具）
 	EnabledSkills  []string        `json:"enabledSkills,omitempty"` // 本会话可用的技能 ID 白名单（空=全部已启用技能）
+
+	// PlanMode 计划模式开关（会话级、粘性）。
+	//
+	// 它曾经只是前端组件里的一个 ref：刷新页面、切会话、重开应用就丢。而"这条会话要
+	// 用计划模式"本身是一条需要跨重启保持的意图——计划模式丢了，用户正在做的事就丢了。
+	// 旧会话文件没有这个字段，读出来是 false，正好是老行为的默认值。
+	PlanMode bool `json:"planMode,omitempty"`
 
 	// 上下文压缩状态（P1-B）。摘要只在**构建请求时**生效，会话里的 Messages 一字不动——
 	// 因此压缩是可逆的：清空这三个字段就回到全量上下文。
@@ -231,6 +248,9 @@ type SessionPatch struct {
 	// Thinking 相关配置更新
 	ThinkingEnabled *bool `json:"thinkingEnabled,omitempty"`
 	ThinkingBudget  *int  `json:"thinkingBudget,omitempty"`
+
+	// PlanMode 计划模式开关（指针语义：nil 表示本次不改）
+	PlanMode *bool `json:"planMode,omitempty"`
 }
 
 // SessionStore 会话存储：每个会话一个 JSON 文件
@@ -815,6 +835,9 @@ func (s *SessionStore) UpdateSession(id string, patch SessionPatch) (*Session, e
 	}
 	if patch.ThinkingBudget != nil {
 		session.ThinkingBudget = *patch.ThinkingBudget
+	}
+	if patch.PlanMode != nil {
+		session.PlanMode = *patch.PlanMode
 	}
 	session.EndAt = time.Now().UnixMilli()
 

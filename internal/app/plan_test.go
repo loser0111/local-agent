@@ -102,7 +102,7 @@ func TestPlanStoreCRUD(t *testing.T) {
 	}
 }
 
-// T6 启动恢复：running 计划置 failed（不支持断点续跑）
+// T6 启动恢复：running 计划置 interrupted（可从断点续跑，见 change plan-mode-resilience）
 func TestPlanStoreStartupRecovery(t *testing.T) {
 	dir := t.TempDir()
 	raw := `{"id":"plan_r","sessionId":"s","title":"t","status":"running","steps":[{"index":0,"title":"a","status":"done"},{"index":1,"title":"b","status":"running"}],"createdAt":1,"updatedAt":2}`
@@ -115,14 +115,14 @@ func TestPlanStoreStartupRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p.Status != store.PlanFailed {
-		t.Fatalf("running 计划应置 failed: %s", p.Status)
+	if p.Status != store.PlanInterrupted {
+		t.Fatalf("running 计划应置 interrupted（可续跑）: %s", p.Status)
 	}
 	if p.Steps[0].Status != store.StepDone {
 		t.Fatalf("done 步骤不应被改动: %s", p.Steps[0].Status)
 	}
-	if p.Steps[1].Status != store.StepFailed || p.Steps[1].Error == "" {
-		t.Fatalf("running 步骤应置 failed 并带原因: %+v", p.Steps[1])
+	if p.Steps[1].Status != store.StepInterrupted || p.Steps[1].Error == "" {
+		t.Fatalf("running 步骤应置 interrupted 并带原因: %+v", p.Steps[1])
 	}
 }
 
