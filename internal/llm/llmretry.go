@@ -213,16 +213,11 @@ func ShouldRetry(ctx context.Context, err error) bool {
 //
 // 刻意**不**排除 "no such host"：域名解析失败确实多半是配置写错，但真出现瞬时 DNS
 // 故障时，多等 3.5 秒远比让用户重来一轮便宜。
+//
+// 排除清单在 errorkind.go 的 configErrorMarkers 里：ClassifyError 要用同一份清单
+// 判出 ErrorKindConfig，两处各写一份迟早分叉。
 func networkRetryable(err error) bool {
-	msg := strings.ToLower(err.Error())
-	for _, k := range []string{
-		"x509:", "certificate", "unsupported protocol scheme", "invalid url",
-	} {
-		if strings.Contains(msg, k) {
-			return false
-		}
-	}
-	return true
+	return !isConfigError(err)
 }
 
 // ParseRetryAfter 解析 Retry-After 头。

@@ -26,6 +26,15 @@ type ChatResult struct {
 	Plan      *store.Plan      `json:"plan,omitempty"`      // 规划/执行流程返回时携带的计划
 	Error     string           `json:"error,omitempty"`     // 错误信息
 
+	// ErrorKind 失败的性质（llm.ErrorKind 的字符串形式；成功时为空）。
+	//
+	// 计划执行层据此决定"这一步该不该自动重来"：网络/限流/5xx/超时可重试，
+	// 认证与请求错误立即失败。空串表示"不是模型调用失败"（加载会话失败、
+	// 持久化失败、状态不允许等），这类一律不重试。
+	// 用字符串而不是 llm.ErrorKind：ChatResult 是**跨进程/跨语言**的契约
+	// （经 Wails 绑定到前端），不该把 llm 包的类型塞进去让前端去 import。
+	ErrorKind string `json:"errorKind,omitempty"`
+
 	// Cancelled 本轮是否被用户停止（区别于"失败"：取消不应触发自动重试，
 	// 前端文案也不同——超时可以说"重试一下"，取消不该）。
 	Cancelled  bool   `json:"cancelled,omitempty"`
@@ -502,8 +511,10 @@ func buildLLMMessages(history []store.Message, systemPrompt string, loader image
 
 // buildRunMessages 组装本次运行发给模型的消息序列。
 //
-// 顺序有讲究：先做摘要前缀替换（它改变消息条数），再施加工具结果预算（逐条改内容），
-// 最后交给 buildLLMMessages 转成协议格式。
+// 顺序有讲究：先做计划步骤的尝试去重（它决定"有哪些消息"），再做摘要前缀替换
+// （它同样改变消息条数），然后施加工具结果预算（逐条改内容），最后交给
+// buildLLMMessages 转成协议格式。前两步都改条数，顺序不能换：摘要按
+// ContextCoveredUpTo 这个**下标**切前缀，若在去重之前切，下标与去重后的序列对不上。
 // forceTruncate 为 true 时走确定性截断——它是降级路径与调试开关，不是常规流程。
 //
 // loader 是附件读取口，一路上传给 buildLLMMessages（可为 nil，见 imageLoader 的说明）。
@@ -516,7 +527,7 @@ func buildRunMessages(session *store.Session, systemPrompt string, forceTruncate
 	if session == nil {
 		return buildLLMMessages(nil, systemPrompt, loader)
 	}
-	history := session.Messages
+	history := agent.LatestAttemptMessages(session.Messages)
 	if session.ContextCoveredUpTo > 0 &&
 		session.ContextCoveredUpTo <= len(history) &&
 		strings.TrimSpace(session.ContextSummary) != "" {
@@ -929,6 +940,7 @@ func runToolLoop(ar *agentRun) *ChatResult {
 
 			return &ChatResult{
 				Error:     err.Error(),
+				ErrorKind: string(llm.ClassifyError(err)),
 				ToolCalls: toolCallRecords,
 				Messages:  persistedMsgs,
 			}
@@ -1521,7 +1533,12 @@ func (a *App) ChatPlan(sessionID, query string, useStream bool) *ChatResult {
 	}
 	resp, lastErr := llm.CallLLMForModelWith(run.Ctx(), &model, req, llm.DefaultRetryPolicy, run.SoftRequested)
 	if lastErr != nil {
-		return &ChatResult{Error: fmt.Sprintf("规划失败: %v", lastErr)}
+		// ErrorKind 让上层能分辨"重试可能有用的网络错误"与"配置/密钥不对"，
+		// 前者值得给一个「重试规划」按钮，后者重试一百次也一样。
+		return &ChatResult{
+			Error:     fmt.Sprintf("规划失败: %v", lastErr),
+			ErrorKind: string(llm.ClassifyError(lastErr)),
+		}
 	}
 	if len(resp.Choices) == 0 {
 		return &ChatResult{Error: "规划器返回空响应"}

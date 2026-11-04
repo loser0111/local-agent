@@ -10,9 +10,9 @@
 
 ## 2. 错误分类与请求组装
 
-- [ ] 2.1 `internal/llm/llmretry.go` 导出 `ErrorKind` 与 `ClassifyError(err) ErrorKind`、`Retryable(kind) bool`（依据 `LLMHTTPError.Status` 与既有哨兵，不解析文案）。验证：新增 `llmretry_classify_test.go`，覆盖 401/429/500/网络错误/ctx 超时/未知错误
-- [ ] 2.2 `ChatResult` 增加 `ErrorKind`，`runToolLoop` 失败返回处填充（取消路径不填）。验证：在既有错误用例中断言 `ErrorKind` 取值
-- [ ] 2.3 `buildRunMessages` 增加「同一步骤仅保留最后一次尝试」的过滤（`latestAttemptMessages`），且仅在消息带 `PlanStepIndex` 时生效。验证：新增单测覆盖「两步 × 各两次尝试」「无步骤字段的普通消息不受影响」
+- [x] 2.1 `internal/llm/llmretry.go` 导出 `ErrorKind` 与 `ClassifyError(err) ErrorKind`、`Retryable(kind) bool`（依据 `LLMHTTPError.Status` 与既有哨兵，不解析文案）。验证：新增 `llmretry_classify_test.go`，覆盖 401/429/500/网络错误/ctx 超时/未知错误
+- [x] 2.2 `ChatResult` 增加 `ErrorKind`，`runToolLoop` 失败返回处填充（取消路径不填）。验证：在既有错误用例中断言 `ErrorKind` 取值
+- [x] 2.3 `buildRunMessages` 增加「同一步骤仅保留最后一次尝试」的过滤（`latestAttemptMessages`），且仅在消息带 `PlanStepIndex` 时生效。验证：新增单测覆盖「两步 × 各两次尝试」「无步骤字段的普通消息不受影响」
 
 ## 3. 规划流程（会话级计划模式）
 
