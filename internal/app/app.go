@@ -40,6 +40,12 @@ type App struct {
 	planStore    *store.PlanStore
 	memory       *memstore.MemoryStore
 
+	// planRetry 计划步骤的自动重试策略。nil 表示用默认值（再试 2 次，2s/8s 退避）。
+	//
+	// 做成字段而不是包级常量：单测要能注入"不等待"的策略，否则每个重试用例都要
+	// 真睡几秒（那些退避是生产行为，不该在单测里重复付）。
+	planRetry *planRetryPolicy
+
 	// baseDir 本地数据目录（~/.local-agent）：权限配置的用户全局层也放在这里
 	baseDir string
 

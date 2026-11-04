@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -1926,12 +1927,74 @@ func (a *App) runPlanPass(plan *store.Plan, useStream bool) (result *ChatResult)
 	return &ChatResult{Plan: plan, Reply: "计划执行完成"}
 }
 
-// runPlanStep 执行一个步骤：一次尝试 = 一次完整工具循环。
+// planRetryPolicy 计划步骤的自动重试策略。
 //
-// 状态流转（running/Attempt/ContextMark 落盘 + 事件）集中在这里，让 runPlanPass
-// 只关心"这一步的结果要不要停"。步骤级自动重试（见 planStepRetry）会多次调用它。
+type planRetryPolicy struct {
+	// MaxRetries 首次之外再试几次。默认 2（总计 3 次尝试）。
+	MaxRetries int
+	// Backoff 第 n 次重试前等多久（n 从 1 开始）。
+	Backoff func(n int) time.Duration
+}
+
+// planStepRetry 取本次生效的重试策略（未注入时用默认值）。
+//
+// 默认 2 次、2s→8s：足以跨过一次区域性的网络抖动，又不会让用户对着一个
+// 明显不通的端点干等半分钟。真正昂贵的重试该由 llm 层（4 次、8s 上限）承担，
+// 这一层解决的是"重试层已经放弃之后，这一步值不值得整体重来"。
+func (a *App) planStepRetry() planRetryPolicy {
+	if a != nil && a.planRetry != nil {
+		return *a.planRetry
+	}
+	return planRetryPolicy{
+		MaxRetries: 2,
+		Backoff: func(n int) time.Duration {
+			switch n {
+			case 1:
+				return 2 * time.Second
+			default:
+				return 8 * time.Second
+			}
+		},
+	}
+}
+
+// runPlanStep 执行一个步骤，失败时按策略自动重试。
+//
+// 只有"这类失败本身值得再试"才会重来（见 llm.ErrorKind.Retryable）：网络/限流/5xx/超时。
+// 认证与请求错误不重试——重试一百次也还是同一个错，只会让用户多等一轮。
+// 用户取消（软取消）或 ctx 已结束一律立刻收手。
 func (a *App) runPlanStep(run *agent.RunControl, session *store.Session, dir, basePrompt string,
 	model *store.Model, plan *store.Plan, step *store.PlanStep, useStream bool) *ChatResult {
+
+	policy := a.planStepRetry()
+	var res *ChatResult
+	for try := 0; ; try++ {
+		res = a.runPlanAttempt(run, session, dir, basePrompt, model, plan, step, useStream, res)
+		if res.Error == "" {
+			return res
+		}
+		if try >= policy.MaxRetries || !llm.ErrorKind(res.ErrorKind).Retryable() {
+			return res
+		}
+		if run.SoftRequested() || run.Ctx().Err() != nil {
+			return res // 用户已经叫停，不该还在后台重试
+		}
+		wait := policy.Backoff(try + 1)
+		fmt.Printf("[plan] 步骤 %d 第 %d 次尝试失败（%s），%s 后重试\n",
+			step.Index+1, step.Attempt, res.ErrorKind, wait.Round(time.Millisecond))
+		if !sleepRunCtx(run.Ctx(), run, wait) {
+			return res
+		}
+	}
+}
+
+// runPlanAttempt 一次尝试：状态流转 + 一次完整工具循环。
+//
+// prev 是上一次尝试的结果（首次为 nil）。它的工具调用摘要会注入系统提示词：
+// 引擎没有事务，重试时模型必须知道"自己上次已经改过什么、跑过什么"，否则会重复
+// 执行已经产生副作用的操作。
+func (a *App) runPlanAttempt(run *agent.RunControl, session *store.Session, dir, basePrompt string,
+	model *store.Model, plan *store.Plan, step *store.PlanStep, useStream bool, prev *ChatResult) *ChatResult {
 
 	step.Status = store.StepRunning
 	step.StartedAt = time.Now().UnixMilli()
@@ -1959,6 +2022,9 @@ func (a *App) runPlanStep(run *agent.RunControl, session *store.Session, dir, ba
 
 	sys := store.BuildPlanSystemPrompt(
 		a.attachMemoryRecall(session, store.BuildPlanStepQuery(plan, step), basePrompt), plan, step)
+	if step.Attempt > 1 {
+		sys = appendPlanRetryContext(sys, step.Attempt, prev)
+	}
 	// 计划步骤不带技能声明：步骤是规划器产出的文本，没有对应的 allowed-tools，
 	// 因此这里传 nil（不额外收窄）。将来若给 PlanStep 加 Role 字段，就落在这里。
 	res := runToolLoop(a.newMainAgentRun(run, session, dir, sys, nil, model, useStream, true /*compact*/))
@@ -1966,6 +2032,58 @@ func (a *App) runPlanStep(run *agent.RunControl, session *store.Session, dir, ba
 		res.Plan = plan
 	}
 	return res
+}
+
+// appendPlanRetryContext 把"上一次尝试已经做了什么"追加进系统提示词。
+//
+// 为什么必须有：引擎没有事务，重试是从步骤开头重来的。模型不知道上次改过什么，
+// 就会把同一个文件再写一遍、或重跑一次有副作用的命令。这里如实列出上次执行过的
+// 工具与结果摘要，并要求它先核对再动手——这不能保证幂等，但能让模型自己发现
+// "这一步其实已经做了一半"。
+func appendPlanRetryContext(sys string, attempt int, prev *ChatResult) string {
+	var sb strings.Builder
+	sb.WriteString(sys)
+	sb.WriteString(fmt.Sprintf("\n\n## 这是第 %d 次尝试\n", attempt))
+	sb.WriteString("上一次尝试因故中断或失败，本步从头重来。请**先核对**下面的既往操作，")
+	sb.WriteString("已经完成的部分不要重复执行（尤其是写文件、建目录、跑命令这类有副作用的动作）。\n")
+	if prev == nil || len(prev.ToolCalls) == 0 {
+		sb.WriteString("上一次尝试没有执行任何工具。\n")
+	} else {
+		sb.WriteString("上一次尝试执行过的工具：\n")
+		for _, tc := range prev.ToolCalls {
+			sb.WriteString(fmt.Sprintf("- %s：%s\n", tc.Name, store.TruncateRunes(strings.TrimSpace(tc.Result), 200)))
+		}
+	}
+	if prev != nil && prev.Error != "" {
+		sb.WriteString("上一次失败原因：" + store.TruncateRunes(prev.Error, 300) + "\n")
+	}
+	return sb.String()
+}
+
+// sleepRunCtx 可中断的等待。返回 false 表示运行已结束（ctx 结束或软取消），
+// 调用方应立即收手。
+//
+// 三个分支缺一不可：
+//   - 不能用 time.Sleep：用户点"停止"要等退避走完才生效，表现为几秒"点了没反应"；
+//   - 只看 ctx 也不够：软取消刻意不 cancel ctx（它只是"下一轮别再开始"），
+//     于是软取消期间仍会睡满 8 秒。所以还要监听 run.SoftDone()。
+func sleepRunCtx(ctx context.Context, run *agent.RunControl, d time.Duration) bool {
+	if run != nil && run.SoftRequested() {
+		return false
+	}
+	if d <= 0 {
+		return ctx.Err() == nil
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-run.SoftDone():
+		return false
+	case <-t.C:
+		return true
+	}
 }
 
 // ensureStepRequestMessage 保证"这一步的请求消息"在会话里存在，返回操作后的消息条数。

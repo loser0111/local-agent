@@ -109,6 +109,20 @@ func (r *RunControl) SoftRequested() bool {
 	}
 }
 
+// SoftDone 返回一个在"请求软取消"时关闭的通道。
+//
+// 供需要在中途醒来的等待使用——典型场景是计划步骤重试的退避等待：软取消只是
+// "下一轮别再开始"，它不 cancel ctx，因此只监听 ctx.Done() 的等待会一直睡到退避结束。
+// 用户点了停止却要再等 8 秒才生效，正是本项目在别处反复避免的那类体感缺陷。
+//
+// nil 接收者返回 nil 通道（永久阻塞），调用方可直接放进 select。
+func (r *RunControl) SoftDone() <-chan struct{} {
+	if r == nil {
+		return nil
+	}
+	return r.soft
+}
+
 // markSoft 请求软取消；返回是否由本次调用首次触发
 func (r *RunControl) markSoft() bool {
 	r.mu.Lock()

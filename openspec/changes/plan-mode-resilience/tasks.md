@@ -23,12 +23,12 @@
 
 ## 4. 执行器（续跑 + 自动重试 + 幂等）
 
-- [ ] 4.1 抽出 `runPlanPass(plan, useStream, resume)`，`ExecutePlan` 收窄为只接受 `awaiting_approval`。验证：`plan_test.go` 断言 `failed` 计划调用 `ExecutePlan` 被拒且提示改用续跑
-- [ ] 4.2 实现 `App.ResumePlan(planID, useStream)`：接受 `failed/interrupted/cancelled`，保留 `done` 步骤与其摘要，从第一个非 `done` 步骤执行；与普通发送互斥。验证：单测「失败后续跑只跑剩余步骤」「已完成步骤的 Summary/FinishedAt 不变」「连续两次续跑不重跑」
-- [ ] 4.3 失败路径不再 `MarkRemainingSkipped`：失败步骤 `failed`、其余保持 `pending`、计划 `failed`；取消路径保持 `cancelled + skipped`。验证：单测覆盖失败与取消两条路径的步骤状态
-- [ ] 4.4 步骤级自动重试：按 `ErrorKind` 判定可重试，最多 `1 + 2` 次，退避 2s/8s（可注入时钟/策略以便测试），每次重试前检查取消；重试时把上次尝试的工具摘要写进 system prompt。验证：httptest 模拟「前两次 500、第三次成功」，断言步骤 `done`、历史无重复步骤消息
-- [ ] 4.5 步骤幂等：`ensureStepRequestMessage`（同 `PlanStepIndex` 不重复写）+ `Attempt` 自增落盘。验证：单测断言重试后会话里该步骤只有一条 user 消息，且步骤 `Attempt` 递增
-- [ ] 4.6 兜底与恢复：`runPlanPass` 的 defer 在异常/提前返回时把计划收尾为 `interrupted`（而非 `failed`），并落盘。验证：单测模拟 panic 与提前返回两条路径
+- [x] 4.1 抽出 `runPlanPass(plan, useStream, resume)`，`ExecutePlan` 收窄为只接受 `awaiting_approval`。验证：`plan_test.go` 断言 `failed` 计划调用 `ExecutePlan` 被拒且提示改用续跑
+- [x] 4.2 实现 `App.ResumePlan(planID, useStream)`：接受 `failed/interrupted/cancelled`，保留 `done` 步骤与其摘要，从第一个非 `done` 步骤执行；与普通发送互斥。验证：单测「失败后续跑只跑剩余步骤」「已完成步骤的 Summary/FinishedAt 不变」「连续两次续跑不重跑」
+- [x] 4.3 失败路径不再 `MarkRemainingSkipped`：失败步骤 `failed`、其余保持 `pending`、计划 `failed`；取消路径保持 `cancelled + skipped`。验证：单测覆盖失败与取消两条路径的步骤状态
+- [x] 4.4 步骤级自动重试：按 `ErrorKind` 判定可重试，最多 `1 + 2` 次，退避 2s/8s（可注入时钟/策略以便测试），每次重试前检查取消；重试时把上次尝试的工具摘要写进 system prompt。验证：httptest 模拟「前两次 500、第三次成功」，断言步骤 `done`、历史无重复步骤消息
+- [x] 4.5 步骤幂等：`ensureStepRequestMessage`（同 `PlanStepIndex` 不重复写）+ `Attempt` 自增落盘。验证：单测断言重试后会话里该步骤只有一条 user 消息，且步骤 `Attempt` 递增
+- [x] 4.6 兜底与恢复：`runPlanPass` 的 defer 在异常/提前返回时把计划收尾为 `interrupted`（而非 `failed`），并落盘。验证：单测模拟 panic 与提前返回两条路径
 
 ## 5. 启动恢复、惰性对账与事件
 
