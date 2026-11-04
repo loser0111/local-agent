@@ -409,13 +409,14 @@ func TestExecutePlanCancel(t *testing.T) {
 		t.Fatalf("后续步骤应置 skipped: %+v", execRes.Plan.Steps[1])
 	}
 
-	// 重试：done 步骤跳过，skipped 步骤重跑（release 已关闭，请求直接放行）
-	execRes2 := app.ExecutePlan(plan.ID, false)
+	// 续跑：done 步骤跳过，skipped 步骤重跑（release 已关闭，请求直接放行）。
+	// 取消过的计划走 ResumePlan——ExecutePlan 只接受待审核的计划。
+	execRes2 := app.ResumePlan(plan.ID, false)
 	if execRes2.Error != "" {
-		t.Fatalf("重试失败: %s", execRes2.Error)
+		t.Fatalf("续跑失败: %s", execRes2.Error)
 	}
 	if execRes2.Plan.Status != store.PlanCompleted {
-		t.Fatalf("重试后应完成: %s", execRes2.Plan.Status)
+		t.Fatalf("续跑后应完成: %s", execRes2.Plan.Status)
 	}
 	if execRes2.Plan.Steps[0].Status != store.StepDone {
 		t.Fatalf("已完成步骤不应被重跑: %+v", execRes2.Plan.Steps[0])
@@ -587,8 +588,10 @@ func TestExecutePlanFailureThenReopenAndResume(t *testing.T) {
 	if plan.Steps[0].Status != store.StepFailed || plan.Steps[0].Error == "" {
 		t.Fatalf("失败步骤应带原因: %+v", plan.Steps[0])
 	}
-	if plan.Steps[1].Status != store.StepSkipped {
-		t.Fatalf("后续步骤应置为跳过: %+v", plan.Steps[1])
+	// 失败的步骤之外，其余步骤**保持待执行**：它们一行都没跑，标成 skipped 会让
+	// 随后的「继续执行」看起来像在重跑被放弃的步骤（只有用户取消才产生 skipped）。
+	if plan.Steps[1].Status != store.StepPending {
+		t.Fatalf("未执行的步骤应保持 pending: %+v", plan.Steps[1])
 	}
 
 	// 失败后必须能取消（这条路径以前会因为找不到活跃通道而失败）

@@ -1750,122 +1750,131 @@ func (a *App) planWith(run *agent.RunControl, session *store.Session, dir string
 	return &ChatResult{Plan: plan}
 }
 
-// executePlan 逐步执行计划：每步 = 一次完整工具循环（runToolLoop）。
-// 长耗时，结束时返回；失败即停（后续步骤置 skipped）；done 步骤在重试时自动跳过。
-func (a *App) executePlan(planID string, useStream bool) (result *ChatResult) {
-	// 1. 加载计划并校验状态（running 状态拒绝并发执行，R10）
+// executePlan 首次执行一份待审核的计划：每步 = 一次完整工具循环（runToolLoop）。
+//
+// 只接受 awaiting_approval。失败/中断/取消过的计划走 ResumePlan（从断点续跑）。
+// 两个入口刻意分开：一个表示"用户批准了这份计划"，一个表示"把没跑完的接着跑完"。
+// 合成一个入口的后果是界面上只能给一个按钮，而这两件事对用户的含义完全不同。
+func (a *App) executePlan(planID string, useStream bool) *ChatResult {
 	plan, err := a.planStore.Get(planID)
 	if err != nil {
 		return &ChatResult{Error: err.Error()}
 	}
-	if plan.Status != store.PlanAwaitingApproval && plan.Status != store.PlanCancelled && plan.Status != store.PlanFailed {
-		return &ChatResult{Error: "计划状态不允许执行: " + plan.Status}
+	if plan.Status != store.PlanAwaitingApproval {
+		return &ChatResult{
+			Error: "计划状态不允许执行: " + plan.Status + "（未完成的计划请用「继续执行」）",
+			Plan:  plan,
+		}
+	}
+	return a.runPlanPass(plan, useStream)
+}
+
+// resumePlan 从断点续跑：保留已完成步骤与其摘要，从第一个未完成步骤接着执行。
+//
+// 接受 failed / interrupted / cancelled 三种状态。它们对用户是同一件事——"没跑完"——
+// 恢复动作也应当一致，不必让人先退回待审核、再批准一遍。
+func (a *App) resumePlan(planID string, useStream bool) *ChatResult {
+	plan, err := a.planStore.Get(planID)
+	if err != nil {
+		return &ChatResult{Error: err.Error()}
+	}
+	switch plan.Status {
+	case store.PlanFailed, store.PlanInterrupted, store.PlanCancelled:
+		// 可续跑
+	case store.PlanRunning:
+		return &ChatResult{Error: "计划正在执行中", Plan: plan}
+	case store.PlanCompleted:
+		return &ChatResult{Error: "计划已完成，没有需要继续的步骤", Plan: plan}
+	case store.PlanPlanning, store.PlanPlanFailed:
+		return &ChatResult{Error: "计划还没有生成步骤，请先重试规划", Plan: plan}
+	default:
+		return &ChatResult{Error: "计划状态不允许继续执行: " + plan.Status, Plan: plan}
 	}
 
-	// 2. 会话与模型解析
+	// 非 done 的步骤一律回到待执行：failed / interrupted / skipped 在这一刻表达的
+	// 都是"还没有可用的结果"，续跑要重新尝试它们。
+	for _, st := range plan.Steps {
+		if st.Status == store.StepDone {
+			continue
+		}
+		st.Status = store.StepPending
+		st.Error = ""
+		st.StartedAt = 0
+		st.FinishedAt = 0
+	}
+	return a.runPlanPass(plan, useStream)
+}
+
+// runPlanPass 一次执行回合：从第一个非 done 步骤开始，跑到计划落终态（或被中断）为止。
+//
+// executePlan（首次）与 resumePlan（续跑）共用它。两条路径只在"进来之前做的事"上不同
+// （状态校验、未完成步骤的复位），执行体必须完全一致——各写一份的话，续跑路径迟早会
+// 悄悄少写一次状态（本项目在权限网关与工具曝光策略上已经各吃过一次这种亏）。
+func (a *App) runPlanPass(plan *store.Plan, useStream bool) (result *ChatResult) {
+	// 1. 会话与模型解析
 	session, err := a.sessionStore.GetSession(plan.SessionID)
 	if err != nil {
-		return &ChatResult{Error: fmt.Sprintf("加载会话失败: %v", err)}
+		return &ChatResult{Error: fmt.Sprintf("加载会话失败: %v", err), Plan: plan}
 	}
 	model, err := a.modelStore.GetModelForCall(session.Model)
 	if err != nil {
-		return &ChatResult{Error: fmt.Sprintf("获取模型配置失败: %v", err)}
+		return &ChatResult{Error: fmt.Sprintf("获取模型配置失败: %v", err), Plan: plan}
 	}
 	dir, _ := a.resolveProjectDir(plan.SessionID)
 	basePrompt := a.buildBasePrompt(session, dir)
 
-	// 3. 登记为可取消的运行。计划执行与普通聊天共用同一套取消机制
-	// （原先自己一套 planCancels），因此 CancelPlan 也能升级为硬取消。
-	// 同样是互斥登记：计划在执行时，这条会话不该再接受第二次发送。
-	run, berr := a.runs.BeginExclusive(plan.SessionID, planID)
+	// 2. 登记为可取消的运行。计划执行与普通聊天共用同一套取消机制，
+	// 因此 CancelPlan 也能升级为硬取消。同样互斥：计划在跑时这条会话不该再接受第二次发送。
+	run, berr := a.runs.BeginExclusive(plan.SessionID, plan.ID)
 	if berr != nil {
-		return &ChatResult{Error: berr.Error()}
+		return &ChatResult{Error: berr.Error(), Plan: plan}
 	}
 	defer a.runs.End(run)
-	checkCancel := func() bool { return run.SoftRequested() }
 
-	// 4. 计划置为执行中
+	// 3. 计划置为执行中
 	plan.Status = store.PlanRunning
+	plan.Error = ""
 	_ = a.planStore.Save(plan)
 	a.emitPlanUpdate(plan, -1)
 
-	// 兜底：无论从哪条路径离开（含 panic 与任何提前 return），都不能把计划留在 running。
+	// 4. 兜底：无论从哪条路径离开（含 panic 与任何提前 return），都不能把计划留在 running。
 	// 留在 running 的后果是前端永久显示"执行中"、取消又找不到活跃通道而失败，
-	// 用户只能重启应用——这正是"计划失败后无法修改进度"的成因之一。
+	// 用户只能重启应用。
+	//
+	// 兜底落在 interrupted 而不是 failed：走到这里说明"没人接着跑了"，而不是"某一步做错了"。
+	// 两者的恢复动作不同——后者要防重复副作用，前者通常还没产生副作用。
 	defer func() {
 		if r := recover(); r != nil {
-			for _, st := range plan.Steps {
-				if st.Status == store.StepRunning {
-					st.Status = store.StepFailed
-					st.Error = fmt.Sprintf("执行异常中断: %v", r)
-					st.FinishedAt = time.Now().UnixMilli()
-				}
-			}
-			store.MarkRemainingSkipped(plan, 0)
-			plan.Status = store.PlanFailed
-			_ = a.planStore.Save(plan)
-			a.emitPlanUpdate(plan, -1)
+			a.markPlanInterrupted(plan, fmt.Sprintf("执行异常中断: %v", r))
 			result = &ChatResult{Plan: plan, Error: fmt.Sprintf("计划执行异常中断: %v", r)}
 			return
 		}
 		if plan.Status != store.PlanRunning {
 			return // 已正常收尾（completed / failed / cancelled）
 		}
-		for _, st := range plan.Steps {
-			if st.Status == store.StepRunning {
-				st.Status = store.StepFailed
-				st.Error = "执行中断（未正常结束）"
-				st.FinishedAt = time.Now().UnixMilli()
-			}
-		}
-		plan.Status = store.PlanFailed
-		_ = a.planStore.Save(plan)
-		a.emitPlanUpdate(plan, -1)
+		a.markPlanInterrupted(plan, "执行中断（未正常结束）")
 	}()
 
 	// 5. 逐步执行
 	for _, step := range plan.Steps {
+		// 已完成步骤一律不重跑——这是续跑能"接着上次的进度"的全部保证。
+		if step.Status == store.StepDone {
+			continue
+		}
 		// 步骤边界取消检查
-		if checkCancel() {
+		if run.SoftRequested() {
 			plan.Status = store.PlanCancelled
 			store.MarkRemainingSkipped(plan, step.Index)
 			_ = a.planStore.Save(plan)
 			a.emitPlanUpdate(plan, step.Index)
-			return &ChatResult{Plan: plan}
-		}
-		// 失败重试时跳过已完成步骤
-		if step.Status == store.StepDone {
-			continue
+			return &ChatResult{Plan: plan, Cancelled: true, CancelKind: run.Kind()}
 		}
 
-		step.Status = store.StepRunning
-		step.StartedAt = time.Now().UnixMilli()
-		step.Error = ""
-		_ = a.planStore.Save(plan)
-		a.emitPlanUpdate(plan, step.Index)
+		res := a.runPlanStep(run, session, dir, basePrompt, &model, plan, step, useStream)
 
-		// 步骤用户消息落库（聊天流即审计日志），随后走统一执行引擎
-		if _, err := a.sessionStore.AppendMessage(plan.SessionID, store.Message{
-			Role:    store.RoleUser,
-			Content: store.BuildPlanStepQuery(plan, step),
-		}); err != nil {
-			step.Status = store.StepFailed
-			step.Error = fmt.Sprintf("持久化步骤消息失败: %v", err)
-			step.FinishedAt = time.Now().UnixMilli()
-			plan.Status = store.PlanFailed
-			store.MarkRemainingSkipped(plan, step.Index+1)
-			_ = a.planStore.Save(plan)
-			a.emitPlanUpdate(plan, step.Index)
-			return &ChatResult{Plan: plan, Error: step.Error}
-		}
-
-		sys := store.BuildPlanSystemPrompt(a.attachMemoryRecall(session, store.BuildPlanStepQuery(plan, step), basePrompt), plan, step)
-		// 计划步骤不带技能声明：步骤是规划器产出的文本，没有对应的 allowed-tools，
-		// 因此这里传 nil（不额外收窄）。将来若给 PlanStep 加 Role 字段，就落在这里。
-		res := runToolLoop(a.newMainAgentRun(run, session, dir, sys, nil, &model, useStream, true /*compact*/))
-
-		// 步骤中途取消：按本步实际结果落状态，计划置 cancelled
-		if checkCancel() {
+		// 步骤中途取消：按本步实际结果落状态（拿到了回复就算完成），计划置 cancelled。
+		// 只有取消才把剩余步骤标 skipped——用户明确表示不要了，那些步骤确实不会再跑。
+		if run.SoftRequested() {
 			if res.Error == "" {
 				step.Status = store.StepDone
 				step.Summary = store.ExtractStepSummary(res.Reply)
@@ -1878,24 +1887,32 @@ func (a *App) executePlan(planID string, useStream bool) (result *ChatResult) {
 			store.MarkRemainingSkipped(plan, step.Index+1)
 			_ = a.planStore.Save(plan)
 			a.emitPlanUpdate(plan, step.Index)
-			return &ChatResult{Plan: plan}
+			return &ChatResult{Plan: plan, Cancelled: true, CancelKind: run.Kind()}
 		}
 
-		// 失败即停
+		// 失败即停。
+		//
+		// **不把剩余步骤标 skipped**：它们一行都没跑，标成"已跳过"会让随后的
+		// 「继续执行」看起来像在重跑被放弃的步骤。保持 pending 才是事实。
 		if res.Error != "" {
 			step.Status = store.StepFailed
 			step.Error = res.Error
 			step.FinishedAt = time.Now().UnixMilli()
 			plan.Status = store.PlanFailed
-			store.MarkRemainingSkipped(plan, step.Index+1)
+			plan.Error = res.Error
 			_ = a.planStore.Save(plan)
 			a.emitPlanUpdate(plan, step.Index)
-			return &ChatResult{Plan: plan, Error: "步骤执行失败: " + res.Error}
+			return &ChatResult{
+				Plan:      plan,
+				Error:     "步骤执行失败: " + res.Error,
+				ErrorKind: res.ErrorKind,
+			}
 		}
 
 		// 步骤完成：回写摘要
 		step.Status = store.StepDone
 		step.Summary = store.ExtractStepSummary(res.Reply)
+		step.Error = ""
 		step.FinishedAt = time.Now().UnixMilli()
 		_ = a.planStore.Save(plan)
 		a.emitPlanUpdate(plan, step.Index)
@@ -1903,7 +1920,97 @@ func (a *App) executePlan(planID string, useStream bool) (result *ChatResult) {
 
 	// 6. 全部完成
 	plan.Status = store.PlanCompleted
+	plan.Error = ""
 	_ = a.planStore.Save(plan)
 	a.emitPlanUpdate(plan, -1)
 	return &ChatResult{Plan: plan, Reply: "计划执行完成"}
+}
+
+// runPlanStep 执行一个步骤：一次尝试 = 一次完整工具循环。
+//
+// 状态流转（running/Attempt/ContextMark 落盘 + 事件）集中在这里，让 runPlanPass
+// 只关心"这一步的结果要不要停"。步骤级自动重试（见 planStepRetry）会多次调用它。
+func (a *App) runPlanStep(run *agent.RunControl, session *store.Session, dir, basePrompt string,
+	model *store.Model, plan *store.Plan, step *store.PlanStep, useStream bool) *ChatResult {
+
+	step.Status = store.StepRunning
+	step.StartedAt = time.Now().UnixMilli()
+	step.Error = ""
+	step.Attempt++
+
+	// 步骤请求消息落库（聊天流即审计日志）。幂等：重试与续跑都不重复写同一条，
+	// 否则历史里会出现两条一模一样的"【计划步骤 1/N】…"，模型上下文里也会重复一遍。
+	count, err := a.ensureStepRequestMessage(plan, step)
+	if err != nil {
+		step.Status = store.StepFailed
+		step.Error = fmt.Sprintf("持久化步骤消息失败: %v", err)
+		step.FinishedAt = time.Now().UnixMilli()
+		plan.Status = store.PlanFailed
+		plan.Error = step.Error
+		_ = a.planStore.Save(plan)
+		a.emitPlanUpdate(plan, step.Index)
+		return &ChatResult{Error: step.Error, Plan: plan}
+	}
+	// ContextMark 记在步骤请求消息之后：messages[ContextMark:] 就是本次尝试产生的过程。
+	// 用下标而不是时间戳——同一毫秒内可能写入多条消息，按时间切会切偏。
+	step.ContextMark = count
+	_ = a.planStore.Save(plan)
+	a.emitPlanUpdate(plan, step.Index)
+
+	sys := store.BuildPlanSystemPrompt(
+		a.attachMemoryRecall(session, store.BuildPlanStepQuery(plan, step), basePrompt), plan, step)
+	// 计划步骤不带技能声明：步骤是规划器产出的文本，没有对应的 allowed-tools，
+	// 因此这里传 nil（不额外收窄）。将来若给 PlanStep 加 Role 字段，就落在这里。
+	res := runToolLoop(a.newMainAgentRun(run, session, dir, sys, nil, model, useStream, true /*compact*/))
+	if res.Error != "" {
+		res.Plan = plan
+	}
+	return res
+}
+
+// ensureStepRequestMessage 保证"这一步的请求消息"在会话里存在，返回操作后的消息条数。
+//
+// 归属判据是 `Attempt > 0`，不是"PlanStepIndex 有没有值"：后者带 omitempty，第 0 步的
+// 消息序列化后这个字段直接消失，于是第 0 步会被认为"没有请求消息"、每次重试都追加一条。
+// 这种失效是静默的（界面上只是多出一行），第 0 步又恰恰是最常重试的那一步。
+func (a *App) ensureStepRequestMessage(plan *store.Plan, step *store.PlanStep) (int, error) {
+	sess, err := a.sessionStore.GetSession(plan.SessionID)
+	if err != nil {
+		return 0, err
+	}
+	n := len(sess.Messages)
+	for i := n - 1; i >= 0; i-- {
+		m := sess.Messages[i]
+		if m.Role == store.RoleUser && m.Attempt > 0 && m.PlanStepIndex == step.Index {
+			return n, nil
+		}
+	}
+	if _, err := a.sessionStore.AppendMessage(plan.SessionID, store.Message{
+		Role:          store.RoleUser,
+		Content:       store.BuildPlanStepQuery(plan, step),
+		PlanStepIndex: step.Index,
+		Attempt:       step.Attempt,
+	}); err != nil {
+		return 0, err
+	}
+	return n + 1, nil
+}
+
+// markPlanInterrupted 把计划收尾为 interrupted：运行中的步骤置 interrupted 并写明原因。
+//
+// 不动未执行的步骤（它们还能跑），也不标 skipped（那是"用户不要了"的语义）。
+func (a *App) markPlanInterrupted(plan *store.Plan, reason string) {
+	for _, st := range plan.Steps {
+		if st.Status == store.StepRunning {
+			st.Status = store.StepInterrupted
+			st.Error = reason
+			if st.FinishedAt == 0 {
+				st.FinishedAt = time.Now().UnixMilli()
+			}
+		}
+	}
+	plan.Status = store.PlanInterrupted
+	plan.Error = reason
+	_ = a.planStore.Save(plan)
+	a.emitPlanUpdate(plan, -1)
 }

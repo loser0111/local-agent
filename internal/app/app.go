@@ -1038,9 +1038,18 @@ func (a *App) SavePlan(plan *store.Plan) error {
 	return a.planStore.Save(cur)
 }
 
-// ExecutePlan 逐步执行计划（长耗时，结束时返回；过程事件经 chat:event 推送）
+// ExecutePlan 首次执行一份待审核的计划（长耗时，结束时返回；过程事件经 chat:event 推送）。
+// 只接受 awaiting_approval：失败/中断/取消过的计划要用 ResumePlan。
 func (a *App) ExecutePlan(planID string, useStream bool) *ChatResult {
 	return a.executePlan(planID, useStream)
+}
+
+// ResumePlan 从断点续跑：保留已完成步骤与其摘要，从第一个未完成步骤接着执行。
+//
+// 与 ExecutePlan 分开而不是给它加一个 resume 参数：调用方（界面按钮）本来就要区分
+// 「批准执行」与「继续执行」，两者对用户是不同的事。合起来只会让状态校验变成一团 if。
+func (a *App) ResumePlan(planID string, useStream bool) *ChatResult {
+	return a.resumePlan(planID, useStream)
 }
 
 // ReopenPlan 把已结束的计划退回待审核（失败后「修改后重试」的入口）。
