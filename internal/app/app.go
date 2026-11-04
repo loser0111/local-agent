@@ -990,9 +990,53 @@ func (a *App) SetPromptCachePrefs(p store.PromptCachePrefs) (store.PromptCachePr
 }
 
 // ===== 计划管理（Plan & Execute）=====
-// GetSessionPlan 返回会话当前（最新创建的）计划；无计划时返回 nil
+// GetSessionPlan 返回会话当前（最新创建的）计划；无计划时返回 nil。
+//
+// 读取时做一次**惰性对账**：计划停在 running、但注册表里没有任何活跃运行——
+// 这说明执行协程已经不在了（崩溃、被强杀、或事件通道断了导致前端以为还在跑）。
+// 此时把它收尾为 interrupted 并推事件，界面就地从"执行中"切到"可继续执行"，
+// 不需要用户重启应用、也不需要前端去猜。
+//
+// 为什么放在读取路径而不是定时巡检：界面要看的正是这份状态，任何看到它的时刻
+// 都是修正它的最佳时刻；而定时巡检要么白跑（没人看），要么要额外维护一张脏表。
 func (a *App) GetSessionPlan(sessionID string) *store.Plan {
-	return a.planStore.GetBySession(sessionID)
+	plan := a.planStore.GetBySession(sessionID)
+	a.reconcileStalePlan(plan)
+	return plan
+}
+
+// reconcileStalePlan 把"没有活跃运行却在 running"的计划收尾为 interrupted（幂等）。
+func (a *App) reconcileStalePlan(plan *store.Plan) {
+	if plan == nil {
+		return
+	}
+	// 只对"应该有人在跑"的状态对账。planning 也在此列：它在等规划器返回，
+	// 同样不该在没有活跃运行时停在原地（见 PlanStore.loadAll 的同类处理）。
+	switch plan.Status {
+	case store.PlanRunning:
+	case store.PlanPlanning:
+		a.reconcileStalePlanning(plan)
+		return
+	default:
+		return
+	}
+	if a.runs.ByPlan(plan.ID) != nil {
+		return // 真的在跑：不动
+	}
+	a.markPlanInterrupted(plan, "执行中断（没有活跃的运行）")
+}
+
+// reconcileStalePlanning 规划中途失去运行：转 plan_failed（可重试）。
+func (a *App) reconcileStalePlanning(plan *store.Plan) {
+	// 规划期的运行登记用的是会话索引（BeginExclusive(sessionID, "")），
+	// 因此这里按会话查：同一会话的规划与执行互斥，查得到就说明规划正在进行。
+	if a.runs.BySession(plan.SessionID) != nil {
+		return
+	}
+	plan.Status = store.PlanPlanFailed
+	plan.Error = "规划中断（没有活跃的运行），可重试"
+	_ = a.planStore.Save(plan)
+	a.emitPlanUpdate(plan, -1)
 }
 
 // SetSessionPlanMode 设置某会话的计划模式（会话级、粘性）。

@@ -425,6 +425,8 @@ POST /api/sessions/{sessionId}/chat
 
 设计与实施文档集中在 [`docs/`](./docs/)。按主题挑重点：
 
+规范化的变更提案在 [`openspec/`](./openspec/)：`openspec list` 看在途变更，`openspec show <change> --type change` 看提案正文。
+
 - **[docs/agent-gaps-implementation-plan.md](./docs/agent-gaps-implementation-plan.md)** - 中断 / 上下文 / 撤销 / 子代理四条硬伤的设计与实施记录
 - **[docs/p2-p3-impl-spec.md](./docs/p2-p3-impl-spec.md)** - 撤销与子代理的实现级规格（文件、签名、测试清单）
 - **[docs/permission-management-outline.md](./docs/permission-management-outline.md)** - 权限系统

@@ -32,9 +32,9 @@
 
 ## 5. 启动恢复、惰性对账与事件
 
-- [ ] 5.1 `App.GetSessionPlan` 惰性对账：`running` 且 `runs.ByPlan == nil` → 转 `interrupted`、落盘、emit。验证：单测构造「磁盘上 running、注册表为空」的计划，调用后返回 `interrupted`
-- [ ] 5.2 `emitPlanUpdate` 携带 `RunID`；前端侧只需要 `Plan.Revision` 判定，但事件必须能区分运行归属。验证：单测断言事件字段（沿用现有事件断言写法）
-- [ ] 5.3 为上述行为补充 README/`docs/plan-execute-implementation-plan.md` 的状态机段落（新增 `planning`/`plan_failed`/`interrupted` 与续跑入口），并验证文档中的接口名与生成绑定一致（对照 `frontend/wailsjs/go/app/App.d.ts`）
+- [x] 5.1 `App.GetSessionPlan` 惰性对账：`running` 且 `runs.ByPlan == nil` → 转 `interrupted`、落盘、emit。验证：单测构造「磁盘上 running、注册表为空」的计划，调用后返回 `interrupted`
+- [x] 5.2 `emitPlanUpdate` 携带 `RunID`；前端侧只需要 `Plan.Revision` 判定，但事件必须能区分运行归属。验证：单测断言事件字段（沿用现有事件断言写法）
+- [x] 5.3 为上述行为补充 README/`docs/plan-execute-implementation-plan.md` 的状态机段落（新增 `planning`/`plan_failed`/`interrupted` 与续跑入口），并验证文档中的接口名与生成绑定一致（对照 `frontend/wailsjs/go/app/App.d.ts`）
 
 ## 6. 绑定与前端状态层
 

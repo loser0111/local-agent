@@ -1483,13 +1483,22 @@ func parseToolArgs(raw string) map[string]interface{} {
 //
 // 归属直接取自计划本身（plan.SessionID）：调用点分布很广（规划、执行、取消、异常收尾），
 // 让它们各自记住"这条计划属于哪个会话"是多余的，计划里本来就写着。
+//
+// RunID 一并带上：前端据此判断这条事件来自哪次运行。事件的**权威顺序**是 Plan.Revision,
+// RunID 只用于把"旧运行的迟到事件"与"当前运行的事件"分开——续跑会产生新的 RunID,
+// 而 Revision 是跨运行递增的，两者互补。
 func (a *App) emitPlanUpdate(plan *store.Plan, stepIndex int) {
 	if plan == nil || !a.HasUI() {
 		return
 	}
+	runID := ""
+	if r := a.runs.ByPlan(plan.ID); r != nil {
+		runID = r.RunID
+	}
 	a.eventsEmit("chat:event", ChatEvent{
 		Type:      "plan_update",
 		SessionID: plan.SessionID,
+		RunID:     runID,
 		Plan:      plan,
 		StepIndex: stepIndex,
 	})
