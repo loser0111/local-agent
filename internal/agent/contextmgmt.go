@@ -210,7 +210,17 @@ func StoredMessageTokens(m store.Message) int {
 		n += estimateTokens(tc.Name) + estimateTokens(fmt.Sprintf("%v", tc.Args)) + 8
 	}
 	// 附件同样要计入：不然一张图能被"压缩省下 0 token"，而它实际占了三千多。
+	// 同一 ID 只算一次：一条消息里重复引用同一张图（历史上偶发的重复粘贴）时，
+	// 发送侧已按 ID 去重（chat.go loadImages），这里若照引用数累加就会高估上下文，
+	// 让"何时压缩/裁剪"的判断偏早。
+	seenAtt := make(map[string]struct{}, len(m.Attachments))
 	for _, att := range m.Attachments {
+		if att.ID != "" {
+			if _, dup := seenAtt[att.ID]; dup {
+				continue
+			}
+			seenAtt[att.ID] = struct{}{}
+		}
 		n += ImageTokens(att.Width, att.Height)
 	}
 	return n

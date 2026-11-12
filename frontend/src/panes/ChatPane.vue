@@ -195,19 +195,30 @@ function fileToBase64(file) {
 function imageFilesFrom(dt) {
   if (!dt) return []
   const out = []
+  // 去重必须靠**内容指纹**（名字 + 字节数 + 类型），不能靠对象身份：
+  // dt.items[i].getAsFile() 与 dt.files[i] 每次调用都返回**不同的 File 实例**，
+  // 同一张剪贴板图片在 Chromium 上会同时出现在这两处，按身份去重等于没去重。
+  // （现象：粘一张图出两张预览；发送后消息里挂两份引用，模型收到两张一样的图。）
+  const seen = new Set()
   // hintType 是剪贴板项自己声明的 MIME：WebKit 交回来的 File 有时 type 为空，
   // 这时只能靠它（或文件名后缀）判断——否则会被当成"非图片"静默丢掉。
   const push = (f, hintType) => {
-    if (!f || out.indexOf(f) >= 0) return
+    if (!f) return
     const t = String(f.type || hintType || '').toLowerCase()
-    if (t.startsWith('image/') || looksLikeImage(f.name)) out.push(f)
+    if (!(t.startsWith('image/') || looksLikeImage(f.name))) return
+    const fingerprint = t + '|' + f.size + '|' + (f.name || '')
+    if (seen.has(fingerprint)) return
+    seen.add(fingerprint)
+    out.push(f)
   }
-  if (dt.items) {
+  // 先读 files：Chromium 系两者都填，且 files 就是 items 里同类项的视图，读一遍即可。
+  // 只在 files 里没取到图片时才回退到 items——WebKit（WKWebView）常只填 items、files 为空。
+  for (const f of Array.from(dt.files || [])) push(f)
+  if (!out.length && dt.items) {
     for (const item of dt.items) {
       if (item.kind === 'file') push(item.getAsFile(), item.type)
     }
   }
-  for (const f of Array.from(dt.files || [])) push(f)
   return out
 }
 

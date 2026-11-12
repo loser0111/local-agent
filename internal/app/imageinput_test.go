@@ -141,6 +141,44 @@ func TestAnthropicMergesToolResultAndToolImageIntoOneTurn(t *testing.T) {
 	}
 }
 
+// 同一条消息里重复引用同一张图（旧版粘贴去重失效留下的数据）时，只能发一张。
+//
+// 附件是内容寻址的：重复引用的 ID 相同、指向磁盘上同一个文件。若按引用数逐条发，
+// 模型会收到两张一模一样的图——既按两份图片 token 计费，也会干扰对图内内容的判断。
+// 既有会话已经存下了这种数据，所以去重必须落在发送侧，不能只修前端。
+func TestBuildLLMMessagesSendsDuplicateImageOnce(t *testing.T) {
+	st := media.NewAttachmentStore(t.TempDir())
+	raw := makeTestPNG(t, 120, 90)
+
+	first, err := st.Save("s1", "shot.png", raw, media.AttachmentSourceUser)
+	if err != nil {
+		t.Fatalf("保存附件失败: %v", err)
+	}
+	second, err := st.Save("s1", "shot.png", raw, media.AttachmentSourceUser)
+	if err != nil {
+		t.Fatalf("重复保存附件失败: %v", err)
+	}
+	if first.ID != second.ID {
+		t.Fatalf("同内容应得到同一 ID，实际 %s vs %s", first.ID, second.ID)
+	}
+
+	dup := store.Message{
+		ID: "m1", Role: store.RoleUser, Content: "看这张图",
+		Attachments: []media.Attachment{*first, *second},
+	}
+	msgs := buildLLMMessages([]store.Message{dup}, "SYS", imageLoaderFor(st))
+	if got := len(msgs[1].Images); got != 1 {
+		t.Fatalf("同一张图重复引用只应发一张，实际发了 %d 张", got)
+	}
+
+	// 估算口径要跟发送侧一致：发送已去重，按两份算会让「何时压缩」偏早。
+	single := dup
+	single.Attachments = []media.Attachment{*first}
+	if dupTok, oneTok := agent.StoredMessageTokens(dup), agent.StoredMessageTokens(single); dupTok != oneTok {
+		t.Fatalf("重复引用不应抬高 token 估算：重复 %d vs 单张 %d", dupTok, oneTok)
+	}
+}
+
 // 图读不出来时必须留下痕迹：静默跳过会让模型对着一张不存在的图瞎答。
 func TestBuildLLMMessagesDegradesWhenImageMissing(t *testing.T) {
 	st := media.NewAttachmentStore(t.TempDir())
