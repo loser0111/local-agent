@@ -195,19 +195,30 @@ function fileToBase64(file) {
 function imageFilesFrom(dt) {
   if (!dt) return []
   const out = []
+  // 去重必须靠**内容指纹**（名字 + 字节数 + 类型），不能靠对象身份：
+  // dt.items[i].getAsFile() 与 dt.files[i] 每次调用都返回**不同的 File 实例**，
+  // 同一张剪贴板图片在 Chromium 上会同时出现在这两处，按身份去重等于没去重。
+  // （现象：粘一张图出两张预览；发送后消息里挂两份引用，模型收到两张一样的图。）
+  const seen = new Set()
   // hintType 是剪贴板项自己声明的 MIME：WebKit 交回来的 File 有时 type 为空，
   // 这时只能靠它（或文件名后缀）判断——否则会被当成"非图片"静默丢掉。
   const push = (f, hintType) => {
-    if (!f || out.indexOf(f) >= 0) return
+    if (!f) return
     const t = String(f.type || hintType || '').toLowerCase()
-    if (t.startsWith('image/') || looksLikeImage(f.name)) out.push(f)
+    if (!(t.startsWith('image/') || looksLikeImage(f.name))) return
+    const fingerprint = t + '|' + f.size + '|' + (f.name || '')
+    if (seen.has(fingerprint)) return
+    seen.add(fingerprint)
+    out.push(f)
   }
-  if (dt.items) {
+  // 先读 files：Chromium 系两者都填，且 files 就是 items 里同类项的视图，读一遍即可。
+  // 只在 files 里没取到图片时才回退到 items——WebKit（WKWebView）常只填 items、files 为空。
+  for (const f of Array.from(dt.files || [])) push(f)
+  if (!out.length && dt.items) {
     for (const item of dt.items) {
       if (item.kind === 'file') push(item.getAsFile(), item.type)
     }
   }
-  for (const f of Array.from(dt.files || [])) push(f)
   return out
 }
 
@@ -1291,7 +1302,7 @@ function openTasks() {
         <textarea
           v-model="input"
           class="prompt-input"
-          placeholder="输入消息... (Enter 发送，Shift+Enter 换行；输入 / 调用技能，/vision 自检看图能力；可粘贴或拖入图片)"
+          placeholder="输入消息…"
           rows="1"
           @keydown="handleKeydown"
           @paste="handlePaste"
@@ -1299,6 +1310,7 @@ function openTasks() {
       </div>
 
       <div class="prompt-footer">
+        <div class="prompt-hint">Enter 发送 · Shift+Enter 换行 · / 调用技能 · /vision 自检看图 · 可粘贴或拖入图片</div>
         <button
           class="btn btn-primary send-btn"
           :disabled="(!input.trim() && !pendingFiles.length) || chatStore.isGenerating || !sessionId"
@@ -1330,6 +1342,10 @@ function openTasks() {
   display: flex;
   gap: $space-md;
   padding: 6px $space-lg;
+  // 与消息行同宽并居中：工具调用合并行必须和消息正文左右边缘对齐，
+  // 否则行宽收窄后这里会显得「凸出来」（度量见 design.md §2.2）
+  max-width: $measure-column;
+  margin-inline: auto;
   animation: msg-in 0.3s ease;
 }
 
@@ -1727,5 +1743,23 @@ function openTasks() {
   &:not(:disabled):active {
     transform: scale(0.97);
   }
+}
+// ===== 输入区说明行（spec「占位符与说明文案分离」/ design.md §1.3）=====
+// 快捷键与命令语法从 placeholder 移到这里常驻：placeholder 只回答「输入什么」，
+// 把四条说明压在它里面既读不清（原为 3.82:1 的灰字），输入一个字就消失。
+.prompt-footer {
+  align-items: center;
+  justify-content: space-between;
+  gap: $space-md;
+}
+
+.prompt-hint {
+  min-width: 0;
+  font-size: $font-size-xs;
+  line-height: $line-height-sm;
+  color: $color-text-muted;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 </style>

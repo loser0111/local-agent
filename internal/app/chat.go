@@ -295,7 +295,17 @@ func loadImages(s *media.AttachmentStore, atts []media.Attachment) ([]llm.LLMIma
 	}
 	images := make([]llm.LLMImage, 0, len(atts))
 	var notes []string
+	// 同一附件 ID 只发一次。附件是内容寻址的，重复引用必然指向同一张图；
+	// 而历史消息里可能因前端旧 bug 挂着两份引用（粘一张图贴出两条），
+	// 只在前端修会让那些既有会话继续按两份计费——每一轮都重发一遍历史图片。
+	seen := make(map[string]struct{}, len(atts))
 	for _, att := range atts {
+		if att.ID != "" {
+			if _, dup := seen[att.ID]; dup {
+				continue
+			}
+			seen[att.ID] = struct{}{}
+		}
 		if att.Kind != "" && att.Kind != media.AttachmentKindImage {
 			notes = append(notes, fmt.Sprintf("（附件 %s 类型不受支持，已忽略）", att.Describe()))
 			continue
@@ -1945,7 +1955,6 @@ func (a *App) runPlanPass(plan *store.Plan, useStream bool) (result *ChatResult)
 }
 
 // planRetryPolicy 计划步骤的自动重试策略。
-//
 type planRetryPolicy struct {
 	// MaxRetries 首次之外再试几次。默认 2（总计 3 次尝试）。
 	MaxRetries int

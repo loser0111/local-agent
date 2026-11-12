@@ -17,6 +17,13 @@
   /* 基础字号：设置页的「字体大小」滑块会覆盖它；
      $font-size-* / $line-height-* 均由它派生，因此改一处全局生效 */
   --font-size-base: 14px;
+  /* 正文可读性度量（见 design.md §2.2）：按**容器**比例自适应 + 上限封顶。
+     用百分比而不是 vw：百分比相对所在面板解析，把侧边栏/右侧面板的占宽一并算进去；
+     vw 只认视口，面板被挤窄时会把列撑出容器。上限 1120px：14px 基准下正文约
+     1044px，在宽屏上不会无限拉长。 */
+  --measure-column: min(1120px, 92%);
+  /* 正文净度量 = 列宽 - 头像(32) - 间隙(12) - 左右内边距(16×2) */
+  --measure-prose: calc(var(--measure-column) - 76px);
 }
 
 /* ===== 深色主题（默认；Dracula 配色） ===== */
@@ -30,7 +37,7 @@
 
   --color-text-primary: #f8f8f2;
   --color-text-secondary: #bcc2cd;
-  --color-text-muted: #6272a4;
+  --color-text-muted: #a3aacf;
 
   --color-primary: #bd93f9;
   --color-primary-hover: #caa7ff;
@@ -52,7 +59,7 @@
   --color-info-rgb: 139 233 253;
   --color-bg-tertiary-rgb: 68 71 90;
   --color-text-secondary-rgb: 188 194 205;
-  --color-text-muted-rgb: 98 114 164;
+  --color-text-muted-rgb: 163 170 207;
 
   /* 语义色的低透明度底色（徽章、提示条、差异高亮） */
   --color-primary-soft: rgb(189 147 249 / 0.12);
@@ -120,7 +127,7 @@
 
   --color-text-primary: #1e1f29;
   --color-text-secondary: #4b5063;
-  --color-text-muted: #7c8296;
+  --color-text-muted: #5f6678;
 
   --color-primary: #7c3aed;
   --color-primary-hover: #6d28d9;
@@ -140,7 +147,7 @@
   --color-info-rgb: 3 105 161;
   --color-bg-tertiary-rgb: 230 230 239;
   --color-text-secondary-rgb: 75 80 99;
-  --color-text-muted-rgb: 124 130 150;
+  --color-text-muted-rgb: 95 102 120;
 
   --color-primary-soft: rgb(124 58 237 / 0.10);
   --color-success-soft: rgb(21 128 61 / 0.12);
