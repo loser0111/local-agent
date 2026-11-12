@@ -6,6 +6,7 @@ import {
   AppendMessage,
   AppendConversation,
   UpdateSession,
+  SetSessionPlanMode,
   Chat,
   StopChat,
   GetContextStat,
@@ -202,6 +203,28 @@ export async function updateSession(id, patch) {
   Object.keys(patch).forEach((k) => {
     if (patch[k] !== undefined && patch[k] !== null) session[k] = patch[k]
   })
+  session.endAt = Date.now()
+  writeMockSessions(map)
+  return JSON.parse(JSON.stringify(session))
+}
+
+/**
+ * 设置会话的计划模式（会话级、粘性）。
+ *
+ * 走独立绑定而不是 updateSession：后端要在"会话正在运行"时拒绝切换，
+ * 而 updateSession 是通用字段更新、没有这层校验。
+ * @param {string} id
+ * @param {boolean} enabled
+ * @returns {Promise<object>} 更新后的会话
+ */
+export async function setPlanMode(id, enabled) {
+  if (isWails()) {
+    return await SetSessionPlanMode(id, !!enabled)
+  }
+  const map = readMockSessions()
+  const session = map[id]
+  if (!session) throw new Error(`会话 "${id}" 不存在`)
+  session.planMode = !!enabled
   session.endAt = Date.now()
   writeMockSessions(map)
   return JSON.parse(JSON.stringify(session))

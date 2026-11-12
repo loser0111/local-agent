@@ -294,6 +294,14 @@ export function ResolvePermission(arg1, arg2, arg3, arg4, arg5) {
   return window['go']['app']['App']['ResolvePermission'](arg1, arg2, arg3, arg4, arg5);
 }
 
+export function ResumePlan(arg1, arg2) {
+  return window['go']['app']['App']['ResumePlan'](arg1, arg2);
+}
+
+export function RetryPlan(arg1, arg2) {
+  return window['go']['app']['App']['RetryPlan'](arg1, arg2);
+}
+
 export function RunTaskNow(arg1) {
   return window['go']['app']['App']['RunTaskNow'](arg1);
 }
@@ -328,6 +336,10 @@ export function SetPromptCachePrefs(arg1) {
 
 export function SetSessionPermissionMode(arg1, arg2) {
   return window['go']['app']['App']['SetSessionPermissionMode'](arg1, arg2);
+}
+
+export function SetSessionPlanMode(arg1, arg2) {
+  return window['go']['app']['App']['SetSessionPlanMode'](arg1, arg2);
 }
 
 export function SetSubToolEnabled(arg1, arg2, arg3) {

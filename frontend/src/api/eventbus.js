@@ -99,6 +99,14 @@ function dispatchChat(ev) {
     case 'plan_update':
       h.onPlanUpdate?.(ev.plan, ev)
       break
+    // 会话不再有计划（规划器判定"无需计划"时把占位记录丢了）。
+    //
+    // 为什么不能复用 plan_update + plan=undefined：后端 ChatEvent.Plan 带 omitempty，
+    // nil 在 JSON 里就是"没这个字段"，前端无法与"事件没带计划"区分——
+    // 于是"清空"这个语义会静默丢失，计划面板永远停在"规划中"。
+    case 'plan_cleared':
+      h.onPlanCleared?.(ev)
+      break
     // 待办清单已变化（事件携带全量清单）。与 plan_update 同属"面板级"事件：
     // 不依附某一轮，前端按 sessionId 归位到对应会话的桶里。
     case 'todo_update':

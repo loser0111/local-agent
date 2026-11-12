@@ -20,11 +20,21 @@ const executing = computed(() => planStore.executing)
 // 审核编辑草稿（仅 awaiting_approval 可编辑）
 const draft = ref(null)
 const saving = ref(false)
+// 重试规划进行中。不并进 executing：它的语义是"计划步骤正在逐步跑"，
+// 而重试只是一次普通模型调用，停止按钮不该因此走计划取消那条路。
+const retrying = ref(false)
 
 const editable = computed(
   () => plan.value?.status === 'awaiting_approval' && !executing.value && !chatStore.isGenerating
 )
-const busy = computed(() => executing.value || saving.value)
+const busy = computed(() => executing.value || saving.value || retrying.value)
+
+// 「没跑完」的三种状态对用户是同一件事，恢复动作也应当一致（原地续跑）。
+// 与后端 resumePlan 接受的集合保持一致。
+const RESUMABLE = ['failed', 'interrupted', 'cancelled']
+const resumable = computed(() => RESUMABLE.includes(plan.value?.status))
+const planFailed = computed(() => plan.value?.status === 'plan_failed')
+const planning = computed(() => plan.value?.status === 'planning')
 const draftValid = computed(
   () =>
     draft.value &&
@@ -33,10 +43,17 @@ const draftValid = computed(
 )
 
 const STATUS_META = {
+  // planning / plan_failed 是规划阶段的状态：它们的存在本身就是"规划失败不再静默"——
+  // 失败时那条记录还在、还带着原始请求，所以能一键重试，不必让用户重打一遍需求。
+  planning: { label: '规划中', cls: 'info' },
+  plan_failed: { label: '规划失败', cls: 'error' },
   awaiting_approval: { label: '待审核', cls: 'warning' },
   running: { label: '执行中', cls: 'info' },
   completed: { label: '已完成', cls: 'success' },
   failed: { label: '失败', cls: 'error' },
+  // interrupted 与 failed 分开：前者是"没人接着跑了"（进程退出、运行登记丢失），
+  // 不含"这一步做错了"的判断，恢复动作也是原地续跑。
+  interrupted: { label: '已中断', cls: 'warning' },
   cancelled: { label: '已取消', cls: 'muted' },
 }
 
@@ -45,6 +62,7 @@ const STEP_ICON = {
   running: '🔄',
   done: '✅',
   failed: '❌',
+  interrupted: '⚠️',
   skipped: '⏭️',
 }
 
@@ -135,10 +153,29 @@ async function cancelExec() {
   }
 }
 
-/** 从失败/取消处继续执行：已完成的步骤不会重跑 */
+/**
+ * 从断点继续执行：已完成的步骤不会重跑。
+ *
+ * 走 planStore.resume 而不是 execute：后者只接受待审核的计划（后端会拒绝其余状态），
+ * 语义也确实是两件事——"批准这份计划" vs "把没跑完的接着跑完"。
+ */
 async function resumeExec() {
   if (!plan.value) return
-  await planStore.execute(sessionId.value, plan.value.id, settingStore.settings.streamResponse)
+  await planStore.resume(sessionId.value, plan.value.id, settingStore.settings.streamResponse)
+}
+
+/** 规划失败后重试：复用后端保存的原始请求，不需要用户重打需求 */
+async function retryPlanning() {
+  if (!plan.value) return
+  retrying.value = true
+  try {
+    const res = await planStore.retry(sessionId.value, plan.value.id, settingStore.settings.streamResponse)
+    if (res?.error && !res?.plan) {
+      alert(`重试规划失败：${res.error}`)
+    }
+  } finally {
+    retrying.value = false
+  }
 }
 
 /** 退回待审核以便修改步骤（失败后「修改后重试」） */
@@ -164,7 +201,7 @@ function backToChat() {
       <div v-if="!plan" class="plan-empty">
         <div class="empty-icon">🗒️</div>
         <p>本会话还没有计划。</p>
-        <p class="empty-hint">在聊天输入框开启「计划」并发送复杂任务即可生成。</p>
+        <p class="empty-hint">在聊天输入框开启「计划」并发送复杂任务即可生成（该开关按会话保存）。</p>
       </div>
 
       <template v-else>
@@ -218,7 +255,21 @@ function backToChat() {
 
         <!-- 底部按钮 -->
         <div class="plan-footer">
-          <template v-if="plan.status === 'awaiting_approval'">
+          <!-- 规划中：只有取消（它同样走计划取消，后端会断开在途的规划请求） -->
+          <template v-if="planning">
+            <p class="resume-hint">正在生成计划…（网络不稳定时可以取消后重试）</p>
+            <button class="btn cancel-btn" @click="cancelExec">取消</button>
+          </template>
+          <!-- 规划失败：原始请求已保存，一键重试即可，不需要重打需求 -->
+          <template v-else-if="planFailed">
+            <p class="resume-hint">
+              生成计划时出错了{{ plan.error ? `：${plan.error}` : '。' }}原始请求已保存，可直接重试。
+            </p>
+            <button class="btn btn-primary" :disabled="busy" @click="retryPlanning">
+              {{ retrying ? '重试中...' : '重试规划' }}
+            </button>
+          </template>
+          <template v-else-if="plan.status === 'awaiting_approval'">
             <button class="btn" :disabled="busy" @click="saveOnly">保存修改</button>
             <button
               class="btn btn-primary"
@@ -231,18 +282,21 @@ function backToChat() {
           <template v-else-if="plan.status === 'running'">
             <button class="btn cancel-btn" @click="cancelExec">取消执行</button>
           </template>
-          <!-- 失败/取消：可从断点继续，也可先改计划再执行 -->
-          <template v-else-if="plan.status === 'failed' || plan.status === 'cancelled'">
+          <!-- 失败/中断/取消：可从断点继续，也可先改计划再执行 -->
+          <template v-else-if="resumable">
             <p class="resume-hint">
               <template v-if="plan.status === 'failed'">
-                执行中断了。可以直接重新执行（已完成的步骤不会重跑），也可以先修改计划再执行。
+                这一步失败了{{ plan.error ? `：${plan.error}` : '。' }}已完成与未执行的步骤都保留着，可以直接继续。
+              </template>
+              <template v-else-if="plan.status === 'interrupted'">
+                执行被中断了{{ plan.error ? `（${plan.error}）` : '。' }}已完成与未执行的步骤都保留着，可以直接继续。
               </template>
               <template v-else>计划已取消，已完成的步骤会保留。</template>
             </p>
             <button class="btn btn-primary" :disabled="busy" @click="resumeExec">
-              {{ executing ? '执行中...' : '重新执行' }}
+              {{ executing ? '执行中...' : '继续执行' }}
             </button>
-            <button class="btn" :disabled="busy" @click="reopenForEdit">修改后重试</button>
+            <button class="btn" :disabled="busy" @click="reopenForEdit">编辑计划</button>
           </template>
           <template v-else>
             <p class="terminal-hint">

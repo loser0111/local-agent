@@ -1,8 +1,9 @@
 # Plan & Execute（规划-执行）模式实现方案（开发依据）
 
 > - 项目：`E:\learn\local-agent`（Wails v2 + Go 后端 + Vue 3 前端）
-> - 状态：**已实施**（`internal/store/plan.go` + `App.SavePlan`/`ExecutePlan`/`ReopenPlan`/`CancelPlan`，前端 `frontend/src/panes/PlanPane.vue` + `frontend/src/stores/plan.js`）。
->   下文是设计稿；注意它写于改造前，正文里的 `MaxChatTurns=50` 等表述已过时（现为 `internal/app/chat.go:43` 的 200）。
+> - 状态：**已实施**（`internal/store/plan.go` + `App.SavePlan`/`ExecutePlan`/`ResumePlan`/`RetryPlan`/`CancelPlan`，前端 `frontend/src/panes/PlanPane.vue` + `frontend/src/stores/plan.js`）。
+>   下文是设计稿；注意它写于改造前，正文里的 `MaxChatTurns=50` 等表述已过时（现为 `internal/app/chat.go` 的 200）。
+>   **计划状态的完整定义与流转以第十二章为准**（第一章至第十章成文时尚无 planning / plan_failed / interrupted 三个状态）。
 > - 用途：为 local-agent 引入 **Plan & Execute** 能力：复杂请求先规划成可审核的任务清单，用户批准后分步执行、进度可视。本文档为后续开发的唯一依据，包含机制解析、数据契约、关键代码、边界与验收标准。
 
 ---
@@ -830,6 +831,61 @@ go test ./... -run Plan      # 计划相关单测
 | 审核闸门 | `awaiting_approval` 状态下才可编辑/批准 |
 | 协作式取消 | 只在步骤/循环边界生效的取消标志，不强杀进行中的调用 |
 | 确定性压缩 | 不依赖 LLM 的历史截断（tool 结果 200 字），仅计划执行启用 |
+
+---
+
+## 十二、计划的状态机与韧性设计（增量，覆盖前文的简化描述）
+
+> 本章记录「网络/进程中断后计划模式不丢」这一轮改造后的**权威**状态定义。
+> 规划产物与决策依据见 `openspec/changes/archive/2026-11-04-plan-mode-resilience/`（proposal / specs / design / tasks），
+> 能力规范已归档进 `openspec/specs/session-plan-mode/` 与 `openspec/specs/plan-execution-recovery/`。
+
+### 12.1 状态定义
+
+**计划级**（`internal/store/plan.go`）
+
+| 状态 | 含义 | 出口 |
+| --- | --- | --- |
+| `planning` | 已收到计划请求，正在调用规划器 | 成功 → `awaiting_approval`；失败 → `plan_failed`；平凡请求 → 记录被删除 |
+| `plan_failed` | 规划失败（网络、输出不可解析…） | `RetryPlan` → `planning` |
+| `awaiting_approval` | 待审核，可编辑步骤 | `ExecutePlan` → `running` |
+| `running` | 执行中 | 完成 → `completed`；某步失败 → `failed`；用户取消 → `cancelled`；进程退出 → `interrupted` |
+| `failed` | 某步执行失败（可续跑） | `ResumePlan` → `running`；`ReopenPlan` → `awaiting_approval` |
+| `interrupted` | 执行被打断（进程退出、运行登记丢失） | 同上 |
+| `cancelled` | 用户取消 | 同上 |
+| `completed` | 全部步骤完成 | — |
+
+**步骤级**：`pending` / `running` / `done` / `failed` / `interrupted` / `skipped`。
+
+- `failed` 与 `interrupted` 的区别：前者「跑过并且错了」，后者「没跑完就没了」。两者的重试风险不同（前者要防重复副作用）。
+- `skipped` **只在用户取消时产生**。失败时剩余步骤保持 `pending`——它们一行都没跑，标成跳过会让随后的「继续执行」看起来像在重跑被放弃的步骤。
+
+### 12.2 入口与语义
+
+| 绑定 | 接受的状态 | 语义 |
+| --- | --- | --- |
+| `ExecutePlan(planID, useStream)` | 仅 `awaiting_approval` | 用户批准了这份计划 |
+| `ResumePlan(planID, useStream)` | `failed` / `interrupted` / `cancelled` | 把没跑完的接着跑完，已完成的步骤不重跑 |
+| `ReopenPlan(planID)` | 失败/取消/完成/中断 | 退回待审核，允许改步骤后再批准 |
+| `RetryPlan(planID, useStream)` | 仅 `plan_failed` | 复用 `Plan.Query` 重新规划，不追加用户消息 |
+| `CancelPlan(planID)` | `running`（或执行协程已消失的残留） | 协作式取消；找不到活跃运行时强制收尾为 `cancelled` |
+
+三者共用 `runPlanPass`（一次执行回合）：`executePlan` 与 `resumePlan` 只在「进来之前做的事」上不同（状态校验、未完成步骤复位），执行体必须完全一致。
+
+### 12.3 韧性机制
+
+1. **规划意图留痕**：`ChatPlan` 先落一条 `planning` 记录（含 `Plan.Query`）再调规划器。规划失败因此可解释、可重试，不必让用户重打需求。
+2. **规划期崩溃恢复**：`PlanStore.loadAll` 与 `GetSessionPlan` 的惰性对账都会把失去运行的 `planning` 转成 `plan_failed`。
+3. **步骤级自动重试**：按 `llm.ErrorKind.Retryable`（网络/超时/限流/5xx）在步骤内重试 2 次（2s→8s 退避）。认证与请求错误立即失败。退避等待同时监听 ctx 与软取消信号，用户点「停止」立即生效。
+4. **步骤尝试幂等**：`PlanStep.Attempt` + `Message.PlanStepIndex/Attempt`；同一步骤的请求消息只写一条，构造请求时同一步骤只保留最后一次尝试的过程（`agent.LatestAttemptMessages`，不删库）。
+5. **重试注入对账信息**：第 N 次尝试的系统提示词写明上次执行过的工具与失败原因，要求模型先核对再动手（引擎无事务，不假装幂等）。
+6. **启动恢复**：`loadAll` 把 `running` 计划恢复为 `interrupted` 并保留已完成步骤与摘要（不再一刀切判 failed）。
+7. **惰性对账**：`GetSessionPlan` 在读取时检查「状态是 running/planning 但注册表里没有活跃运行」，就地收尾并推事件——界面只要拉一次数据就收敛，不需要重启应用。
+8. **事件顺序**：`Plan.Revision` 每次落盘自增，前端丢弃版本号不高于当前的更新；`plan_update` 另带 `RunID` 区分运行（续跑会产生新 RunID）。
+
+### 12.4 会话级计划模式
+
+计划开关是**会话字段**（`Session.PlanMode`，粘性），不再是前端组件的内存态：切会话、刷新页面、重开应用都保持。运行中（规划或执行）禁止切换——否则「界面上的开关」与「实际在跑的东西」会分叉。
 
 ---
 

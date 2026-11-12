@@ -40,6 +40,12 @@ type App struct {
 	planStore    *store.PlanStore
 	memory       *memstore.MemoryStore
 
+	// planRetry 计划步骤的自动重试策略。nil 表示用默认值（再试 2 次，2s/8s 退避）。
+	//
+	// 做成字段而不是包级常量：单测要能注入"不等待"的策略，否则每个重试用例都要
+	// 真睡几秒（那些退避是生产行为，不该在单测里重复付）。
+	planRetry *planRetryPolicy
+
 	// baseDir 本地数据目录（~/.local-agent）：权限配置的用户全局层也放在这里
 	baseDir string
 
@@ -810,7 +816,11 @@ func (a *App) Chat(sessionID string, query string, useStream bool, usePlan bool)
 	}
 	// 取消不走错误路径：它是用户的主动行为，结果照常返回（前端据 cancelled 字段
 	// 显示"已停止"）。否则用户点一下停止会看到"发送失败：执行已取消"。
-	if result.Error != "" && result.Reply == "" && !result.Cancelled {
+	//
+	// 带 Plan 的失败同样不走错误路径：规划失败时结果里挂着那条 plan_failed 记录，
+	// 前端要靠它渲染「规划失败 + 重试」。转成 Go error 的话，前端拿到的只有一句话，
+	// 重试按钮就没有依据了（计划 ID 都没了）。
+	if result.Error != "" && result.Reply == "" && !result.Cancelled && result.Plan == nil {
 		return result, fmt.Errorf("%s", result.Error)
 	}
 	return result, nil
@@ -980,9 +990,70 @@ func (a *App) SetPromptCachePrefs(p store.PromptCachePrefs) (store.PromptCachePr
 }
 
 // ===== 计划管理（Plan & Execute）=====
-// GetSessionPlan 返回会话当前（最新创建的）计划；无计划时返回 nil
+// GetSessionPlan 返回会话当前（最新创建的）计划；无计划时返回 nil。
+//
+// 读取时做一次**惰性对账**：计划停在 running、但注册表里没有任何活跃运行——
+// 这说明执行协程已经不在了（崩溃、被强杀、或事件通道断了导致前端以为还在跑）。
+// 此时把它收尾为 interrupted 并推事件，界面就地从"执行中"切到"可继续执行"，
+// 不需要用户重启应用、也不需要前端去猜。
+//
+// 为什么放在读取路径而不是定时巡检：界面要看的正是这份状态，任何看到它的时刻
+// 都是修正它的最佳时刻；而定时巡检要么白跑（没人看），要么要额外维护一张脏表。
 func (a *App) GetSessionPlan(sessionID string) *store.Plan {
-	return a.planStore.GetBySession(sessionID)
+	plan := a.planStore.GetBySession(sessionID)
+	a.reconcileStalePlan(plan)
+	return plan
+}
+
+// reconcileStalePlan 把"没有活跃运行却在 running"的计划收尾为 interrupted（幂等）。
+func (a *App) reconcileStalePlan(plan *store.Plan) {
+	if plan == nil {
+		return
+	}
+	// 只对"应该有人在跑"的状态对账。planning 也在此列：它在等规划器返回，
+	// 同样不该在没有活跃运行时停在原地（见 PlanStore.loadAll 的同类处理）。
+	switch plan.Status {
+	case store.PlanRunning:
+	case store.PlanPlanning:
+		a.reconcileStalePlanning(plan)
+		return
+	default:
+		return
+	}
+	if a.runs.ByPlan(plan.ID) != nil {
+		return // 真的在跑：不动
+	}
+	a.markPlanInterrupted(plan, "执行中断（没有活跃的运行）")
+}
+
+// reconcileStalePlanning 规划中途失去运行：转 plan_failed（可重试）。
+func (a *App) reconcileStalePlanning(plan *store.Plan) {
+	// 规划期的运行登记用的是会话索引（BeginExclusive(sessionID, "")），
+	// 因此这里按会话查：同一会话的规划与执行互斥，查得到就说明规划正在进行。
+	if a.runs.BySession(plan.SessionID) != nil {
+		return
+	}
+	plan.Status = store.PlanPlanFailed
+	plan.Error = "规划中断（没有活跃的运行），可重试"
+	_ = a.planStore.Save(plan)
+	a.emitPlanUpdate(plan, -1)
+}
+
+// SetSessionPlanMode 设置某会话的计划模式（会话级、粘性）。
+//
+// 运行中直接拒绝：计划执行或规划进行时切换开关，会让"界面上的开关"与"实际在跑的东西"
+// 分叉——而这一整套改造要修的正是状态分叉。
+func (a *App) SetSessionPlanMode(sessionID string, enabled bool) (*store.Session, error) {
+	if strings.TrimSpace(sessionID) == "" {
+		return nil, fmt.Errorf("会话 ID 不能为空")
+	}
+	if _, err := a.sessionStore.GetSession(sessionID); err != nil {
+		return nil, err
+	}
+	if r := a.runs.BySession(sessionID); r != nil {
+		return nil, fmt.Errorf("会话正在运行，请等它结束后再切换计划模式")
+	}
+	return a.sessionStore.UpdateSession(sessionID, store.SessionPatch{PlanMode: &enabled})
 }
 
 // ListPlans 返回会话全部历史计划（按创建时间倒序）
@@ -1017,9 +1088,18 @@ func (a *App) SavePlan(plan *store.Plan) error {
 	return a.planStore.Save(cur)
 }
 
-// ExecutePlan 逐步执行计划（长耗时，结束时返回；过程事件经 chat:event 推送）
+// ExecutePlan 首次执行一份待审核的计划（长耗时，结束时返回；过程事件经 chat:event 推送）。
+// 只接受 awaiting_approval：失败/中断/取消过的计划要用 ResumePlan。
 func (a *App) ExecutePlan(planID string, useStream bool) *ChatResult {
 	return a.executePlan(planID, useStream)
+}
+
+// ResumePlan 从断点续跑：保留已完成步骤与其摘要，从第一个未完成步骤接着执行。
+//
+// 与 ExecutePlan 分开而不是给它加一个 resume 参数：调用方（界面按钮）本来就要区分
+// 「批准执行」与「继续执行」，两者对用户是不同的事。合起来只会让状态校验变成一团 if。
+func (a *App) ResumePlan(planID string, useStream bool) *ChatResult {
+	return a.resumePlan(planID, useStream)
 }
 
 // ReopenPlan 把已结束的计划退回待审核（失败后「修改后重试」的入口）。
@@ -1046,6 +1126,26 @@ func (a *App) CancelPlan(planID string) error {
 	if err != nil {
 		return err
 	}
+
+	// 规划阶段：那是会话级的运行登记（BeginExclusive(sessionID, "")，不带 planID），
+	// 因此按 planID 找不到它，要按会话再查一次。
+	//
+	// 用户看到的都是"这个计划还没完成，我要停掉"，不该因为内部把规划与执行分成两种
+	// 运行就让「取消」在规划期失效（原先它会直接报"计划未在执行中"）。
+	if plan.Status == store.PlanPlanning {
+		if hit, _ := a.runs.StopSession(plan.SessionID, false); hit {
+			return nil // 规划协程会走 finishPlanningCancelled 收尾
+		}
+		// 没有活跃规划（协程已消失）：就地收尾，别把它留成"永远规划中"。
+		plan.Status = store.PlanCancelled
+		plan.Error = "规划已取消"
+		if err := a.planStore.Save(plan); err != nil {
+			return err
+		}
+		a.emitPlanUpdate(plan, -1)
+		return nil
+	}
+
 	if plan.Status != store.PlanRunning {
 		return fmt.Errorf("计划未在执行中: %s", planID)
 	}

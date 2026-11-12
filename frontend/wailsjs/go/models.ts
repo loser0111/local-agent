@@ -187,6 +187,7 @@ export namespace app {
 	    diff?: diff.DiffFile[];
 	    plan?: store.Plan;
 	    error?: string;
+	    errorKind?: string;
 	    cancelled?: boolean;
 	    cancelKind?: string;
 	    exhausted?: boolean;
@@ -205,6 +206,7 @@ export namespace app {
 	        this.diff = this.convertValues(source["diff"], diff.DiffFile);
 	        this.plan = this.convertValues(source["plan"], store.Plan);
 	        this.error = source["error"];
+	        this.errorKind = source["errorKind"];
 	        this.cancelled = source["cancelled"];
 	        this.cancelKind = source["cancelKind"];
 	        this.exhausted = source["exhausted"];
@@ -1852,6 +1854,8 @@ export namespace store {
 	    toolCallId?: string;
 	    createdAt: number;
 	    attachments?: media.Attachment[];
+	    planStepIndex?: number;
+	    attempt?: number;
 	    thinking?: string;
 	    thinkingSignature?: string;
 	
@@ -1868,6 +1872,8 @@ export namespace store {
 	        this.toolCallId = source["toolCallId"];
 	        this.createdAt = source["createdAt"];
 	        this.attachments = this.convertValues(source["attachments"], media.Attachment);
+	        this.planStepIndex = source["planStepIndex"];
+	        this.attempt = source["attempt"];
 	        this.thinking = source["thinking"];
 	        this.thinkingSignature = source["thinkingSignature"];
 	    }
@@ -1923,6 +1929,8 @@ export namespace store {
 	    error?: string;
 	    startedAt?: number;
 	    finishedAt?: number;
+	    attempt?: number;
+	    contextMark?: number;
 	
 	    static createFrom(source: any = {}) {
 	        return new PlanStep(source);
@@ -1938,6 +1946,8 @@ export namespace store {
 	        this.error = source["error"];
 	        this.startedAt = source["startedAt"];
 	        this.finishedAt = source["finishedAt"];
+	        this.attempt = source["attempt"];
+	        this.contextMark = source["contextMark"];
 	    }
 	}
 	export class Plan {
@@ -1948,6 +1958,9 @@ export namespace store {
 	    steps: PlanStep[];
 	    createdAt: number;
 	    updatedAt: number;
+	    query?: string;
+	    error?: string;
+	    revision?: number;
 	
 	    static createFrom(source: any = {}) {
 	        return new Plan(source);
@@ -1962,6 +1975,9 @@ export namespace store {
 	        this.steps = this.convertValues(source["steps"], PlanStep);
 	        this.createdAt = source["createdAt"];
 	        this.updatedAt = source["updatedAt"];
+	        this.query = source["query"];
+	        this.error = source["error"];
+	        this.revision = source["revision"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -2105,6 +2121,7 @@ export namespace store {
 	    diffTouched?: string[];
 	    enabledTools?: string[];
 	    enabledSkills?: string[];
+	    planMode?: boolean;
 	    contextSummary?: string;
 	    contextCoveredUpTo?: number;
 	    contextSummaryAt?: number;
@@ -2143,6 +2160,7 @@ export namespace store {
 	        this.diffTouched = source["diffTouched"];
 	        this.enabledTools = source["enabledTools"];
 	        this.enabledSkills = source["enabledSkills"];
+	        this.planMode = source["planMode"];
 	        this.contextSummary = source["contextSummary"];
 	        this.contextCoveredUpTo = source["contextCoveredUpTo"];
 	        this.contextSummaryAt = source["contextSummaryAt"];
@@ -2218,6 +2236,7 @@ export namespace store {
 	    project?: string;
 	    thinkingEnabled?: boolean;
 	    thinkingBudget?: number;
+	    planMode?: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new SessionPatch(source);
@@ -2233,6 +2252,7 @@ export namespace store {
 	        this.project = source["project"];
 	        this.thinkingEnabled = source["thinkingEnabled"];
 	        this.thinkingBudget = source["thinkingBudget"];
+	        this.planMode = source["planMode"];
 	    }
 	}
 	
