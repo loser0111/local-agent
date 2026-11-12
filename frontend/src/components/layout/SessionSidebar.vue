@@ -233,12 +233,12 @@ async function handleDelete(e, id) {
             <!-- 多会话并行时的状态标记：运行中 / 等待应答。折叠态只留一个小圆点，
                  展开态在 meta 行里给一行文字——否则用户不知道后台还有几条在跑。 -->
             <span
-              v-if="runningIds.includes(s.id)"
+              v-if="collapsed && runningIds.includes(s.id)"
               class="run-dot"
               :title="'正在运行（切到别的会话不会中断它）'"
             />
             <span
-              v-if="waitingIds.includes(s.id)"
+              v-if="collapsed && waitingIds.includes(s.id)"
               class="wait-dot"
               :title="'有一个授权或提问在等你的答复'"
             />
@@ -247,14 +247,15 @@ async function handleDelete(e, id) {
               <div class="session-meta">
                 <template v-if="runningIds.includes(s.id)">
                   <span class="chip chip-run">运行中</span>
-                  <span>·</span>
+                  
                 </template>
                 <template v-else-if="waitingIds.includes(s.id)">
                   <span class="chip chip-wait">待应答</span>
-                  <span>·</span>
+                  
                 </template>
-                <span>{{ s.status === 'active' ? '活跃' : s.status === 'completed' ? '已完成' : s.status === 'archived' ? '归档' : s.status }}</span>
-                <span>·</span>
+                <!-- 状态已由左侧 status-dot 表达，此处不再重复状态词（见 frontend-visual-system
+                     「状态表达的冗余禁止」）：45 条会话里「活跃」重复 45 次，信息量为零。 -->
+                
                 <span>{{ formatTime(s.endAt || s.startAt) }}</span>
               </div>
             </div>

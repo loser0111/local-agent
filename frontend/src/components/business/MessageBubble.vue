@@ -165,6 +165,10 @@ function openPreview(id) {
 .message {
   display: flex;
   gap: $space-md;
+  // 行宽度量（design.md §2.2）：长文每行落在 65–75 字符区间，不随窗口变宽而拉长。
+  // 列宽已包含头像/间隙/内边距的固定占位，故正文净度量正好等于 $measure-prose。
+  max-width: $measure-column;
+  margin-inline: auto;
   padding: $space-md $space-lg;
 }
 
@@ -700,5 +704,13 @@ function openPreview(id) {
       border-radius: 6px;
     }
   }
+}
+// ===== 正文排版度量（design.md §2.3）=====
+// 放在末尾覆盖上文 .message-content 的「13px + 24px」组合：那组值一是字号低于正文档位
+// （应为 14px），二是行高用 `基准 + 6px` 的加性写法、比值 1.85 且不随字号基准缩放。
+// 这里改用正文档位字号 + 无单位倍数行高，两张消息（普通 / markdown）同时生效。
+.message-content {
+  font-size: $font-size-md;
+  line-height: $line-height-prose;
 }
 </style>

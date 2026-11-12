@@ -87,6 +87,16 @@ $line-height-md: calc(var(--font-size-base) + 6px);
 $line-height-lg: calc(var(--font-size-base) + 10px);
 $line-height-xl: calc(var(--font-size-base) + 14px);
 
+// 正文行高：用无单位倍数而不是 px 增量。
+// 上面的 $line-height-* 是「基准 + 固定 px」，字号一放大比值就摊薄（18px 时降到 1.33），
+// 因此正文单独用倍数——浏览器按当前字号计算，天然等比，落在 1.5–1.75 的建议区间内。
+$line-height-prose: 1.7;
+
+// ===== 可读性度量 =====
+// 正文最大行宽与消息列宽（取值理由见 openspec/changes/ui-polish-readability/design.md §2.2）
+$measure-prose: var(--measure-prose);
+$measure-column: var(--measure-column);
+
 $font-weight-normal: 400;
 $font-weight-medium: 500;
 $font-weight-semibold: 600;

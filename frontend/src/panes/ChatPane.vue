@@ -1291,7 +1291,7 @@ function openTasks() {
         <textarea
           v-model="input"
           class="prompt-input"
-          placeholder="输入消息... (Enter 发送，Shift+Enter 换行；输入 / 调用技能，/vision 自检看图能力；可粘贴或拖入图片)"
+          placeholder="输入消息…"
           rows="1"
           @keydown="handleKeydown"
           @paste="handlePaste"
@@ -1299,6 +1299,7 @@ function openTasks() {
       </div>
 
       <div class="prompt-footer">
+        <div class="prompt-hint">Enter 发送 · Shift+Enter 换行 · / 调用技能 · /vision 自检看图 · 可粘贴或拖入图片</div>
         <button
           class="btn btn-primary send-btn"
           :disabled="(!input.trim() && !pendingFiles.length) || chatStore.isGenerating || !sessionId"
@@ -1330,6 +1331,10 @@ function openTasks() {
   display: flex;
   gap: $space-md;
   padding: 6px $space-lg;
+  // 与消息行同宽并居中：工具调用合并行必须和消息正文左右边缘对齐，
+  // 否则行宽收窄后这里会显得「凸出来」（度量见 design.md §2.2）
+  max-width: $measure-column;
+  margin-inline: auto;
   animation: msg-in 0.3s ease;
 }
 
@@ -1727,5 +1732,23 @@ function openTasks() {
   &:not(:disabled):active {
     transform: scale(0.97);
   }
+}
+// ===== 输入区说明行（spec「占位符与说明文案分离」/ design.md §1.3）=====
+// 快捷键与命令语法从 placeholder 移到这里常驻：placeholder 只回答「输入什么」，
+// 把四条说明压在它里面既读不清（原为 3.82:1 的灰字），输入一个字就消失。
+.prompt-footer {
+  align-items: center;
+  justify-content: space-between;
+  gap: $space-md;
+}
+
+.prompt-hint {
+  min-width: 0;
+  font-size: $font-size-xs;
+  line-height: $line-height-sm;
+  color: $color-text-muted;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 </style>
